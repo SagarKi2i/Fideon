@@ -1,0 +1,74 @@
+# ─────────────────────────────────────────────────────────────
+# PLACE AT: .github/workflows/release-train.yml
+# ─────────────────────────────────────────────────────────────
+# Run manually to cut a new production release from v1-staging.
+# Creates a new versioned branch (e.g. v2), tags it, updates VERSION.md.
+
+name: Release Train
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. v2 or v2.1.0)'
+        required: true
+      frontend_version:
+        description: 'Frontend version (from neurapod-app/package.json)'
+        required: true
+      backend_version:
+        description: 'Backend version (from backend/package.json)'
+        required: true
+
+jobs:
+  cut-release:
+    runs-on: ubuntu-latest
+    environment: production     # Requires Product Owner approval in GitHub
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v1-staging       # Always cut from staging
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create release branch
+        run: |
+          BRANCH="${{ github.event.inputs.version }}"
+          git checkout -b "$BRANCH"
+          echo "✓ Created branch $BRANCH from v1-staging @ $(git rev-parse --short HEAD)"
+
+      - name: Update VERSION.md
+        run: |
+          cat > VERSION.md << EOF
+          # Release ${{ github.event.inputs.version }}
+
+          | Component | Version                                    | Commit SHA               |
+          |-----------|--------------------------------------------|--------------------------|
+          | Frontend  | ${{ github.event.inputs.frontend_version }} | $(git rev-parse HEAD)   |
+          | Backend   | ${{ github.event.inputs.backend_version }}  | $(git rev-parse HEAD)   |
+
+          Released: $(date -u +"%Y-%m-%d %H:%M UTC")
+          EOF
+
+          git add VERSION.md
+          git commit -m "chore: release ${{ github.event.inputs.version }} — update VERSION.md"
+
+      - name: Push branch and tag
+        run: |
+          git push origin "${{ github.event.inputs.version }}"
+          git tag "release/${{ github.event.inputs.version }}"
+          git push origin "release/${{ github.event.inputs.version }}"
+
+      - name: Summary
+        run: |
+          echo "════════════════════════════════════════"
+          echo "  Release Branch : ${{ github.event.inputs.version }}"
+          echo "  Tag            : release/${{ github.event.inputs.version }}"
+          echo "  Frontend       : ${{ github.event.inputs.frontend_version }}"
+          echo "  Backend        : ${{ github.event.inputs.backend_version }}"
+          echo "  Next step      : Push to ${{ github.event.inputs.version }} triggers production deploy"
+          echo "════════════════════════════════════════"

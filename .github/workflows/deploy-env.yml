@@ -1,0 +1,155 @@
+# ─────────────────────────────────────────────────────────────
+# PLACE AT: .github/workflows/_reusable/deploy-env.yml
+# ─────────────────────────────────────────────────────────────
+# Reusable Docker deployment to Azure VM via SSH
+# Called by frontend-ci.yml and backend-ci.yml after images are pushed
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string           # development | staging | production
+      component:
+        required: true
+        type: string           # neurapod-app | backend
+      container_name:
+        required: true
+        type: string           # neurapod-frontend | neurapod-backend
+      port:
+        required: true
+        type: string           # 4200 | 8080
+      image_sha:
+        required: true
+        type: string
+    secrets:
+      AZURE_VM_HOST:
+        required: true
+      AZURE_VM_USERNAME:
+        required: true
+      CHATBOT_SERVER_KEY:
+        required: true
+      AZURE_CR_USERNAME:
+        required: true
+      AZURE_CR_PASSWORD:
+        required: true
+      NEXT_PUBLIC_SUPABASE_URL:
+        required: false
+      NEXT_PUBLIC_SUPABASE_ANON_KEY:
+        required: false
+      SUPABASE_SERVICE_ROLE_KEY:
+        required: false
+      SUPABASE_JWT_SECRET:
+        required: false
+      DATABASE_URL:
+        required: false
+      GROQ_API_KEY:
+        required: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run staging automation scripts
+        if: inputs.environment == 'staging'
+        run: |
+          chmod +x ./scripts/staging-automation.sh 2>/dev/null || true
+          ./scripts/staging-automation.sh 2>/dev/null || echo "⚠ No staging-automation.sh — skipping"
+
+      - name: Write SSH key
+        run: |
+          echo "${{ secrets.CHATBOT_SERVER_KEY }}" > ssh_key
+          chmod 600 ssh_key
+
+      - name: Deploy ${{ inputs.component }} → ${{ inputs.environment }}
+        run: |
+          ssh -i ssh_key \
+              -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=30 \
+              ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} << 'ENDSSH'
+
+            set -e
+
+            echo "──────────────────────────────────────"
+            echo " Login to ACR"
+            echo "──────────────────────────────────────"
+            echo "${{ secrets.AZURE_CR_PASSWORD }}" | \
+              docker login neurapodacr.azurecr.io \
+                -u "${{ secrets.AZURE_CR_USERNAME }}" \
+                --password-stdin
+
+            echo "──────────────────────────────────────"
+            echo " Pull image"
+            echo "──────────────────────────────────────"
+            docker pull neurapodacr.azurecr.io/${{ inputs.component }}:${{ inputs.image_sha }}
+
+            echo "──────────────────────────────────────"
+            echo " Stop & remove old container"
+            echo "──────────────────────────────────────"
+            docker stop ${{ inputs.container_name }} 2>/dev/null || true
+            docker rm   ${{ inputs.container_name }} 2>/dev/null || true
+
+            echo "──────────────────────────────────────"
+            echo " Start new container"
+            echo "──────────────────────────────────────"
+            if [ "${{ inputs.component }}" = "neurapod-app" ]; then
+              docker run -d \
+                --name ${{ inputs.container_name }} \
+                --restart unless-stopped \
+                -p ${{ inputs.port }}:${{ inputs.port }} \
+                -e NEXT_PUBLIC_SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
+                -e NEXT_PUBLIC_SUPABASE_ANON_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}" \
+                neurapodacr.azurecr.io/${{ inputs.component }}:${{ inputs.image_sha }}
+            else
+              docker run -d \
+                --name ${{ inputs.container_name }} \
+                --restart unless-stopped \
+                -p ${{ inputs.port }}:${{ inputs.port }} \
+                -e SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
+                -e SUPABASE_ANON_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}" \
+                -e SUPABASE_SERVICE_ROLE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+                -e SUPABASE_JWT_SECRET="${{ secrets.SUPABASE_JWT_SECRET }}" \
+                -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+                -e GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" \
+                neurapodacr.azurecr.io/${{ inputs.component }}:${{ inputs.image_sha }}
+            fi
+
+            echo "──────────────────────────────────────"
+            echo " Waiting for startup (30s)..."
+            echo "──────────────────────────────────────"
+            sleep 30
+
+            echo "──────────────────────────────────────"
+            echo " Container status"
+            echo "──────────────────────────────────────"
+            docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" \
+              --filter name=${{ inputs.container_name }}
+
+            echo ""
+            echo "══════════════════════════════════════"
+            echo " LOGS — last 50 lines"
+            echo "══════════════════════════════════════"
+            docker logs --tail 50 ${{ inputs.container_name }}
+
+            echo "──────────────────────────────────────"
+            echo " Health check"
+            echo "──────────────────────────────────────"
+            if [ "$(docker inspect -f '{{.State.Running}}' ${{ inputs.container_name }})" != "true" ]; then
+              echo "ERROR: ${{ inputs.container_name }} is not running!"
+              exit 1
+            fi
+            echo "✓ ${{ inputs.container_name }} is running."
+          ENDSSH
+
+      - name: Deployment summary
+        run: |
+          HOST="${{ vars.AZURE_VM_PUBLIC_HOST }}"
+          echo "════════════════════════════════════════"
+          echo "  Component   : ${{ inputs.component }}"
+          echo "  Environment : ${{ inputs.environment }}"
+          echo "  URL         : http://$HOST:${{ inputs.port }}"
+          echo "  Image SHA   : ${{ inputs.image_sha }}"
+          echo "════════════════════════════════════════"
