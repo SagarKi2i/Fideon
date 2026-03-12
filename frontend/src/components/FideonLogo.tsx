@@ -1,3 +1,4 @@
+import React from "react";
 import fideonLogo from "@/assets/fideon-logo.png";
 
 interface FideonLogoProps {

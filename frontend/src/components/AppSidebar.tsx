@@ -29,6 +29,7 @@ import { useUserRole } from "@/hooks/useUserRole";
 import { supabase } from "@/integrations/supabase/client";
 import { Separator } from "@/components/ui/separator";
 import { HelpAssistant } from "@/components/HelpAssistant";
+import type { Database } from "@/integrations/supabase/types";
 
 import {
   Sidebar,
@@ -54,19 +55,21 @@ interface ActivatedPod {
   domain: string;
 }
 
+type AppRole = Database["public"]["Enums"]["app_role"];
+
 const items = [
-  { title: "User Dashboard", url: "/", icon: LayoutDashboard },
-  { title: "Marketplace", url: "/marketplace", icon: ShoppingBag },
-  { title: "My Models", url: "/my-models", icon: Box },
-  { title: "Playground", url: "/playground", icon: MessageSquare },
-  { title: "Model Training", url: "/training", icon: GraduationCap },
-  { title: "Agent Workflows", url: "/agent-workflows", icon: Zap },
-  { title: "Custom Workflows", url: "/workflows", icon: Workflow },
-  { title: "Schedules", url: "/schedules", icon: CalendarClock },
-  { title: "Review Queue", url: "/review-queue", icon: ClipboardCheck },
+  { title: "User Dashboard", url: "/", icon: LayoutDashboard, allowedRoles: ["global_admin", "admin", "user", "viewer", "guest"] as AppRole[] },
+  { title: "Marketplace", url: "/marketplace", icon: ShoppingBag, allowedRoles: ["global_admin", "admin", "user", "viewer", "guest"] as AppRole[] },
+  { title: "My Models", url: "/my-models", icon: Box, allowedRoles: ["global_admin", "admin", "user", "viewer"] as AppRole[] },
+  { title: "Playground", url: "/playground", icon: MessageSquare, allowedRoles: ["global_admin", "admin", "user"] as AppRole[] },
+  { title: "Model Training", url: "/training", icon: GraduationCap, allowedRoles: ["global_admin", "admin", "user"] as AppRole[] },
+  { title: "Agent Workflows", url: "/agent-workflows", icon: Zap, allowedRoles: ["global_admin", "admin", "user"] as AppRole[] },
+  { title: "Custom Workflows", url: "/workflows", icon: Workflow, allowedRoles: ["global_admin", "admin", "user"] as AppRole[] },
+  { title: "Schedules", url: "/schedules", icon: CalendarClock, allowedRoles: ["global_admin", "admin", "user"] as AppRole[] },
+  { title: "Review Queue", url: "/review-queue", icon: ClipboardCheck, allowedRoles: ["global_admin", "admin", "user"] as AppRole[] },
   
-  { title: "Mailbox", url: "/mailbox", icon: Mail },
-  { title: "Settings", url: "/settings", icon: Settings },
+  { title: "Mailbox", url: "/mailbox", icon: Mail, allowedRoles: ["global_admin", "admin", "user"] as AppRole[] },
+  { title: "Settings", url: "/settings", icon: Settings, allowedRoles: ["global_admin", "admin", "user", "viewer", "guest"] as AppRole[] },
 ];
 
 const adminItems = [
@@ -83,7 +86,12 @@ export function AppSidebar() {
   const { state, isMobile, setOpenMobile } = useSidebar();
   const location = useLocation();
   const currentPath = location.pathname;
-  const { isAdmin } = useUserRole();
+  const { isAdmin, role } = useUserRole();
+  const visibleItems = items.filter((item) => {
+    if (!role) return false;
+    return item.allowedRoles.includes(role);
+  });
+
   const [isElectronApp, setIsElectronApp] = useState(false);
   const [activatedPods, setActivatedPods] = useState<ActivatedPod[]>([]);
   const [podsOpen, setPodsOpen] = useState(true);
@@ -150,7 +158,7 @@ export function AppSidebar() {
           <SidebarGroupLabel className="text-sidebar-foreground/70">Navigation</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {items.map((item) => (
+              {visibleItems.map((item) => (
                 <SidebarMenuItem key={item.title}>
                   <SidebarMenuButton asChild tooltip={item.title}>
                     <NavLink 

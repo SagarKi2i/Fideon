@@ -53,11 +53,31 @@ const App = () => (
                     </ProtectedRoute>
                   } />
                   <Route path="/marketplace" element={<Marketplace />} />
-                  <Route path="/my-models" element={<MyModels />} />
-                  <Route path="/playground" element={<Playground />} />
-                  <Route path="/pod/:podId" element={<PodDashboard />} />
-                  <Route path="/documents" element={<Documents />} />
-                  <Route path="/mailbox" element={<Mailbox />} />
+                  <Route path="/my-models" element={
+                    <ProtectedRoute allowedRoles={["global_admin", "admin", "user", "viewer"]}>
+                      <MyModels />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/playground" element={
+                    <ProtectedRoute allowedRoles={["global_admin", "admin", "user"]}>
+                      <Playground />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/pod/:podId" element={
+                    <ProtectedRoute allowedRoles={["global_admin", "admin", "user"]}>
+                      <PodDashboard />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/documents" element={
+                    <ProtectedRoute allowedRoles={["global_admin", "admin", "user"]}>
+                      <Documents />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/mailbox" element={
+                    <ProtectedRoute allowedRoles={["global_admin", "admin", "user"]}>
+                      <Mailbox />
+                    </ProtectedRoute>
+                  } />
                   <Route path="/devices" element={
                     <ProtectedRoute requireAdmin>
                       <Devices />
@@ -74,11 +94,31 @@ const App = () => (
                     </ProtectedRoute>
                   } />
                   <Route path="/device-setup" element={<DeviceSetup />} />
-                  <Route path="/training" element={<Training />} />
-                  <Route path="/workflows" element={<Workflows />} />
-                  <Route path="/schedules" element={<AgentSchedules />} />
-                  <Route path="/agent-workflows" element={<AgentWorkflows />} />
-                  <Route path="/review-queue" element={<ReviewQueue />} />
+                  <Route path="/training" element={
+                    <ProtectedRoute allowedRoles={["global_admin", "admin", "user"]}>
+                      <Training />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/workflows" element={
+                    <ProtectedRoute allowedRoles={["global_admin", "admin", "user"]}>
+                      <Workflows />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/schedules" element={
+                    <ProtectedRoute allowedRoles={["global_admin", "admin", "user"]}>
+                      <AgentSchedules />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/agent-workflows" element={
+                    <ProtectedRoute allowedRoles={["global_admin", "admin", "user"]}>
+                      <AgentWorkflows />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/review-queue" element={
+                    <ProtectedRoute allowedRoles={["global_admin", "admin", "user"]}>
+                      <ReviewQueue />
+                    </ProtectedRoute>
+                  } />
                   
                   
                   <Route path="/settings" element={<Settings />} />

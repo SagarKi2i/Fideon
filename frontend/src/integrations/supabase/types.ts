@@ -164,6 +164,50 @@ export type Database = {
         }
         Relationships: []
       }
+      app_users: {
+        Row: {
+          created_at: string
+          email: string
+          full_name: string | null
+          last_login_at: string | null
+          metadata: Json
+          status: string
+          tenant_id: string | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          email: string
+          full_name?: string | null
+          last_login_at?: string | null
+          metadata?: Json
+          status?: string
+          tenant_id?: string | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          email?: string
+          full_name?: string | null
+          last_login_at?: string | null
+          metadata?: Json
+          status?: string
+          tenant_id?: string | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "app_users_tenant_id_fkey"
+            columns: ["tenant_id"]
+            isOneToOne: false
+            referencedRelation: "tenants"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       chat_conversations: {
         Row: {
           created_at: string | null
@@ -718,6 +762,45 @@ export type Database = {
         }
         Relationships: []
       }
+      model_catalog: {
+        Row: {
+          created_at: string
+          description: string | null
+          domain: string
+          id: string
+          is_active: boolean
+          metadata: Json
+          model_id: string
+          model_name: string
+          provider: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          description?: string | null
+          domain: string
+          id?: string
+          is_active?: boolean
+          metadata?: Json
+          model_id: string
+          model_name: string
+          provider: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          description?: string | null
+          domain?: string
+          id?: string
+          is_active?: boolean
+          metadata?: Json
+          model_id?: string
+          model_name?: string
+          provider?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       model_packs: {
         Row: {
           created_at: string
@@ -831,6 +914,63 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      roles: {
+        Row: {
+          created_at: string
+          description: string | null
+          display_name: string
+          permissions: Json
+          role: Database["public"]["Enums"]["app_role"]
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          description?: string | null
+          display_name: string
+          permissions?: Json
+          role: Database["public"]["Enums"]["app_role"]
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          description?: string | null
+          display_name?: string
+          permissions?: Json
+          role?: Database["public"]["Enums"]["app_role"]
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      tenants: {
+        Row: {
+          created_at: string
+          id: string
+          is_active: boolean
+          metadata: Json
+          name: string
+          slug: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          metadata?: Json
+          name: string
+          slug: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          metadata?: Json
+          name?: string
+          slug?: string
+          updated_at?: string
+        }
+        Relationships: []
       }
       training_feedback: {
         Row: {
@@ -1093,7 +1233,7 @@ export type Database = {
       }
     }
     Enums: {
-      app_role: "admin" | "user"
+      app_role: "global_admin" | "admin" | "user" | "viewer" | "guest"
       license_status: "active" | "suspended" | "expired"
       license_type: "standard" | "premium" | "model_based"
       model_domain: "insurance" | "healthcare" | "banking" | "legal" | "travel"
@@ -1225,7 +1365,7 @@ export type CompositeTypes<
 export const Constants = {
   public: {
     Enums: {
-      app_role: ["admin", "user"],
+      app_role: ["global_admin", "admin", "user", "viewer", "guest"],
       license_status: ["active", "suspended", "expired"],
       license_type: ["standard", "premium", "model_based"],
       model_domain: ["insurance", "healthcare", "banking", "legal", "travel"],

@@ -43,31 +43,62 @@ export function HelpAssistant() {
     let assistantContent = "";
 
     try {
-      const CHAT_URL = `${process.env.NEXT_PUBLIC_API_URL}/api/help-assistant`;
+      const configuredApiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const fallbackApiUrl = "http://localhost:8000";
+      const fallbackApiUrl2 = "http://127.0.0.1:8000";
+      const fallbackApiUrl3 = "http://localhost:8001";
+      const fallbackApiUrl4 = "http://127.0.0.1:8001";
+      const candidateUrls = Array.from(
+        new Set([
+          `${configuredApiUrl}/api/help-assistant`,
+          `${fallbackApiUrl}/api/help-assistant`,
+          `${fallbackApiUrl2}/api/help-assistant`,
+          `${fallbackApiUrl3}/api/help-assistant`,
+          `${fallbackApiUrl4}/api/help-assistant`,
+        ])
+      );
       
       const { data: { session } } = await supabase.auth.getSession();
-      
-      const resp = await fetch(CHAT_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session?.access_token || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY}`,
-        },
-        body: JSON.stringify({
-          messages: [...messages, userMessage].map(m => ({ role: m.role, content: m.content })),
-        }),
+
+      const requestBody = JSON.stringify({
+        messages: [...messages, userMessage].map(m => ({ role: m.role, content: m.content })),
       });
 
-      if (!resp.ok) {
-        if (resp.status === 429) {
-          toast({ title: "Rate limit exceeded", description: "Please try again in a moment.", variant: "destructive" });
-          throw new Error("Rate limited");
+      let resp: Response | null = null;
+      let lastError: unknown = null;
+      for (const url of candidateUrls) {
+        try {
+          const candidateResp = await fetch(url, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${session?.access_token || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY}`,
+            },
+            body: requestBody,
+          });
+
+          if (candidateResp.ok) {
+            resp = candidateResp;
+            break;
+          }
+
+          if (candidateResp.status === 429) {
+            toast({ title: "Rate limit exceeded", description: "Please try again in a moment.", variant: "destructive" });
+            throw new Error("Rate limited");
+          }
+          if (candidateResp.status === 402) {
+            toast({ title: "Credits required", description: "Please add credits to continue.", variant: "destructive" });
+            throw new Error("Payment required");
+          }
+
+          lastError = new Error(`Help assistant endpoint failed (${candidateResp.status}) at ${url}`);
+        } catch (fetchError) {
+          lastError = fetchError;
         }
-        if (resp.status === 402) {
-          toast({ title: "Credits required", description: "Please add credits to continue.", variant: "destructive" });
-          throw new Error("Payment required");
-        }
-        throw new Error("Failed to get response");
+      }
+
+      if (!resp) {
+        throw lastError || new Error("Failed to reach help assistant endpoint");
       }
 
       const reader = resp.body?.getReader();
@@ -116,6 +147,11 @@ export function HelpAssistant() {
       }
     } catch (error) {
       console.error("Help assistant error:", error);
+      toast({
+        title: "Assistant unavailable",
+        description: "Unable to connect to Groq help service. Please ensure backend is running on port 8000.",
+        variant: "destructive",
+      });
       if (!assistantContent) {
         setMessages(prev => prev.filter(m => m.content !== ""));
       }

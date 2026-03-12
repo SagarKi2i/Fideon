@@ -23,7 +23,6 @@ interface ActivatedPod {
 interface PodMetrics {
   totalQueries: number;
   successRate: number;
-  avgResponseTime: string;
   lastActivity: string;
   trend: string;
 }
@@ -61,71 +60,39 @@ const getPodGradient = (modelId: string) => {
   return gradients[modelId] || 'from-primary/10 to-primary/5';
 };
 
-const getMockMetrics = (modelId: string): PodMetrics => {
-  const metrics: Record<string, PodMetrics> = {
-    'document-retrieval': {
-      totalQueries: 1248,
-      successRate: 98.5,
-      avgResponseTime: '1.2s',
-      lastActivity: '2 min ago',
-      trend: '+12% this week'
-    },
-    'quote-generation': {
-      totalQueries: 856,
-      successRate: 99.1,
-      avgResponseTime: '2.4s',
-      lastActivity: '5 min ago',
-      trend: '+8% this week'
-    },
-    'policy-comparison': {
-      totalQueries: 432,
-      successRate: 97.8,
-      avgResponseTime: '3.1s',
-      lastActivity: '12 min ago',
-      trend: '+15% this week'
-    },
-    'claims-fnol': {
-      totalQueries: 289,
-      successRate: 99.5,
-      avgResponseTime: '1.8s',
-      lastActivity: '1 hr ago',
-      trend: '+5% this week'
-    },
-    'generic-prompt': {
-      totalQueries: 1567,
-      successRate: 96.2,
-      avgResponseTime: '0.9s',
-      lastActivity: 'Just now',
-      trend: '+22% this week'
-    },
-  };
-  return metrics[modelId] || {
-    totalQueries: 0,
-    successRate: 0,
-    avgResponseTime: '0s',
-    lastActivity: 'Never',
-    trend: 'No data'
-  };
+const toRelativeTime = (iso: string | null | undefined) => {
+  if (!iso) return "No activity";
+  const diffMs = Date.now() - new Date(iso).getTime();
+  if (Number.isNaN(diffMs) || diffMs < 0) return "Just now";
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return "Just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} hr ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days > 1 ? "s" : ""} ago`;
 };
 
-const getRecentActivity = (pods: ActivatedPod[]) => {
-  const activities = [
-    { pod: 'document-retrieval', action: 'Retrieved 24 documents from Travelers', time: '2 min ago', status: 'success' },
-    { pod: 'quote-generation', action: 'Generated quote for Commercial Auto policy', time: '5 min ago', status: 'success' },
-    { pod: 'policy-comparison', action: 'Compared 2 liability policies', time: '12 min ago', status: 'success' },
-    { pod: 'claims-fnol', action: 'Processed FNOL for claim #CLM-2024-001', time: '1 hr ago', status: 'success' },
-    { pod: 'document-retrieval', action: 'Sync failed with Hartford - retrying', time: '2 hr ago', status: 'error' },
-    { pod: 'generic-prompt', action: 'Analyzed coverage requirements', time: '3 hr ago', status: 'success' },
-  ];
-  
-  const activePodIds = pods.map(p => p.model_id);
-  return activities.filter(a => activePodIds.includes(a.pod)).slice(0, 5);
+const getTimeGreeting = () => {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Good Morning";
+  if (hour < 17) return "Good Afternoon";
+  return "Good Evening";
 };
 
 export default function Dashboard() {
   const navigate = useNavigate();
   const [pods, setPods] = useState<ActivatedPod[]>([]);
   const [loading, setLoading] = useState(true);
+  const [displayName, setDisplayName] = useState("User");
+  const [totalQueries, setTotalQueries] = useState(0);
+  const [avgSuccessRate, setAvgSuccessRate] = useState(100);
+  const [avgResponseTime, setAvgResponseTime] = useState("N/A");
+  const [podQueryCounts, setPodQueryCounts] = useState<Record<string, number>>({});
+  const [podLastActivity, setPodLastActivity] = useState<Record<string, string>>({});
+  const [recentActivity, setRecentActivity] = useState<
+    { id: string; action: string; time: string; status: "success" | "error"; podName: string }[]
+  >([]);
 
   useEffect(() => {
     loadActivatedPods();
@@ -136,6 +103,14 @@ export default function Dashboard() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
+      const { data: profile } = await supabase
+        .from("app_users")
+        .select("full_name,email")
+        .eq("user_id", user.id)
+        .maybeSingle();
+      const fallbackName = user.email?.split("@")[0] || "User";
+      setDisplayName(profile?.full_name || profile?.email?.split("@")[0] || fallbackName);
+
       const { data, error } = await supabase
         .from("activated_models")
         .select("*")
@@ -143,21 +118,87 @@ export default function Dashboard() {
         .order("activated_at", { ascending: false });
 
       if (error) throw error;
-      setPods(data || []);
+      const podsData = data || [];
+      setPods(podsData);
+
+      const { data: conversations } = await supabase
+        .from("chat_conversations")
+        .select("id, model_id, updated_at, title, chat_messages(id)")
+        .eq("user_id", user.id);
+
+      const queryCountByModel: Record<string, number> = {};
+      const lastActivityByModel: Record<string, string> = {};
+      let conversationQueryTotal = 0;
+      const activityFeed: { id: string; action: string; time: string; status: "success" | "error"; podName: string }[] = [];
+
+      for (const conv of conversations || []) {
+        const modelId = conv.model_id || "generic-prompt";
+        const queryCount = Array.isArray((conv as any).chat_messages) ? (conv as any).chat_messages.length : 0;
+        queryCountByModel[modelId] = (queryCountByModel[modelId] || 0) + queryCount;
+        conversationQueryTotal += queryCount;
+        const activityTime = conv.updated_at || null;
+        if (!lastActivityByModel[modelId] || new Date(activityTime || 0).getTime() > new Date(lastActivityByModel[modelId]).getTime()) {
+          lastActivityByModel[modelId] = activityTime || "";
+        }
+
+        activityFeed.push({
+          id: conv.id,
+          action: conv.title ? `Conversation: ${conv.title}` : "Conversation activity",
+          time: toRelativeTime(activityTime),
+          status: "success",
+          podName: podsData.find((p) => p.model_id === modelId)?.model_name || modelId,
+        });
+      }
+
+      setPodQueryCounts(queryCountByModel);
+      setPodLastActivity(lastActivityByModel);
+      setTotalQueries(conversationQueryTotal);
+
+      const { data: runs } = await supabase
+        .from("workflow_runs")
+        .select("id,status,started_at,completed_at")
+        .eq("user_id", user.id)
+        .order("started_at", { ascending: false })
+        .limit(100);
+
+      const runRows = runs || [];
+      const completedRuns = runRows.filter((r) => r.status === "completed");
+      const failedRuns = runRows.filter((r) => r.status === "failed");
+      const consideredRuns = completedRuns.length + failedRuns.length;
+      const successRate = consideredRuns > 0 ? (completedRuns.length / consideredRuns) * 100 : 100;
+      setAvgSuccessRate(successRate);
+
+      const runDurations = completedRuns
+        .filter((r) => r.started_at && r.completed_at)
+        .map((r) => (new Date(r.completed_at as string).getTime() - new Date(r.started_at as string).getTime()) / 1000)
+        .filter((s) => Number.isFinite(s) && s >= 0);
+
+      if (runDurations.length > 0) {
+        const avgSeconds = runDurations.reduce((a, b) => a + b, 0) / runDurations.length;
+        setAvgResponseTime(avgSeconds < 1 ? `${Math.round(avgSeconds * 1000)}ms` : `${avgSeconds.toFixed(1)}s`);
+      } else {
+        setAvgResponseTime("N/A");
+      }
+
+      const runActivities = runRows.slice(0, 5).map((r) => ({
+        id: `run-${r.id}`,
+        action: `Workflow run ${r.status}`,
+        time: toRelativeTime(r.started_at),
+        status: r.status === "failed" ? ("error" as const) : ("success" as const),
+        podName: "Workflow",
+      }));
+
+      setRecentActivity([...activityFeed, ...runActivities].sort((a, b) => {
+        const aTime = a.time === "Just now" ? 0 : 1;
+        const bTime = b.time === "Just now" ? 0 : 1;
+        return aTime - bTime;
+      }).slice(0, 5));
     } catch (error) {
       console.error("Error loading pods:", error);
     } finally {
       setLoading(false);
     }
   };
-
-  const recentActivity = getRecentActivity(pods);
-
-  // Calculate aggregate stats
-  const totalQueries = pods.reduce((sum, pod) => sum + getMockMetrics(pod.model_id).totalQueries, 0);
-  const avgSuccessRate = pods.length > 0 
-    ? pods.reduce((sum, pod) => sum + getMockMetrics(pod.model_id).successRate, 0) / pods.length 
-    : 0;
 
   if (loading) {
     return (
@@ -185,7 +226,7 @@ export default function Dashboard() {
           <div className="relative flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div>
               <h1 className="text-2xl md:text-4xl font-bold tracking-tight bg-gradient-to-r from-primary via-primary to-accent bg-clip-text text-transparent">
-                Welcome Back
+                {getTimeGreeting()}, {displayName}
               </h1>
               <p className="text-muted-foreground mt-1 md:mt-2 text-sm md:text-lg">
                 {pods.length > 0 
@@ -296,7 +337,12 @@ export default function Dashboard() {
               <div className="grid gap-4 md:gap-6 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
                 {pods.map((pod, index) => {
                   const Icon = getPodIcon(pod.model_id);
-                  const metrics = getMockMetrics(pod.model_id);
+                  const metrics: PodMetrics = {
+                    totalQueries: podQueryCounts[pod.model_id] || 0,
+                    successRate: avgSuccessRate,
+                    lastActivity: toRelativeTime(podLastActivity[pod.model_id]),
+                    trend: (podQueryCounts[pod.model_id] || 0) > 0 ? "Live data" : "No data",
+                  };
                   const colorClass = getPodColor(pod.model_id);
                   const gradient = getPodGradient(pod.model_id);
                   
@@ -336,7 +382,7 @@ export default function Dashboard() {
                           </div>
                           <div>
                             <p className="text-xs text-muted-foreground">Success Rate</p>
-                            <p className="text-lg font-semibold text-foreground">{metrics.successRate}%</p>
+                            <p className="text-lg font-semibold text-foreground">{metrics.successRate.toFixed(1)}%</p>
                           </div>
                         </div>
                         <div>
@@ -366,9 +412,8 @@ export default function Dashboard() {
                 <CardContent>
                   <div className="space-y-3">
                     {recentActivity.map((activity, index) => {
-                      const pod = pods.find(p => p.model_id === activity.pod);
-                      const Icon = getPodIcon(activity.pod);
-                      const colorClass = getPodColor(activity.pod);
+                      const Icon = Activity;
+                      const colorClass = "text-primary";
                       
                       return (
                         <div 
@@ -383,7 +428,7 @@ export default function Dashboard() {
                               {activity.action}
                             </p>
                             <p className="text-xs text-muted-foreground">
-                              {pod?.model_name} • {activity.time}
+                              {activity.podName} • {activity.time}
                             </p>
                           </div>
                           {activity.status === 'error' ? (
