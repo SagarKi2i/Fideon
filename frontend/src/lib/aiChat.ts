@@ -25,20 +25,54 @@ export async function streamChat({
       throw new Error("Not authenticated");
     }
 
-    const CHAT_URL = `${process.env.NEXT_PUBLIC_API_URL}/api/chat`;
+    const configuredApiUrl = (process.env.NEXT_PUBLIC_API_URL || "").trim();
+    const vmHostApiUrl =
+      typeof window !== "undefined"
+        ? `${window.location.protocol}//${window.location.hostname}:8080`
+        : "";
+    const candidateUrls = Array.from(
+      new Set(
+        [
+          configuredApiUrl ? `${configuredApiUrl}/api/chat` : "",
+          vmHostApiUrl ? `${vmHostApiUrl}/api/chat` : "",
+          "/api/chat",
+          "http://localhost:8080/api/chat",
+          "http://127.0.0.1:8080/api/chat",
+          "http://localhost:8001/api/chat",
+          "http://127.0.0.1:8001/api/chat",
+          "http://localhost:8000/api/chat",
+          "http://127.0.0.1:8000/api/chat",
+        ].filter(Boolean)
+      )
+    );
 
-    const resp = await fetch(CHAT_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify({ messages, conversationId, modelId }),
-    });
+    let resp: Response | null = null;
+    let lastErrorMessage = "Failed to reach chat endpoint";
+    for (const url of candidateUrls) {
+      try {
+        const candidate = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({ messages, conversationId, modelId }),
+        });
 
-    if (!resp.ok) {
-      const errorData = await resp.json().catch(() => ({ error: "Unknown error" }));
-      throw new Error(errorData.error || `Request failed with status ${resp.status}`);
+        if (candidate.ok) {
+          resp = candidate;
+          break;
+        }
+
+        const errorData = await candidate.json().catch(() => ({ error: "Unknown error" }));
+        lastErrorMessage = errorData.error || `Request failed with status ${candidate.status}`;
+      } catch (e) {
+        lastErrorMessage = e instanceof Error ? e.message : "Network error";
+      }
+    }
+
+    if (!resp) {
+      throw new Error(lastErrorMessage);
     }
 
     if (!resp.body) {

@@ -43,19 +43,23 @@ export function HelpAssistant() {
     let assistantContent = "";
 
     try {
-      const configuredApiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      const fallbackApiUrl = "http://localhost:8000";
-      const fallbackApiUrl2 = "http://127.0.0.1:8000";
-      const fallbackApiUrl3 = "http://localhost:8001";
-      const fallbackApiUrl4 = "http://127.0.0.1:8001";
+      const configuredApiUrl = (process.env.NEXT_PUBLIC_API_URL || "").trim();
+      const vmHostApiUrl =
+        typeof window !== "undefined"
+          ? `${window.location.protocol}//${window.location.hostname}:8080`
+          : "";
       const candidateUrls = Array.from(
         new Set([
-          `${configuredApiUrl}/api/help-assistant`,
-          `${fallbackApiUrl}/api/help-assistant`,
-          `${fallbackApiUrl2}/api/help-assistant`,
-          `${fallbackApiUrl3}/api/help-assistant`,
-          `${fallbackApiUrl4}/api/help-assistant`,
-        ])
+          configuredApiUrl ? `${configuredApiUrl}/api/help-assistant` : "",
+          vmHostApiUrl ? `${vmHostApiUrl}/api/help-assistant` : "",
+          "/api/help-assistant",
+          "http://localhost:8080/api/help-assistant",
+          "http://127.0.0.1:8080/api/help-assistant",
+          "http://localhost:8001/api/help-assistant",
+          "http://127.0.0.1:8001/api/help-assistant",
+          "http://localhost:8000/api/help-assistant",
+          "http://127.0.0.1:8000/api/help-assistant",
+        ].filter(Boolean))
       );
       
       const { data: { session } } = await supabase.auth.getSession();
@@ -149,7 +153,7 @@ export function HelpAssistant() {
       console.error("Help assistant error:", error);
       toast({
         title: "Assistant unavailable",
-        description: "Unable to connect to Groq help service. Please ensure backend is running on port 8000.",
+        description: "Unable to reach help service. Ensure backend is reachable on port 8080 (or set NEXT_PUBLIC_API_URL).",
         variant: "destructive",
       });
       if (!assistantContent) {

@@ -1,6 +1,5 @@
 // Training & Federated Learning API for device integration
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL;
+import { getApiBaseUrl } from "@/lib/apiBaseUrl";
 
 export interface TrainingFeedback {
   id: string;
@@ -102,7 +101,7 @@ async function trainingRequest(action: string, params?: Record<string, string>, 
   if (body) options.body = JSON.stringify(body);
 
   const response = await fetch(
-    `${API_URL}/api/federated-learning?${queryParams}`,
+    `${getApiBaseUrl()}/api/federated-learning?${queryParams}`,
     options
   );
 

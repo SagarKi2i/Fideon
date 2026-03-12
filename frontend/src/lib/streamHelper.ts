@@ -1,4 +1,5 @@
 import { supabase } from "@/integrations/supabase/client";
+import { apiUrl } from "@/lib/apiBaseUrl";
 
 interface StreamOptions {
   onDelta: (delta: string) => void;
@@ -14,7 +15,7 @@ export async function streamFromEdgeFunction(
   const { data: { session } } = await supabase.auth.getSession();
   if (!session) throw new Error("Not authenticated");
 
-  const url = `${process.env.NEXT_PUBLIC_API_URL}/api/${functionName}`;
+  const url = apiUrl(`/api/${functionName}`);
 
   const resp = await fetch(url, {
     method: "POST",
