@@ -22,6 +22,13 @@ export function GlobalAdminRoleManager() {
   const [users, setUsers] = useState<UserInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [updatingUserId, setUpdatingUserId] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [showCreateForm, setShowCreateForm] = useState(false);
+  const [newUserName, setNewUserName] = useState("");
+  const [newUserEmail, setNewUserEmail] = useState("");
+  const [newUserRole, setNewUserRole] = useState<AppRole>("user");
+  const [newUserPassword, setNewUserPassword] = useState("");
+  const [newUserConfirmPassword, setNewUserConfirmPassword] = useState("");
 
   useEffect(() => {
     loadUsers();
@@ -128,6 +135,82 @@ export function GlobalAdminRoleManager() {
     }
   };
 
+  const createUser = async () => {
+    if (!newUserName.trim() || !newUserEmail.trim() || !newUserPassword.trim()) {
+      toast({
+        title: "Missing details",
+        description: "Name, email, and password are required.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (newUserPassword.length < 8) {
+      toast({
+        title: "Weak password",
+        description: "Password must be at least 8 characters.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (newUserPassword !== newUserConfirmPassword) {
+      toast({
+        title: "Password mismatch",
+        description: "Password and confirm password must match.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setCreating(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        throw new Error("Session expired");
+      }
+
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/admin-create-user`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: newUserEmail.trim(),
+          password: newUserPassword,
+          role: newUserRole,
+          full_name: newUserName.trim(),
+        }),
+      });
+
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => ({}));
+        throw new Error(errorPayload?.error || errorPayload?.detail || "Failed to create user");
+      }
+
+      toast({
+        title: "User created",
+        description: `Created ${newUserEmail} with role ${newUserRole}.`,
+      });
+
+      setNewUserName("");
+      setNewUserEmail("");
+      setNewUserRole("user");
+      setNewUserPassword("");
+      setNewUserConfirmPassword("");
+      setShowCreateForm(false);
+      await loadUsers();
+    } catch (error: any) {
+      console.error("Error creating user:", error);
+      toast({
+        title: "Create user failed",
+        description: error.message || "Could not create new user.",
+        variant: "destructive",
+      });
+    } finally {
+      setCreating(false);
+    }
+  };
+
   return (
     <Card className="border-border/50 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 shadow-premium">
       <CardHeader>
@@ -138,6 +221,83 @@ export function GlobalAdminRoleManager() {
         <CardDescription>Promote users, assign admin roles, and manage access levels.</CardDescription>
       </CardHeader>
       <CardContent>
+        <div className="mb-4">
+          <Button
+            onClick={() => setShowCreateForm((prev) => !prev)}
+            variant={showCreateForm ? "secondary" : "default"}
+          >
+            {showCreateForm ? "Close Add User" : "Add New User"}
+          </Button>
+        </div>
+
+        {showCreateForm && (
+          <div className="mb-6 p-4 rounded-md border border-border/60 bg-muted/30">
+            <p className="text-sm font-medium mb-3">Add New User</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <input
+                type="text"
+                placeholder="Full name"
+                value={newUserName}
+                onChange={(e) => setNewUserName(e.target.value)}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+              />
+              <input
+                type="email"
+                placeholder="Email"
+                value={newUserEmail}
+                onChange={(e) => setNewUserEmail(e.target.value)}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+              />
+              <Select value={newUserRole} onValueChange={(value) => setNewUserRole(value as AppRole)}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {roleOptions.map((role) => (
+                    <SelectItem key={role} value={role}>
+                      {role}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <input
+                type="password"
+                placeholder="Password"
+                value={newUserPassword}
+                onChange={(e) => setNewUserPassword(e.target.value)}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+              />
+              <input
+                type="password"
+                placeholder="Confirm password"
+                value={newUserConfirmPassword}
+                onChange={(e) => setNewUserConfirmPassword(e.target.value)}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm md:col-span-2"
+              />
+            </div>
+            <div className="mt-3 flex gap-2">
+              <Button onClick={createUser} disabled={creating}>
+                {creating ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+                Add User
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setShowCreateForm(false);
+                  setNewUserName("");
+                  setNewUserEmail("");
+                  setNewUserRole("user");
+                  setNewUserPassword("");
+                  setNewUserConfirmPassword("");
+                }}
+                disabled={creating}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+
         {loading ? (
           <div className="flex items-center justify-center py-6">
             <Loader2 className="h-5 w-5 animate-spin text-primary" />

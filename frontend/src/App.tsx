@@ -21,6 +21,7 @@ import PolicyComparison from "./app-pages/PolicyComparison";
 import PitchDeck from "./app-pages/PitchDeck";
 import PodDashboard from "./app-pages/PodDashboard";
 import Auth from "./app-pages/Auth";
+import Signup from "./app-pages/Signup";
 import NotFound from "./app-pages/NotFound";
 import ElectronPlayground from "./app-pages/ElectronPlayground";
 import Training from "./app-pages/Training";
@@ -42,6 +43,7 @@ const App = () => (
         <Routes>
           <Route path="/electron-playground" element={<ElectronPlayground />} />
           <Route path="/auth" element={<Auth />} />
+          <Route path="/signup" element={<Signup />} />
           <Route path="/*" element={
             <ProtectedRoute>
               <Layout>

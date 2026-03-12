@@ -3,7 +3,6 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import type { Provider } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
-import type { Database } from "@/integrations/supabase/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,8 +12,7 @@ import { Shield, Lock, Cpu, KeyRound, Mail } from "lucide-react";
 import { FideonLogo } from "@/components/FideonLogo";
 import privateTenantBg from "@/assets/private-ai-tenant-bg.jpg";
 
-type AppRole = Database["public"]["Enums"]["app_role"];
-type AuthView = "signin" | "signup" | "forgot" | "reset";
+type AuthView = "signin" | "forgot" | "reset";
 
 export default function Auth() {
   const navigate = useNavigate();
@@ -34,21 +32,9 @@ export default function Auth() {
   const [view, setView] = useState<AuthView>("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [fullName, setFullName] = useState("");
-  const [signupRole, setSignupRole] = useState<AppRole>("user");
-  const [signupEmail, setSignupEmail] = useState("");
-  const [signupPassword, setSignupPassword] = useState("");
-  const [signupConfirmPassword, setSignupConfirmPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [loading, setLoading] = useState(false);
-  const signupRoles: Array<{ value: AppRole; label: string }> = [
-    { value: "global_admin", label: "Global Admin" },
-    { value: "admin", label: "Admin" },
-    { value: "user", label: "User" },
-    { value: "viewer", label: "Viewer" },
-    { value: "guest", label: "Guest" },
-  ];
 
   const [activeUserId, setActiveUserId] = useState<string | null>(null);
 
@@ -114,74 +100,6 @@ export default function Auth() {
       toast({
         title: "Error",
         description: error.message,
-        variant: "destructive",
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleSignUp = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    if (signupPassword.length < 8) {
-      toast({
-        title: "Password too short",
-        description: "Use at least 8 characters.",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    if (signupPassword !== signupConfirmPassword) {
-      toast({
-        title: "Passwords do not match",
-        description: "Please enter the same password in both fields.",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    setLoading(true);
-    try {
-      const { data, error } = await supabase.auth.signUp({
-        email: signupEmail,
-        password: signupPassword,
-        options: {
-          data: {
-            full_name: fullName,
-            requested_role: signupRole,
-          },
-        },
-      });
-
-      if (error) throw error;
-
-      if (data.user) {
-        const { error: profileError } = await supabase
-          .from("app_users")
-          .update({ full_name: fullName })
-          .eq("user_id", data.user.id);
-        if (profileError) {
-          console.warn("Unable to update app_users full_name:", profileError.message);
-        }
-      }
-
-      toast({
-        title: "Account created",
-        description:
-          "Signup successful. If email confirmation is enabled, verify your email before signing in.",
-      });
-
-      setEmail(signupEmail);
-      setPassword("");
-      setSignupPassword("");
-      setSignupConfirmPassword("");
-      setView("signin");
-    } catch (error: any) {
-      toast({
-        title: "Signup failed",
-        description: error.message || "Could not create account.",
         variant: "destructive",
       });
     } finally {
@@ -418,85 +336,8 @@ export default function Auth() {
       <Button type="button" variant="ghost" className="w-full" onClick={() => setView("forgot")}>
         Forgot password?
       </Button>
-      <Button type="button" variant="outline" className="w-full" onClick={() => setView("signup")}>
+      <Button type="button" variant="outline" className="w-full" onClick={() => navigate("/signup")}>
         Create new account
-      </Button>
-    </form>
-  );
-
-  const signUpView = (
-    <form onSubmit={handleSignUp} className="space-y-4">
-      <div className="space-y-2">
-        <Label htmlFor="signup-name">Name</Label>
-        <Input
-          id="signup-name"
-          type="text"
-          placeholder="Your full name"
-          value={fullName}
-          onChange={(e) => setFullName(e.target.value)}
-          required
-          className="bg-background/50"
-        />
-      </div>
-      <div className="space-y-2">
-        <Label htmlFor="signup-email">Email</Label>
-        <Input
-          id="signup-email"
-          type="email"
-          placeholder="your@email.com"
-          value={signupEmail}
-          onChange={(e) => setSignupEmail(e.target.value)}
-          required
-          className="bg-background/50"
-        />
-      </div>
-      <div className="space-y-2">
-        <Label htmlFor="signup-role">Role</Label>
-        <select
-          id="signup-role"
-          value={signupRole}
-          onChange={(e) => setSignupRole(e.target.value as AppRole)}
-          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-          required
-        >
-          {signupRoles.map((r) => (
-            <option key={r.value} value={r.value}>
-              {r.label}
-            </option>
-          ))}
-        </select>
-      </div>
-      <div className="space-y-2">
-        <Label htmlFor="signup-password">Password</Label>
-        <Input
-          id="signup-password"
-          type="password"
-          placeholder="At least 8 characters"
-          value={signupPassword}
-          onChange={(e) => setSignupPassword(e.target.value)}
-          minLength={8}
-          required
-          className="bg-background/50"
-        />
-      </div>
-      <div className="space-y-2">
-        <Label htmlFor="signup-confirm-password">Confirm Password</Label>
-        <Input
-          id="signup-confirm-password"
-          type="password"
-          placeholder="Re-enter password"
-          value={signupConfirmPassword}
-          onChange={(e) => setSignupConfirmPassword(e.target.value)}
-          minLength={8}
-          required
-          className="bg-background/50"
-        />
-      </div>
-      <Button type="submit" className="w-full" disabled={loading}>
-        {loading ? "Creating account..." : "Sign Up"}
-      </Button>
-      <Button type="button" variant="ghost" className="w-full" onClick={() => setView("signin")}>
-        Already have an account? Sign in
       </Button>
     </form>
   );
@@ -644,14 +485,12 @@ export default function Auth() {
               </CardTitle>
               <CardDescription className="text-center">
                 {view === "signin" && "Sign in to access your Private AI Tenant"}
-                {view === "signup" && "Create your account to access Fideon Fabric"}
                 {view === "forgot" && "Request a secure password reset link"}
                 {view === "reset" && "Set a new password for your account"}
               </CardDescription>
             </CardHeader>
             <CardContent>
               {view === "signin" && signInView}
-              {view === "signup" && signUpView}
               {view === "forgot" && forgotView}
               {view === "reset" && resetView}
 

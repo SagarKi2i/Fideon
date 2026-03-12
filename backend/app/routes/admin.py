@@ -12,6 +12,15 @@ router = APIRouter()
 VALID_ROLES = {"global_admin", "admin", "user", "viewer", "guest"}
 
 
+async def _get_requester_role(authorization: Optional[str]) -> tuple[dict, Optional[str]]:
+    requester = await verify_user(authorization)
+    requester_roles = await postgrest_get(
+        "user_roles", f"select=role&user_id=eq.{quote(requester['id'], safe='')}&limit=1"
+    )
+    requester_role = requester_roles[0].get("role") if requester_roles else None
+    return requester, requester_role
+
+
 @router.get("/api/list-users")
 async def list_users(authorization: Optional[str] = Header(default=None)):
     user = await verify_user(authorization)
@@ -35,12 +44,19 @@ async def list_users(authorization: Optional[str] = Header(default=None)):
 
 
 @router.post("/api/admin-create-user")
-async def admin_create_user(request: Request):
+async def admin_create_user(request: Request, authorization: Optional[str] = Header(default=None)):
+    _, requester_role = await _get_requester_role(authorization)
+    if requester_role not in {"admin", "global_admin"}:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
     body = await request.json()
     email = body.get("email")
     password = body.get("password")
+    full_name = body.get("full_name")
     role = body.get("role", "user")
     action = body.get("action", "create")
+    if role not in VALID_ROLES:
+        raise HTTPException(status_code=400, detail="Invalid role")
     if not email or not password:
         raise HTTPException(status_code=400, detail="Email and password are required")
 
@@ -63,7 +79,17 @@ async def admin_create_user(request: Request):
         resp = await client.post(
             f"{SUPABASE_URL}/auth/v1/admin/users",
             headers=service_headers(),
-            content=json.dumps({"email": email, "password": password, "email_confirm": True}),
+            content=json.dumps(
+                {
+                    "email": email,
+                    "password": password,
+                    "email_confirm": True,
+                    "user_metadata": {
+                        "full_name": full_name or "",
+                        "requested_role": role,
+                    },
+                }
+            ),
         )
     if resp.status_code >= 400:
         raise HTTPException(status_code=400, detail=resp.text)
@@ -73,16 +99,21 @@ async def admin_create_user(request: Request):
             await postgrest_insert("user_roles", {"user_id": user_data["id"], "role": role})
         except Exception:
             pass
+        if full_name:
+            try:
+                await postgrest_patch(
+                    "app_users",
+                    f"user_id=eq.{quote(user_data['id'], safe='')}",
+                    {"full_name": full_name},
+                )
+            except Exception:
+                pass
     return {"success": True, "user": {"id": user_data.get("id"), "email": user_data.get("email")}}
 
 
 @router.post("/api/admin-set-user-role")
 async def admin_set_user_role(request: Request, authorization: Optional[str] = Header(default=None)):
-    requester = await verify_user(authorization)
-    requester_roles = await postgrest_get(
-        "user_roles", f"select=role&user_id=eq.{quote(requester['id'], safe='')}&limit=1"
-    )
-    requester_role = requester_roles[0].get("role") if requester_roles else None
+    _, requester_role = await _get_requester_role(authorization)
     if requester_role != "global_admin":
         raise HTTPException(status_code=403, detail="Global admin access required")
 
