@@ -36,6 +36,14 @@ on:
         required: false
       AZURE_CR_PASSWORD:
         required: false
+      NEXT_PUBLIC_SUPABASE_URL:
+        required: false
+      NEXT_PUBLIC_SUPABASE_ANON_KEY:
+        required: false
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:
+        required: false
+      NEXT_PUBLIC_API_URL:
+        required: false
 
 jobs:
   ci:
@@ -72,10 +80,15 @@ jobs:
       - name: Build Docker Image
         if: inputs.is_docker == true
         run: |
+          SUPABASE_PUBLIC_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}"
+          if [ -z "$SUPABASE_PUBLIC_KEY" ]; then
+            SUPABASE_PUBLIC_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}"
+          fi
           if [ "${{ inputs.component }}" = "frontend" ]; then
             docker build \
               --build-arg NEXT_PUBLIC_SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
-              --build-arg NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}" \
+              --build-arg NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY="$SUPABASE_PUBLIC_KEY" \
+              --build-arg NEXT_PUBLIC_API_URL="${{ secrets.NEXT_PUBLIC_API_URL }}" \
               -t neurapodacr.azurecr.io/${{ inputs.component }}:${{ github.sha }} \
               -t neurapodacr.azurecr.io/${{ inputs.component }}:latest \
               -f ${{ inputs.component }}/docker/Dockerfile \

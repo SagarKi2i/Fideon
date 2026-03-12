@@ -1,6 +1,5 @@
 // Device API for Electron app integration
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL;
+import { getApiBaseUrl } from "@/lib/apiBaseUrl";
 
 export interface DeviceModel {
   model_id: string;
@@ -19,7 +18,7 @@ export interface DeviceModelsResponse {
 }
 
 export async function fetchDeviceModels(deviceToken: string): Promise<DeviceModelsResponse> {
-  const response = await fetch(`${API_URL}/api/device-models`, {
+  const response = await fetch(`${getApiBaseUrl()}/api/device-models`, {
     method: 'GET',
     headers: {
       'x-device-token': deviceToken,
@@ -38,7 +37,7 @@ export async function performDeviceCheckin(
   deviceToken: string,
   localModels: { model_id: string; is_downloaded: boolean }[]
 ): Promise<{ success: boolean; message: string }> {
-  const response = await fetch(`${API_URL}/api/device-checkin`, {
+  const response = await fetch(`${getApiBaseUrl()}/api/device-checkin`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

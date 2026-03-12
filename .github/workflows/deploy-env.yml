@@ -37,6 +37,10 @@ on:
         required: false
       NEXT_PUBLIC_SUPABASE_ANON_KEY:
         required: false
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:
+        required: false
+      NEXT_PUBLIC_API_URL:
+        required: false
       SUPABASE_SERVICE_ROLE_KEY:
         required: false
       SUPABASE_JWT_SECRET:
@@ -95,13 +99,18 @@ jobs:
             echo "──────────────────────────────────────"
             echo " Start new container"
             echo "──────────────────────────────────────"
+            SUPABASE_PUBLIC_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}"
+            if [ -z "$SUPABASE_PUBLIC_KEY" ]; then
+              SUPABASE_PUBLIC_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}"
+            fi
             if [ "${{ inputs.component }}" = "neurapod-app" ] || [ "${{ inputs.component }}" = "frontend" ]; then
               docker run -d \
                 --name ${{ inputs.container_name }} \
                 --restart unless-stopped \
                 -p ${{ inputs.port }}:3000 \
                 -e NEXT_PUBLIC_SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
-                -e NEXT_PUBLIC_SUPABASE_ANON_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}" \
+                -e NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY="$SUPABASE_PUBLIC_KEY" \
+                -e NEXT_PUBLIC_API_URL="${{ secrets.NEXT_PUBLIC_API_URL }}" \
                 neurapodacr.azurecr.io/${{ inputs.component }}:${{ inputs.image_sha }}
             else
               docker run -d \
@@ -109,7 +118,7 @@ jobs:
                 --restart unless-stopped \
                 -p ${{ inputs.port }}:${{ inputs.port }} \
                 -e SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
-                -e SUPABASE_ANON_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}" \
+                -e SUPABASE_ANON_KEY="$SUPABASE_PUBLIC_KEY" \
                 -e SUPABASE_SERVICE_ROLE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
                 -e SUPABASE_JWT_SECRET="${{ secrets.SUPABASE_JWT_SECRET }}" \
                 -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \

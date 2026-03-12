@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { apiUrl } from "@/lib/apiBaseUrl";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -62,7 +63,7 @@ export function GlobalAdminRoleManager() {
       if (!session) return;
 
       try {
-        const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/list-users`, {
+        const response = await fetch(apiUrl("/api/list-users"), {
           headers: {
             Authorization: `Bearer ${session.access_token}`,
             "Content-Type": "application/json",
@@ -99,7 +100,7 @@ export function GlobalAdminRoleManager() {
 
       let updated = false;
       try {
-        const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/admin-set-user-role`, {
+        const response = await fetch(apiUrl("/api/admin-set-user-role"), {
           method: "POST",
           headers: {
             Authorization: `Bearer ${session.access_token}`,
@@ -168,7 +169,7 @@ export function GlobalAdminRoleManager() {
         throw new Error("Session expired");
       }
 
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/admin-create-user`, {
+      const response = await fetch(apiUrl("/api/admin-create-user"), {
         method: "POST",
         headers: {
           Authorization: `Bearer ${session.access_token}`,

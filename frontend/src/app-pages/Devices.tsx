@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
+import { apiUrl } from "@/lib/apiBaseUrl";
 import { formatDistanceToNow } from "date-fns";
 import { brokerModels, mgaModels, carrierModels } from "@/lib/insuranceMocks";
 
@@ -122,7 +123,7 @@ export default function Devices() {
 
       try {
         const response = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL}/api/list-users`,
+          apiUrl("/api/list-users"),
           { headers: { Authorization: `Bearer ${session.access_token}` } }
         );
 
