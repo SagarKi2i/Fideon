@@ -95,11 +95,11 @@ jobs:
             echo "──────────────────────────────────────"
             echo " Start new container"
             echo "──────────────────────────────────────"
-            if [ "${{ inputs.component }}" = "neurapod-app" ]; then
+            if [ "${{ inputs.component }}" = "neurapod-app" ] || [ "${{ inputs.component }}" = "frontend" ]; then
               docker run -d \
                 --name ${{ inputs.container_name }} \
                 --restart unless-stopped \
-                -p ${{ inputs.port }}:${{ inputs.port }} \
+                -p ${{ inputs.port }}:3000 \
                 -e NEXT_PUBLIC_SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
                 -e NEXT_PUBLIC_SUPABASE_ANON_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}" \
                 neurapodacr.azurecr.io/${{ inputs.component }}:${{ inputs.image_sha }}
