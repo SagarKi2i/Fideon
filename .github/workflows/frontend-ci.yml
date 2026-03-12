@@ -1,0 +1,75 @@
+# ─────────────────────────────────────────────────────────────
+# PLACE AT: .github/workflows/frontend-ci.yml
+# ─────────────────────────────────────────────────────────────
+
+name: Frontend CI/CD
+
+on:
+  push:
+    branches:
+      - 'v*-dev'
+      - 'v*-staging'
+      - 'v1'
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/**'
+
+  pull_request:
+    branches:
+      - 'v*-dev'
+      - 'v*-staging'
+      - 'v1'
+    paths:
+      - 'frontend/**'
+
+jobs:
+  # ── Build, lint, test, docker build, push to ACR ──────────────────────────
+  ci:
+    uses: ./.github/workflows/ci-component.yml
+    with:
+      component: frontend
+      node-version: '20'
+      target_branch: ${{ github.ref_name }}
+      enable_sonar: ${{ github.event_name == 'pull_request' && github.base_ref == 'v1-dev' }}
+      is_docker: true
+      environment: ${{ github.ref_name == 'v1' && 'production' || github.ref_name == 'v1-staging' && 'staging' || 'development' }}
+    secrets: inherit
+
+  # ── Deploy to development (on push to v1-dev) ─────────────────────────────
+  deploy-dev:
+    needs: ci
+    if: github.ref == 'refs/heads/v1-dev' && github.event_name == 'push'
+    uses: ./.github/workflows/deploy-env.yml
+    with:
+      environment: development
+      component: frontend
+      container_name: neurapod-frontend
+      port: '4200'
+      image_sha: ${{ github.sha }}
+    secrets: inherit
+
+  # ── Deploy to staging (on push to v1-staging) ─────────────────────────────
+  deploy-staging:
+    needs: ci
+    if: github.ref == 'refs/heads/v1-staging' && github.event_name == 'push'
+    uses: ./.github/workflows/deploy-env.yml
+    with:
+      environment: staging
+      component: frontend
+      container_name: neurapod-frontend
+      port: '4200'
+      image_sha: ${{ github.sha }}
+    secrets: inherit
+
+  # ── Deploy to production (on push to v1 — requires manual approval) ────────
+  deploy-production:
+    needs: ci
+    if: github.ref == 'refs/heads/v1' && github.event_name == 'push'
+    uses: ./.github/workflows/deploy-env.yml
+    with:
+      environment: production
+      component: frontend
+      container_name: neurapod-frontend
+      port: '4200'
+      image_sha: ${{ github.sha }}
+    secrets: inherit

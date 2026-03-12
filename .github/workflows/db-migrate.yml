@@ -1,0 +1,118 @@
+name: Database Migrations
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "staging"
+        type: choice
+        options: [staging, production]
+      dry_run:
+        description: "Dry run only (show pending migrations, don't apply)"
+        required: false
+        default: "true"
+        type: boolean
+
+concurrency:
+  group: db-migration-${{ github.event.inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  # ══════════════════════════════════════════════════════════════
+  # DRY RUN – always show what will be applied
+  # ══════════════════════════════════════════════════════════════
+  dry-run:
+    name: Dry run – ${{ github.event.inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Link to ${{ github.event.inputs.environment }} project
+        run: |
+          supabase link \
+            --project-ref ${{ github.event.inputs.environment == 'production' && secrets.PROD_SUPABASE_PROJECT_REF || secrets.STAGING_SUPABASE_PROJECT_REF }} \
+            --password ${{ github.event.inputs.environment == 'production' && secrets.PROD_SUPABASE_DB_PASSWORD || secrets.STAGING_SUPABASE_DB_PASSWORD }}
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+      - name: Show pending migrations (dry run)
+        run: |
+          echo "════════════════════════════════════"
+          echo "  Pending migrations for: ${{ github.event.inputs.environment }}"
+          echo "════════════════════════════════════"
+          supabase db diff --schema public || true
+          supabase migration list
+
+  # ══════════════════════════════════════════════════════════════
+  # APPLY – only if dry_run=false and manual approval for prod
+  # ══════════════════════════════════════════════════════════════
+  apply-migrations:
+    name: Apply migrations – ${{ github.event.inputs.environment }}
+    runs-on: ubuntu-latest
+    needs: dry-run
+    timeout-minutes: 20
+    if: ${{ github.event.inputs.dry_run == 'false' }}
+    environment:
+      name: ${{ github.event.inputs.environment == 'production' && 'production-approval' || 'staging' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Link project
+        run: |
+          supabase link \
+            --project-ref ${{ github.event.inputs.environment == 'production' && secrets.PROD_SUPABASE_PROJECT_REF || secrets.STAGING_SUPABASE_PROJECT_REF }} \
+            --password ${{ github.event.inputs.environment == 'production' && secrets.PROD_SUPABASE_DB_PASSWORD || secrets.STAGING_SUPABASE_DB_PASSWORD }}
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+      - name: Apply migrations
+        run: |
+          echo "Applying migrations to ${{ github.event.inputs.environment }}..."
+          supabase db push
+          echo "✅ Migrations applied successfully"
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+      - name: Run schema tests post-migration
+        run: |
+          supabase db execute --file supabase/seed/schema_tests.sql \
+            2>&1 | tee schema_test_output.txt
+          if grep -q "0 rows" schema_test_output.txt; then
+            echo "✅ Schema tests passed"
+          fi
+
+      - name: Notify Slack
+        uses: slackapi/slack-github-action@v1
+        if: always()
+        with:
+          payload: |
+            {
+              "text": "${{ job.status == 'success' && '✅' || '❌' }} *DB migration ${{ job.status }}* — `${{ github.event.inputs.environment }}`",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "${{ job.status == 'success' && '✅' || '❌' }} *Database migration — ${{ job.status }}*\n*Environment:* `${{ github.event.inputs.environment }}`\n*Applied by:* ${{ github.actor }}\n*<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>*"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL:  ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

@@ -1,0 +1,152 @@
+# ─────────────────────────────────────────────────────────────
+# PLACE AT: .github/workflows/hotfix-pipeline.yml
+# ─────────────────────────────────────────────────────────────
+# Expedited pipeline for hotfix/* branches targeting v1 (production).
+# Skips SonarQube for speed. After deploy, back-merge to v1-dev
+# and v1-staging manually.
+
+name: Hotfix Pipeline
+
+on:
+  pull_request:
+    branches:
+      - 'v1'
+    paths:
+      - 'neurapod-app/**'
+      - 'backend/**'
+
+  push:
+    branches:
+      - 'v1'
+    paths:
+      - 'neurapod-app/**'
+      - 'backend/**'
+
+jobs:
+  # ── Build & push frontend ──────────────────────────────────────────────────
+  build-frontend:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Frontend Docker Image
+        run: |
+          docker build \
+            -t neurapodacr.azurecr.io/neurapod-app:hotfix-${{ github.sha }} \
+            -t neurapodacr.azurecr.io/neurapod-app:latest \
+            -f neurapod-app/docker/Dockerfile \
+            neurapod-app/
+
+      - name: Push to ACR
+        if: github.event_name == 'push'
+        run: |
+          echo "${{ secrets.AZURE_CR_PASSWORD }}" | \
+            docker login neurapodacr.azurecr.io \
+              -u "${{ secrets.AZURE_CR_USERNAME }}" \
+              --password-stdin
+          docker push neurapodacr.azurecr.io/neurapod-app:latest
+          docker push neurapodacr.azurecr.io/neurapod-app:hotfix-${{ github.sha }}
+
+  # ── Build & push backend ───────────────────────────────────────────────────
+  build-backend:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Backend Docker Image
+        run: |
+          docker build \
+            -t neurapodacr.azurecr.io/backend:hotfix-${{ github.sha }} \
+            -t neurapodacr.azurecr.io/backend:latest \
+            backend/
+
+      - name: Push to ACR
+        if: github.event_name == 'push'
+        run: |
+          echo "${{ secrets.AZURE_CR_PASSWORD }}" | \
+            docker login neurapodacr.azurecr.io \
+              -u "${{ secrets.AZURE_CR_USERNAME }}" \
+              --password-stdin
+          docker push neurapodacr.azurecr.io/backend:latest
+          docker push neurapodacr.azurecr.io/backend:hotfix-${{ github.sha }}
+
+  # ── Deploy both to production VM ──────────────────────────────────────────
+  deploy-hotfix:
+    needs: [build-frontend, build-backend]
+    if: github.ref == 'refs/heads/v1' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Write SSH key
+        run: |
+          echo "${{ secrets.CHATBOT_SERVER_KEY }}" > ssh_key
+          chmod 600 ssh_key
+
+      - name: Deploy hotfix to production VM
+        run: |
+          ssh -i ssh_key \
+              -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=30 \
+              ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} << 'ENDSSH'
+
+            set -e
+
+            echo "${{ secrets.AZURE_CR_PASSWORD }}" | \
+              docker login neurapodacr.azurecr.io \
+                -u "${{ secrets.AZURE_CR_USERNAME }}" \
+                --password-stdin
+
+            # Restart frontend
+            docker pull neurapodacr.azurecr.io/neurapod-app:hotfix-${{ github.sha }}
+            docker stop neurapod-frontend 2>/dev/null || true
+            docker rm   neurapod-frontend 2>/dev/null || true
+            docker run -d --name neurapod-frontend --restart unless-stopped \
+              -p 4200:4200 \
+              -e NEXT_PUBLIC_SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
+              -e NEXT_PUBLIC_SUPABASE_ANON_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}" \
+              neurapodacr.azurecr.io/neurapod-app:hotfix-${{ github.sha }}
+
+            # Restart backend
+            docker pull neurapodacr.azurecr.io/backend:hotfix-${{ github.sha }}
+            docker stop neurapod-backend 2>/dev/null || true
+            docker rm   neurapod-backend 2>/dev/null || true
+            docker run -d --name neurapod-backend --restart unless-stopped \
+              -p 8080:8080 \
+              -e SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
+              -e SUPABASE_ANON_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}" \
+              -e SUPABASE_SERVICE_ROLE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+              -e SUPABASE_JWT_SECRET="${{ secrets.SUPABASE_JWT_SECRET }}" \
+              -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+              -e GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" \
+              neurapodacr.azurecr.io/backend:hotfix-${{ github.sha }}
+
+            sleep 20
+            docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+
+            echo "══════════════════════════════════════"
+            echo " FRONTEND LOGS"
+            echo "══════════════════════════════════════"
+            docker logs --tail 30 neurapod-frontend
+
+            echo "══════════════════════════════════════"
+            echo " BACKEND LOGS"
+            echo "══════════════════════════════════════"
+            docker logs --tail 30 neurapod-backend
+
+            echo "✓ Hotfix deployed to production."
+            echo "⚠ REMINDER: Back-merge this fix to v1-dev and v1-staging!"
+          ENDSSH
+
+      - name: Hotfix summary
+        run: |
+          HOST="${{ vars.AZURE_VM_PUBLIC_HOST }}"
+          echo "════════════════════════════════════════"
+          echo "  Hotfix deployed to : production (v1)"
+          echo "  Frontend           : http://$HOST:4200"
+          echo "  Backend            : http://$HOST:8080"
+          echo "  SHA                : ${{ github.sha }}"
+          echo ""
+          echo "  ⚠ TODO: Back-merge to v1-dev + v1-staging"
+          echo "════════════════════════════════════════"

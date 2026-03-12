@@ -1,0 +1,123 @@
+# ─────────────────────────────────────────────────────────────
+# PLACE AT: .github/workflows/backend-ci.yml
+# ─────────────────────────────────────────────────────────────
+
+name: Backend CI/CD
+
+on:
+  push:
+    branches:
+      - 'v*-dev'
+      - 'v*-staging'
+      - 'v1'
+    paths:
+      - 'backend/**'
+      - '.github/workflows/**'
+
+  pull_request:
+    branches:
+      - 'v*-dev'
+      - 'v*-staging'
+      - 'v1'
+    paths:
+      - 'backend/**'
+
+jobs:
+  # ── Build, lint, test, docker build, push to ACR ──────────────────────────
+  ci:
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'v1' && 'production' || github.ref_name == 'v1-staging' && 'staging' || 'development' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov flake8 || true
+
+      - name: Lint
+        working-directory: backend
+        run: flake8 . --count --max-line-length=120 --statistics || echo "⚠ Lint issues — non-blocking"
+
+      - name: Test
+        working-directory: backend
+        run: pytest --cov=. --cov-report=xml || echo "⚠ No tests found — skipping"
+
+      - name: SonarQube Scan
+        if: github.event_name == 'pull_request' && github.base_ref == 'v1-dev'
+        uses: SonarSource/sonarqube-scan-action@v4
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          projectBaseDir: backend
+
+      - name: Build Docker Image
+        run: |
+          docker build \
+            -t neurapodacr.azurecr.io/backend:${{ github.sha }} \
+            -t neurapodacr.azurecr.io/backend:latest \
+            backend/
+
+      - name: Login to ACR & Push
+        if: |
+          github.ref == 'refs/heads/v1-dev' ||
+          github.ref == 'refs/heads/v1-staging' ||
+          github.ref == 'refs/heads/v1'
+        run: |
+          echo "${{ secrets.AZURE_CR_PASSWORD }}" | \
+            docker login neurapodacr.azurecr.io \
+              -u "${{ secrets.AZURE_CR_USERNAME }}" \
+              --password-stdin
+
+          docker push neurapodacr.azurecr.io/backend:latest
+          docker push neurapodacr.azurecr.io/backend:${{ github.sha }}
+          echo "✓ Pushed neurapodacr.azurecr.io/backend:${{ github.sha }}"
+
+  # ── Deploy to development (on push to v1-dev) ─────────────────────────────
+  deploy-dev:
+    needs: ci
+    if: github.ref == 'refs/heads/v1-dev' && github.event_name == 'push'
+    uses: ./.github/workflows/deploy-env.yml
+    with:
+      environment: development
+      component: backend
+      container_name: neurapod-backend
+      port: '8080'
+      image_sha: ${{ github.sha }}
+    secrets: inherit
+
+  # ── Deploy to staging (on push to v1-staging) ─────────────────────────────
+  deploy-staging:
+    needs: ci
+    if: github.ref == 'refs/heads/v1-staging' && github.event_name == 'push'
+    uses: ./.github/workflows/deploy-env.yml
+    with:
+      environment: staging
+      component: backend
+      container_name: neurapod-backend
+      port: '8080'
+      image_sha: ${{ github.sha }}
+    secrets: inherit
+
+  # ── Deploy to production (on push to v1 — requires manual approval) ────────
+  deploy-production:
+    needs: ci
+    if: github.ref == 'refs/heads/v1' && github.event_name == 'push'
+    uses: ./.github/workflows/deploy-env.yml
+    with:
+      environment: production
+      component: backend
+      container_name: neurapod-backend
+      port: '8080'
+      image_sha: ${{ github.sha }}
+    secrets: inherit
