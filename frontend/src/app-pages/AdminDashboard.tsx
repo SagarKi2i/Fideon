@@ -39,28 +39,71 @@ export default function AdminDashboard() {
 
   async function fetchDashboardStats() {
     try {
-      const { data: devices } = await supabase.from('devices').select('*');
-      const { data: licenses } = await supabase.from('device_licenses').select('*');
-      const { data: deviceModels } = await supabase.from('device_models').select('*');
-      const { data: syncLogs } = await supabase
-        .from('device_sync_logs')
-        .select('*')
-        .eq('status', 'failed')
-        .gte('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
+      const dayMs = 24 * 60 * 60 * 1000;
+      const nowIso = new Date().toISOString();
+      const yesterdayIso = new Date(Date.now() - dayMs).toISOString();
+      const weekAgoIso = new Date(Date.now() - (7 * dayMs)).toISOString();
+
+      const [
+        { data: devices },
+        { data: licenses },
+        { data: syncLogs },
+        { count: assignedModelsCount, error: assignedModelsError },
+        { count: pendingPodRequestsCount, error: pendingReqError },
+        { count: usageTodayCount, error: usageTodayError },
+        { count: usageYesterdayCount, error: usageYesterdayError },
+        { count: devicesCreatedThisWeekCount, error: devicesWeekError },
+      ] = await Promise.all([
+        supabase.from('devices').select('*'),
+        supabase.from('device_licenses').select('*'),
+        supabase
+          .from('device_sync_logs')
+          .select('*')
+          .eq('status', 'failed')
+          .gte('created_at', yesterdayIso),
+        supabase.from('activated_models').select('*', { count: 'exact', head: true }),
+        supabase.from('pod_activation_requests').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
+        supabase.from('chat_messages').select('*', { count: 'exact', head: true }).gte('created_at', yesterdayIso),
+        supabase
+          .from('chat_messages')
+          .select('*', { count: 'exact', head: true })
+          .gte('created_at', new Date(Date.now() - (2 * dayMs)).toISOString())
+          .lt('created_at', yesterdayIso),
+        supabase.from('devices').select('*', { count: 'exact', head: true }).gte('registered_at', weekAgoIso),
+      ]);
+
+      if (assignedModelsError) throw assignedModelsError;
+      if (pendingReqError) throw pendingReqError;
+      if (usageTodayError) throw usageTodayError;
+      if (usageYesterdayError) throw usageYesterdayError;
+      if (devicesWeekError) throw devicesWeekError;
 
       const now = new Date();
       const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+      const usageToday = usageTodayCount || 0;
+      const usageYesterday = usageYesterdayCount || 0;
+      const usageTrend = usageYesterday > 0
+        ? `${Math.round(((usageToday - usageYesterday) / usageYesterday) * 100)}% vs yesterday`
+        : usageToday > 0
+          ? "Active today"
+          : "No usage yet";
 
       setStats({
         totalDevices: devices?.length || 0,
         onlineDevices: devices?.filter(d => d.status === 'online').length || 0,
         offlineDevices: devices?.filter(d => d.status === 'offline').length || 0,
-        pendingApprovals: devices?.filter(d => d.status === 'never_checked_in').length || 0,
+        pendingApprovals: pendingPodRequestsCount || 0,
         expiringSoon: licenses?.filter(l => l.expires_at && new Date(l.expires_at) <= thirtyDaysFromNow).length || 0,
         syncFailures: syncLogs?.length || 0,
-        totalModelsAssigned: deviceModels?.length || 0,
-        totalUsageToday: 0,
+        totalModelsAssigned: assignedModelsCount || 0,
+        totalUsageToday: usageToday,
       });
+
+      // attach real-time trend notes to card descriptors where relevant
+      statCardsTemplate.totalDevices.trend = devicesCreatedThisWeekCount
+        ? `+${devicesCreatedThisWeekCount} this week`
+        : undefined;
+      statCardsTemplate.totalUsageToday.trend = usageTrend;
     } catch (error) {
       console.error('Error fetching dashboard stats:', error);
     } finally {
@@ -68,61 +111,70 @@ export default function AdminDashboard() {
     }
   }
 
-  const statCards = [
-    {
+  const statCardsTemplate: Record<string, {
+    title: string;
+    icon: any;
+    description: string;
+    color?: string;
+    trend?: string;
+    value?: number;
+  }> = {
+    totalDevices: {
       title: 'Total Devices',
-      value: stats.totalDevices,
       icon: Server,
       description: 'Registered devices',
-      trend: '+12%',
     },
-    {
+    onlineDevices: {
       title: 'Online',
-      value: stats.onlineDevices,
       icon: CheckCircle,
       description: 'Active right now',
       color: 'text-green-500',
     },
-    {
+    offlineDevices: {
       title: 'Offline',
-      value: stats.offlineDevices,
       icon: XCircle,
       description: 'Not connected',
       color: 'text-gray-500',
     },
-    {
+    pendingApprovals: {
       title: 'Pending Approvals',
-      value: stats.pendingApprovals,
       icon: Clock,
-      description: 'Awaiting approval',
+      description: 'Pending pod requests',
       color: 'text-yellow-500',
     },
-    {
+    expiringSoon: {
       title: 'License Expiring',
-      value: stats.expiringSoon,
       icon: AlertTriangle,
       description: 'Within 30 days',
       color: 'text-orange-500',
     },
-    {
+    syncFailures: {
       title: 'Sync Failures',
-      value: stats.syncFailures,
       icon: AlertTriangle,
       description: 'Last 24 hours',
       color: 'text-red-500',
     },
-    {
+    totalModelsAssigned: {
       title: 'Models Assigned',
-      value: stats.totalModelsAssigned,
       icon: HardDrive,
       description: 'Total allocations',
     },
-    {
+    totalUsageToday: {
       title: 'Usage Today',
-      value: stats.totalUsageToday,
       icon: Activity,
-      description: 'Model queries',
+      description: 'Chat queries (24h)',
     },
+  };
+
+  const statCards = [
+    { ...statCardsTemplate.totalDevices, value: stats.totalDevices },
+    { ...statCardsTemplate.onlineDevices, value: stats.onlineDevices },
+    { ...statCardsTemplate.offlineDevices, value: stats.offlineDevices },
+    { ...statCardsTemplate.pendingApprovals, value: stats.pendingApprovals },
+    { ...statCardsTemplate.expiringSoon, value: stats.expiringSoon },
+    { ...statCardsTemplate.syncFailures, value: stats.syncFailures },
+    { ...statCardsTemplate.totalModelsAssigned, value: stats.totalModelsAssigned },
+    { ...statCardsTemplate.totalUsageToday, value: stats.totalUsageToday },
   ];
 
   return (
@@ -134,7 +186,7 @@ export default function AdminDashboard() {
 
       {/* Header */}
       <div className="mb-8 animate-fade-in">
-        <h1 className="text-4xl font-bold bg-gradient-hero bg-clip-text text-transparent mb-2">
+        <h1 className="text-4xl font-bold text-gray-900 dark:text-gray-100 mb-2">
           Admin Dashboard
         </h1>
         <p className="text-muted-foreground">
