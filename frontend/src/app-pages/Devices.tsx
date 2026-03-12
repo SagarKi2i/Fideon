@@ -83,7 +83,7 @@ export default function Devices() {
         .select("role")
         .eq("user_id", user.id);
 
-      if (!roles?.some(r => r.role === "admin")) {
+      if (!roles?.some(r => r.role === "admin" || r.role === "global_admin")) {
         toast({ title: "Access Denied", description: "Admin only", variant: "destructive" });
         navigate("/"); return;
       }
@@ -94,20 +94,49 @@ export default function Devices() {
     }
   };
 
+  const loadUsersFromSupabaseFallback = async () => {
+    const { data: appUsers, error: appUsersError } = await supabase
+      .from("app_users")
+      .select("user_id,email,created_at");
+    if (appUsersError) throw appUsersError;
+
+    const { data: roleRows, error: rolesError } = await supabase
+      .from("user_roles")
+      .select("user_id,role");
+    if (rolesError) throw rolesError;
+
+    const roleMap = new Map((roleRows || []).map(r => [r.user_id, r.role]));
+    const fallbackUsers: UserAccount[] = (appUsers || []).map(u => ({
+      id: u.user_id,
+      email: u.email,
+      role: roleMap.get(u.user_id) || "user",
+      created_at: u.created_at,
+    }));
+    setUsers(fallbackUsers);
+  };
+
   const loadUsers = async () => {
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) return;
 
-      const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL}/api/list-users`,
-        { headers: { Authorization: `Bearer ${session.access_token}` } }
-      );
+      try {
+        const response = await fetch(
+          `${process.env.NEXT_PUBLIC_API_URL}/api/list-users`,
+          { headers: { Authorization: `Bearer ${session.access_token}` } }
+        );
 
-      if (!response.ok) throw new Error("Failed to fetch users");
-      const data = await response.json();
-      const userList: UserAccount[] = data.users || [];
-      setUsers(userList);
+        if (response.ok) {
+          const data = await response.json();
+          const userList: UserAccount[] = data.users || [];
+          setUsers(userList);
+        } else {
+          await loadUsersFromSupabaseFallback();
+        }
+      } catch (backendError) {
+        console.warn("Primary /api/list-users failed, using fallback:", backendError);
+        await loadUsersFromSupabaseFallback();
+      }
 
       const { data: allModels, error } = await supabase
         .from("activated_models")
@@ -225,7 +254,7 @@ export default function Devices() {
           <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
             {users.map((user, index) => {
               const models = userModels[user.id] || [];
-              const isAdmin = user.role === "admin";
+              const isAdmin = user.role === "admin" || user.role === "global_admin";
               const isPickerOpen = allocatingForUser === user.id;
               const availableModels = allMarketplaceModels.filter(
                 m => !models.some(um => um.model_id === m.id)

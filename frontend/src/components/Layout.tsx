@@ -7,6 +7,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { User, LogOut } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import type { User as SupabaseUser } from "@supabase/supabase-js";
+import { useUserRole } from "@/hooks/useUserRole";
 
 interface LayoutProps {
   children: ReactNode;
@@ -16,6 +17,15 @@ export function Layout({ children }: LayoutProps) {
   const [user, setUser] = useState<SupabaseUser | null>(null);
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { role } = useUserRole();
+
+  const roleLabelMap: Record<string, string> = {
+    global_admin: "Global Admin",
+    admin: "Admin",
+    user: "User",
+    viewer: "Viewer",
+    guest: "Guest",
+  };
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
@@ -64,6 +74,11 @@ export function Layout({ children }: LayoutProps) {
               <div className="hidden sm:flex items-center gap-2 text-sm text-muted-foreground">
                 <User className="h-4 w-4" />
                 <span className="truncate max-w-[150px] md:max-w-none">{user.email}</span>
+                {role && (
+                  <span className="text-xs px-2 py-0.5 rounded-full border border-border bg-muted/60 text-foreground">
+                    {roleLabelMap[role] || role}
+                  </span>
+                )}
               </div>
               {/* Mobile: icon only, Desktop: icon + text */}
               <Button

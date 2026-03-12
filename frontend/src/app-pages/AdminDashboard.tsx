@@ -5,6 +5,8 @@ import { Server, CheckCircle, XCircle, Clock, AlertTriangle, HardDrive, Activity
 import { Progress } from '@/components/ui/progress';
 import { ModelAllocationSection } from '@/components/admin/ModelAllocationSection';
 import { PodActivationRequests } from '@/components/admin/PodActivationRequests';
+import { useUserRole } from '@/hooks/useUserRole';
+import { GlobalAdminRoleManager } from '@/components/admin/GlobalAdminRoleManager';
 
 interface DashboardStats {
   totalDevices: number;
@@ -18,6 +20,7 @@ interface DashboardStats {
 }
 
 export default function AdminDashboard() {
+  const { isGlobalAdmin } = useUserRole();
   const [stats, setStats] = useState<DashboardStats>({
     totalDevices: 0,
     onlineDevices: 0,
@@ -274,6 +277,13 @@ export default function AdminDashboard() {
       <div className="mt-6 animate-fade-in">
         <ModelAllocationSection />
       </div>
+
+      {/* Global Admin extras */}
+      {isGlobalAdmin && (
+        <div className="mt-6 animate-fade-in">
+          <GlobalAdminRoleManager />
+        </div>
+      )}
     </div>
   );
 }

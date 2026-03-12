@@ -1,21 +1,87 @@
-import { useState } from "react";
+import React from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import type { Provider } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
+import type { Database } from "@/integrations/supabase/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { Shield, Lock, Cpu } from "lucide-react";
+import { Shield, Lock, Cpu, KeyRound, Mail } from "lucide-react";
 import { FideonLogo } from "@/components/FideonLogo";
 import privateTenantBg from "@/assets/private-ai-tenant-bg.jpg";
 
+type AppRole = Database["public"]["Enums"]["app_role"];
+type AuthView = "signin" | "signup" | "forgot" | "reset";
+
 export default function Auth() {
+  const navigate = useNavigate();
+  const { toast } = useToast();
+  const authEnableSso = process.env.NEXT_PUBLIC_AUTH_ENABLE_SSO === "true";
+  const authEnableMfa = process.env.NEXT_PUBLIC_AUTH_ENABLE_MFA === "true";
+  const ssoProviderCsv = process.env.NEXT_PUBLIC_AUTH_SSO_PROVIDERS || "";
+  const allowedProviders = useMemo(
+    () =>
+      ssoProviderCsv
+        .split(",")
+        .map((s) => s.trim().toLowerCase())
+        .filter((s): s is Provider => ["google", "github", "azure"].includes(s)),
+    [ssoProviderCsv]
+  );
+
+  const [view, setView] = useState<AuthView>("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [fullName, setFullName] = useState("");
+  const [signupRole, setSignupRole] = useState<AppRole>("user");
+  const [signupEmail, setSignupEmail] = useState("");
+  const [signupPassword, setSignupPassword] = useState("");
+  const [signupConfirmPassword, setSignupConfirmPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [loading, setLoading] = useState(false);
-  const { toast } = useToast();
-  const navigate = useNavigate();
+  const signupRoles: Array<{ value: AppRole; label: string }> = [
+    { value: "global_admin", label: "Global Admin" },
+    { value: "admin", label: "Admin" },
+    { value: "user", label: "User" },
+    { value: "viewer", label: "Viewer" },
+    { value: "guest", label: "Guest" },
+  ];
+
+  const [activeUserId, setActiveUserId] = useState<string | null>(null);
+
+  const [factors, setFactors] = useState<Array<{ id: string; label: string }>>([]);
+  const [factorId, setFactorId] = useState<string>("");
+  const [challengeId, setChallengeId] = useState<string>("");
+  const [totpCode, setTotpCode] = useState<string>("");
+  const [qrMarkup, setQrMarkup] = useState<string>("");
+
+  useEffect(() => {
+    const hash = window.location.hash.startsWith("#")
+      ? window.location.hash.slice(1)
+      : window.location.hash;
+    const hashParams = new URLSearchParams(hash);
+    if (hashParams.get("type") === "recovery") {
+      setView("reset");
+    }
+
+    const bootstrap = async () => {
+      const { data } = await supabase.auth.getUser();
+      setActiveUserId(data.user?.id ?? null);
+    };
+    bootstrap();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      setActiveUserId(session?.user?.id ?? null);
+      if (event === "PASSWORD_RECOVERY") {
+        setView("reset");
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
 
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -36,7 +102,7 @@ export default function Auth() {
           .eq('user_id', signInData.user.id)
           .maybeSingle();
 
-        if (roleData?.role === 'admin') {
+        if (roleData?.role === 'admin' || roleData?.role === 'global_admin') {
           navigate("/admin");
         } else {
           navigate("/");
@@ -54,6 +120,444 @@ export default function Auth() {
       setLoading(false);
     }
   };
+
+  const handleSignUp = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (signupPassword.length < 8) {
+      toast({
+        title: "Password too short",
+        description: "Use at least 8 characters.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (signupPassword !== signupConfirmPassword) {
+      toast({
+        title: "Passwords do not match",
+        description: "Please enter the same password in both fields.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const { data, error } = await supabase.auth.signUp({
+        email: signupEmail,
+        password: signupPassword,
+        options: {
+          data: {
+            full_name: fullName,
+            requested_role: signupRole,
+          },
+        },
+      });
+
+      if (error) throw error;
+
+      if (data.user) {
+        const { error: profileError } = await supabase
+          .from("app_users")
+          .update({ full_name: fullName })
+          .eq("user_id", data.user.id);
+        if (profileError) {
+          console.warn("Unable to update app_users full_name:", profileError.message);
+        }
+      }
+
+      toast({
+        title: "Account created",
+        description:
+          "Signup successful. If email confirmation is enabled, verify your email before signing in.",
+      });
+
+      setEmail(signupEmail);
+      setPassword("");
+      setSignupPassword("");
+      setSignupConfirmPassword("");
+      setView("signin");
+    } catch (error: any) {
+      toast({
+        title: "Signup failed",
+        description: error.message || "Could not create account.",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleForgotPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      const redirectTo = `${window.location.origin}/auth`;
+      const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
+      if (error) throw error;
+      toast({
+        title: "Reset email sent",
+        description: "Check your inbox for the password reset link.",
+      });
+      setView("signin");
+    } catch (error: any) {
+      toast({
+        title: "Error",
+        description: error.message || "Failed to send reset email",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newPassword.length < 8) {
+      toast({
+        title: "Password too short",
+        description: "Use at least 8 characters.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      toast({
+        title: "Passwords do not match",
+        description: "Please enter the same password in both fields.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      if (error) throw error;
+      toast({
+        title: "Password updated",
+        description: "Sign in with your new password.",
+      });
+      setView("signin");
+      setPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+    } catch (error: any) {
+      toast({
+        title: "Reset failed",
+        description: error.message || "Could not update password.",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleOAuthSignIn = async (provider: Provider) => {
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider,
+        options: { redirectTo: `${window.location.origin}/auth` },
+      });
+      if (error) throw error;
+    } catch (error: any) {
+      toast({
+        title: "SSO sign-in failed",
+        description: error.message || `Could not sign in with ${provider}.`,
+        variant: "destructive",
+      });
+    }
+  };
+
+  const loadMfaFactors = async () => {
+    try {
+      const { data, error } = await supabase.auth.mfa.listFactors();
+      if (error) throw error;
+      const allTotp = [...(data?.all ?? [])]
+        .filter((f: any) => f.factor_type === "totp")
+        .map((f: any) => ({ id: f.id as string, label: f.friendly_name || "Authenticator App" }));
+      setFactors(allTotp);
+      if (!factorId && allTotp.length > 0) {
+        setFactorId(allTotp[0].id);
+      }
+    } catch (error: any) {
+      toast({
+        title: "MFA status unavailable",
+        description: error.message || "Could not load MFA factors.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleMfaEnroll = async () => {
+    try {
+      const { data, error } = await supabase.auth.mfa.enroll({
+        factorType: "totp",
+        friendlyName: "Authenticator App",
+      });
+      if (error) throw error;
+      setFactorId(data.id);
+      setQrMarkup((data.totp as any)?.qr_code || "");
+      toast({
+        title: "MFA enrolled",
+        description: "Scan the QR code and verify with a TOTP code.",
+      });
+      await loadMfaFactors();
+    } catch (error: any) {
+      toast({
+        title: "MFA enroll failed",
+        description: error.message || "Could not enroll MFA.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleMfaChallenge = async () => {
+    if (!factorId) {
+      toast({ title: "Select a factor", description: "Choose an enrolled factor first.", variant: "destructive" });
+      return;
+    }
+    try {
+      const { data, error } = await supabase.auth.mfa.challenge({ factorId });
+      if (error) throw error;
+      setChallengeId(data.id);
+      toast({ title: "Challenge created", description: "Enter the current TOTP code to verify." });
+    } catch (error: any) {
+      toast({
+        title: "Challenge failed",
+        description: error.message || "Could not create MFA challenge.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleMfaVerify = async () => {
+    if (!factorId || !challengeId || !totpCode) {
+      toast({
+        title: "Missing details",
+        description: "Factor, challenge, and code are required.",
+        variant: "destructive",
+      });
+      return;
+    }
+    try {
+      const { error } = await supabase.auth.mfa.verify({
+        factorId,
+        challengeId,
+        code: totpCode,
+      });
+      if (error) throw error;
+      setTotpCode("");
+      setChallengeId("");
+      toast({ title: "MFA verified", description: "Your factor is now active." });
+    } catch (error: any) {
+      toast({
+        title: "Verification failed",
+        description: error.message || "Invalid TOTP code.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleMfaUnenroll = async () => {
+    if (!factorId) {
+      return;
+    }
+    try {
+      const { error } = await supabase.auth.mfa.unenroll({ factorId });
+      if (error) throw error;
+      setFactorId("");
+      setChallengeId("");
+      setTotpCode("");
+      setQrMarkup("");
+      toast({ title: "MFA removed", description: "Selected factor was unenrolled." });
+      await loadMfaFactors();
+    } catch (error: any) {
+      toast({
+        title: "Unenroll failed",
+        description: error.message || "Could not remove MFA factor.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const signInView = (
+    <form onSubmit={handleSignIn} className="space-y-4">
+      <div className="space-y-2">
+        <Label htmlFor="signin-email">Email</Label>
+        <Input
+          id="signin-email"
+          type="email"
+          placeholder="your@email.com"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          required
+          className="bg-background/50"
+        />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="signin-password">Password</Label>
+        <Input
+          id="signin-password"
+          type="password"
+          placeholder="••••••••"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          required
+          className="bg-background/50"
+        />
+      </div>
+      <Button
+        type="submit"
+        className="w-full bg-gradient-to-r from-primary to-primary/80 hover:opacity-90 transition-opacity"
+        disabled={loading}
+      >
+        {loading ? "Signing in..." : "Sign In"}
+      </Button>
+      <Button type="button" variant="ghost" className="w-full" onClick={() => setView("forgot")}>
+        Forgot password?
+      </Button>
+      <Button type="button" variant="outline" className="w-full" onClick={() => setView("signup")}>
+        Create new account
+      </Button>
+    </form>
+  );
+
+  const signUpView = (
+    <form onSubmit={handleSignUp} className="space-y-4">
+      <div className="space-y-2">
+        <Label htmlFor="signup-name">Name</Label>
+        <Input
+          id="signup-name"
+          type="text"
+          placeholder="Your full name"
+          value={fullName}
+          onChange={(e) => setFullName(e.target.value)}
+          required
+          className="bg-background/50"
+        />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="signup-email">Email</Label>
+        <Input
+          id="signup-email"
+          type="email"
+          placeholder="your@email.com"
+          value={signupEmail}
+          onChange={(e) => setSignupEmail(e.target.value)}
+          required
+          className="bg-background/50"
+        />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="signup-role">Role</Label>
+        <select
+          id="signup-role"
+          value={signupRole}
+          onChange={(e) => setSignupRole(e.target.value as AppRole)}
+          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+          required
+        >
+          {signupRoles.map((r) => (
+            <option key={r.value} value={r.value}>
+              {r.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="signup-password">Password</Label>
+        <Input
+          id="signup-password"
+          type="password"
+          placeholder="At least 8 characters"
+          value={signupPassword}
+          onChange={(e) => setSignupPassword(e.target.value)}
+          minLength={8}
+          required
+          className="bg-background/50"
+        />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="signup-confirm-password">Confirm Password</Label>
+        <Input
+          id="signup-confirm-password"
+          type="password"
+          placeholder="Re-enter password"
+          value={signupConfirmPassword}
+          onChange={(e) => setSignupConfirmPassword(e.target.value)}
+          minLength={8}
+          required
+          className="bg-background/50"
+        />
+      </div>
+      <Button type="submit" className="w-full" disabled={loading}>
+        {loading ? "Creating account..." : "Sign Up"}
+      </Button>
+      <Button type="button" variant="ghost" className="w-full" onClick={() => setView("signin")}>
+        Already have an account? Sign in
+      </Button>
+    </form>
+  );
+
+  const forgotView = (
+    <form onSubmit={handleForgotPassword} className="space-y-4">
+      <div className="space-y-2">
+        <Label htmlFor="forgot-email">Work Email</Label>
+        <Input
+          id="forgot-email"
+          type="email"
+          placeholder="your@email.com"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          required
+          className="bg-background/50"
+        />
+      </div>
+      <Button type="submit" className="w-full" disabled={loading}>
+        {loading ? "Sending..." : "Send reset link"}
+      </Button>
+      <Button type="button" variant="ghost" className="w-full" onClick={() => setView("signin")}>
+        Back to sign in
+      </Button>
+    </form>
+  );
+
+  const resetView = (
+    <form onSubmit={handleResetPassword} className="space-y-4">
+      <div className="space-y-2">
+        <Label htmlFor="reset-password">New Password</Label>
+        <Input
+          id="reset-password"
+          type="password"
+          value={newPassword}
+          onChange={(e) => setNewPassword(e.target.value)}
+          minLength={8}
+          required
+          className="bg-background/50"
+        />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="reset-password-confirm">Confirm Password</Label>
+        <Input
+          id="reset-password-confirm"
+          type="password"
+          value={confirmPassword}
+          onChange={(e) => setConfirmPassword(e.target.value)}
+          minLength={8}
+          required
+          className="bg-background/50"
+        />
+      </div>
+      <Button type="submit" className="w-full" disabled={loading}>
+        {loading ? "Updating..." : "Update password"}
+      </Button>
+      <Button type="button" variant="ghost" className="w-full" onClick={() => setView("signin")}>
+        Back to sign in
+      </Button>
+    </form>
+  );
 
   return (
     <div className="min-h-screen relative flex items-center justify-center p-4 overflow-hidden">
@@ -139,43 +643,103 @@ export default function Auth() {
                 Welcome to Fideon Fabric
               </CardTitle>
               <CardDescription className="text-center">
-                Sign in to access your Private AI Tenant
+                {view === "signin" && "Sign in to access your Private AI Tenant"}
+                {view === "signup" && "Create your account to access Fideon Fabric"}
+                {view === "forgot" && "Request a secure password reset link"}
+                {view === "reset" && "Set a new password for your account"}
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <form onSubmit={handleSignIn} className="space-y-4">
-                <div className="space-y-2">
-                  <Label htmlFor="signin-email">Email</Label>
-                  <Input
-                    id="signin-email"
-                    type="email"
-                    placeholder="your@email.com"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    required
-                    className="bg-background/50"
-                  />
+              {view === "signin" && signInView}
+              {view === "signup" && signUpView}
+              {view === "forgot" && forgotView}
+              {view === "reset" && resetView}
+
+              {authEnableSso && allowedProviders.length > 0 && view === "signin" && (
+                <div className="mt-6 space-y-2">
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <Mail className="h-3.5 w-3.5" />
+                    Single sign-on
+                  </div>
+                  <div className="grid grid-cols-1 gap-2">
+                    {allowedProviders.map((provider) => (
+                      <Button
+                        key={provider}
+                        type="button"
+                        variant="outline"
+                        className="w-full"
+                        onClick={() => handleOAuthSignIn(provider)}
+                      >
+                        Continue with {provider[0].toUpperCase() + provider.slice(1)}
+                      </Button>
+                    ))}
+                  </div>
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="signin-password">Password</Label>
-                  <Input
-                    id="signin-password"
-                    type="password"
-                    placeholder="••••••••"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    required
-                    className="bg-background/50"
-                  />
+              )}
+
+              {authEnableMfa && (
+                <div className="mt-6 rounded-lg border border-border/60 bg-background/40 p-4 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <KeyRound className="h-4 w-4 text-primary" />
+                    <p className="text-sm font-medium">MFA (TOTP) setup</p>
+                  </div>
+                  {!activeUserId ? (
+                    <p className="text-xs text-muted-foreground">Sign in first to enroll and verify MFA factors.</p>
+                  ) : (
+                    <>
+                      <div className="grid grid-cols-2 gap-2">
+                        <Button type="button" variant="outline" onClick={loadMfaFactors}>
+                          Load factors
+                        </Button>
+                        <Button type="button" variant="outline" onClick={handleMfaEnroll}>
+                          Enroll new factor
+                        </Button>
+                      </div>
+                      {factors.length > 0 && (
+                        <div className="space-y-2">
+                          <Label htmlFor="mfa-factor-id">Factor</Label>
+                          <select
+                            id="mfa-factor-id"
+                            value={factorId}
+                            onChange={(e) => setFactorId(e.target.value)}
+                            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                          >
+                            {factors.map((f) => (
+                              <option key={f.id} value={f.id}>{f.label}</option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                      <div className="grid grid-cols-2 gap-2">
+                        <Button type="button" variant="outline" onClick={handleMfaChallenge}>
+                          Create challenge
+                        </Button>
+                        <Button type="button" variant="outline" onClick={handleMfaUnenroll}>
+                          Unenroll factor
+                        </Button>
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="mfa-code">TOTP Code</Label>
+                        <Input
+                          id="mfa-code"
+                          placeholder="123456"
+                          value={totpCode}
+                          onChange={(e) => setTotpCode(e.target.value)}
+                        />
+                      </div>
+                      <Button type="button" className="w-full" onClick={handleMfaVerify}>
+                        Verify challenge
+                      </Button>
+                      {qrMarkup && (
+                        <div className="rounded border border-border/60 bg-background p-3">
+                          <p className="text-xs text-muted-foreground mb-2">Scan this QR in your authenticator app</p>
+                          <div dangerouslySetInnerHTML={{ __html: qrMarkup }} />
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
-                <Button 
-                  type="submit" 
-                  className="w-full bg-gradient-to-r from-primary to-primary/80 hover:opacity-90 transition-opacity" 
-                  disabled={loading}
-                >
-                  {loading ? "Signing in..." : "Sign In"}
-                </Button>
-              </form>
+              )}
               <p className="text-xs text-muted-foreground text-center mt-4">
                 Account access is managed by your administrator
               </p>

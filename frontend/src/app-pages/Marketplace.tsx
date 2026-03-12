@@ -42,6 +42,7 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { SendHorizontal, Clock as ClockIcon } from "lucide-react";
 import { brokerModels, mgaModels, carrierModels, InsuranceModel } from "@/lib/insuranceMocks";
+import { useUserRole } from "@/hooks/useUserRole";
 
 interface ModelCard {
   id: string;
@@ -187,6 +188,7 @@ const domainLabels: Record<string, string> = {
 export default function Marketplace() {
   const { toast } = useToast();
   const navigate = useNavigate();
+  const { role, isViewer, isGuest } = useUserRole();
   const [activatedModelIds, setActivatedModelIds] = useState<Set<string>>(new Set());
   const [pendingRequestIds, setPendingRequestIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
@@ -239,6 +241,23 @@ export default function Marketplace() {
   };
 
   const handleRequestActivation = async (model: ModelCard) => {
+    if (isViewer) {
+      toast({
+        title: "Viewer mode",
+        description: "Viewer role is read-only. You can view models but cannot request activation.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (isGuest) {
+      toast({
+        title: "Guest access is limited",
+        description: "Guest role cannot request model activation.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) {
@@ -351,6 +370,8 @@ export default function Marketplace() {
   };
 
   const renderModelCard = (model: ModelCard, index: number) => {
+    const actionBlockedByRole = role === "viewer" || role === "guest";
+
     const Icon = model.icon;
     const isActivated = activatedModelIds.has(model.id);
     const isPending = pendingRequestIds.has(model.id);
@@ -418,7 +439,7 @@ export default function Marketplace() {
         <CardContent className="pt-0 pb-4 md:pb-6 px-4 md:px-6 mt-auto">
           <Button
             onClick={() => handleRequestActivation(model)}
-            disabled={isActivated || isPending || loading}
+            disabled={isActivated || isPending || loading || actionBlockedByRole}
             className="w-full font-semibold text-xs md:text-sm tracking-normal transition-all duration-500 h-10 md:h-11 group-hover:scale-105 touch-manipulation"
             size="default"
             variant={isActivated ? "outline" : isPending ? "secondary" : "default"}
@@ -436,7 +457,7 @@ export default function Marketplace() {
             ) : (
               <>
                 <SendHorizontal className="h-3.5 w-3.5 md:h-4 md:w-4 mr-1.5 md:mr-2" />
-                Request Activation
+                {actionBlockedByRole ? "View Only" : "Request Activation"}
               </>
             )}
           </Button>
