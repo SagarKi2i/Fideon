@@ -146,7 +146,7 @@ jobs:
 
       - name: Deployment summary
         run: |
-          HOST="${{ vars.AZURE_VM_PUBLIC_HOST }}"
+          HOST="${{ secrets.AZURE_VM_PUBLIC_HOST }}"
           echo "════════════════════════════════════════"
           echo "  Component   : ${{ inputs.component }}"
           echo "  Environment : ${{ inputs.environment }}"
