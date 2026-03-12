@@ -1,0 +1,18 @@
+# Environment secrets
+**/.env
+**/.env.local
+
+# Node/Next artifacts
+**/node_modules/
+frontend/.next/
+
+# Python artifacts
+**/__pycache__/
+*.pyc
+
+# Supabase local temp/state
+supabase/.temp/
+supabase/supabase/.temp/
+
+# OS/editor
+.DS_Store
