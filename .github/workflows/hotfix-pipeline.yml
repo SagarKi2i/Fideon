@@ -211,7 +211,7 @@ jobs:
             BE_OK=false
 
             for i in 1 2 3 4 5; do
-              if curl -sf --max-time 5 http://localhost:4200/api/health > /dev/null 2>&1; then FE_OK=true; fi
+              if curl -sf --max-time 5 http://localhost:4200/ > /dev/null 2>&1; then FE_OK=true; fi
               if curl -sf --max-time 5 http://localhost:8080/health > /dev/null 2>&1; then BE_OK=true; fi
               if [ "$FE_OK" = "true" ] && [ "$BE_OK" = "true" ]; then break; fi
               sleep 5
