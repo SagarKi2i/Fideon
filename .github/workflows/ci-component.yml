@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────
-# PLACE AT: .github/workflows/ci-component.yml
+# Reusable CI for Node.js components (frontend, etc.)
 # ─────────────────────────────────────────────────────────────
 
 on:
@@ -48,6 +48,7 @@ on:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     environment: ${{ inputs.environment != '' && inputs.environment || 'development' }}
     steps:
       - uses: actions/checkout@v4
@@ -61,12 +62,27 @@ jobs:
           cache: 'npm'
           cache-dependency-path: ${{ inputs.component }}/package-lock.json
 
-      - name: Install, Lint & Test
+      - name: Install dependencies
+        working-directory: ${{ inputs.component }}
+        run: npm ci
+
+      - name: Lint
+        working-directory: ${{ inputs.component }}
         run: |
-          cd ${{ inputs.component }}
-          npm ci
-          npm run lint  || echo "⚠ No lint script — skipping"
-          npm test -- --coverage || echo "⚠ No test script — skipping"
+          if npm run --silent lint -- --help > /dev/null 2>&1; then
+            npm run lint
+          else
+            echo "No lint script configured — skipping"
+          fi
+
+      - name: Test
+        working-directory: ${{ inputs.component }}
+        run: |
+          if npm run --silent test -- --help > /dev/null 2>&1; then
+            npm test -- --coverage --passWithNoTests
+          else
+            echo "No test script configured — skipping"
+          fi
 
       - name: SonarQube Scan
         if: inputs.enable_sonar == true
@@ -86,7 +102,7 @@ jobs:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
       - name: Build Docker Image
-        if: inputs.is_docker == true
+        if: inputs.is_docker == true && github.event_name == 'push'
         run: |
           SUPABASE_PUBLIC_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}"
           if [ -z "$SUPABASE_PUBLIC_KEY" ]; then
@@ -98,20 +114,18 @@ jobs:
               --build-arg NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY="$SUPABASE_PUBLIC_KEY" \
               --build-arg NEXT_PUBLIC_API_URL="${{ secrets.NEXT_PUBLIC_API_URL }}" \
               -t neurapodacr.azurecr.io/${{ inputs.component }}:${{ github.sha }} \
-              -t neurapodacr.azurecr.io/${{ inputs.component }}:latest \
               -f ${{ inputs.component }}/docker/Dockerfile \
               ${{ inputs.component }}
           else
             docker build \
               -t neurapodacr.azurecr.io/${{ inputs.component }}:${{ github.sha }} \
-              -t neurapodacr.azurecr.io/${{ inputs.component }}:latest \
               -f ${{ inputs.component }}/docker/Dockerfile \
               ${{ inputs.component }}
           fi
 
       - name: Login to ACR & Push
         if: |
-          inputs.is_docker == true && (
+          inputs.is_docker == true && github.event_name == 'push' && (
             github.ref == 'refs/heads/v1-dev' ||
             github.ref == 'refs/heads/v1-staging' ||
             github.ref == 'refs/heads/v1'
@@ -122,6 +136,5 @@ jobs:
               -u "${{ secrets.AZURE_CR_USERNAME }}" \
               --password-stdin
 
-          docker push neurapodacr.azurecr.io/${{ inputs.component }}:latest
           docker push neurapodacr.azurecr.io/${{ inputs.component }}:${{ github.sha }}
-          echo "✓ Pushed neurapodacr.azurecr.io/${{ inputs.component }}:${{ github.sha }}"
+          echo "Pushed neurapodacr.azurecr.io/${{ inputs.component }}:${{ github.sha }}"

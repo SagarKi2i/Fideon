@@ -2,8 +2,12 @@ name: Security & Dependency Audit
 
 on:
   schedule:
-    # Run every Monday at 08:00 UTC
     - cron: "0 8 * * 1"
+  pull_request:
+    branches:
+      - 'v*-dev'
+      - 'v*-staging'
+      - 'v1'
   workflow_dispatch:
 
 jobs:
@@ -21,13 +25,18 @@ jobs:
         with:
           node-version: "20"
           cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
-      - run: npm ci --prefer-offline
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci --prefer-offline
 
       - name: npm audit (fail on high+)
+        working-directory: frontend
         run: npm audit --audit-level=high --json > npm-audit.json || true
 
       - name: Parse and display findings
+        working-directory: frontend
         run: |
           node -e "
             const r = require('./npm-audit.json');
@@ -47,8 +56,33 @@ jobs:
         if: always()
         with:
           name: npm-audit-report
-          path: npm-audit.json
+          path: frontend/npm-audit.json
           retention-days: 30
+
+  # ══════════════════════════════════════════════════════════════
+  # PIP AUDIT (backend)
+  # ══════════════════════════════════════════════════════════════
+  pip-audit:
+    name: pip audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pip-audit
+
+      - name: Run pip audit
+        working-directory: backend
+        run: pip-audit --desc --fix --dry-run || true
 
   # ══════════════════════════════════════════════════════════════
   # CODEQL ANALYSIS
@@ -69,7 +103,7 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
-          languages: javascript-typescript
+          languages: javascript-typescript, python
           queries: security-and-quality
 
       - name: Autobuild
@@ -77,16 +111,15 @@ jobs:
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
-        with:
-          category: "/language:javascript-typescript"
 
   # ══════════════════════════════════════════════════════════════
-  # DEPENDENCY REVIEW (PRs only – also runs here as baseline)
+  # DEPENDENCY REVIEW (PRs only)
   # ══════════════════════════════════════════════════════════════
   dependency-review:
     name: Dependency Review
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: github.event_name == 'pull_request'
 
     permissions:
       contents: read
@@ -104,8 +137,8 @@ jobs:
   notify:
     name: Notify security findings
     runs-on: ubuntu-latest
-    needs: [npm-audit, codeql]
-    if: failure()
+    needs: [npm-audit, pip-audit, codeql]
+    if: failure() && github.event_name != 'pull_request'
 
     steps:
       - name: Slack alert
@@ -113,13 +146,13 @@ jobs:
         with:
           payload: |
             {
-              "text": "🔒 *Security audit found issues* — please review",
+              "text": "Security audit found issues",
               "blocks": [
                 {
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "🔒 *Weekly Security Audit — Issues Found*\n*npm audit:* ${{ needs.npm-audit.result }}\n*CodeQL:* ${{ needs.codeql.result }}\n*<${{ github.server_url }}/${{ github.repository }}/security/code-scanning|View code scanning results>*\n*<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>*"
+                    "text": "*Weekly Security Audit — Issues Found*\n*npm audit:* ${{ needs.npm-audit.result }}\n*pip audit:* ${{ needs.pip-audit.result }}\n*CodeQL:* ${{ needs.codeql.result }}\n*<${{ github.server_url }}/${{ github.repository }}/security/code-scanning|View code scanning results>*\n*<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>*"
                   }
                 }
               ]

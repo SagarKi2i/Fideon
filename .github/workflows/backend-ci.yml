@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────
-# PLACE AT: .github/workflows/backend-ci.yml
+# Backend CI/CD
 # ─────────────────────────────────────────────────────────────
 
 name: Backend CI/CD
@@ -22,10 +22,14 @@ on:
     paths:
       - 'backend/**'
 
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  # ── Build, lint, test, docker build, push to ACR ──────────────────────────
   ci:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     environment: ${{ github.ref_name == 'v1' && 'production' || github.ref_name == 'v1-staging' && 'staging' || 'development' }}
     steps:
       - uses: actions/checkout@v4
@@ -42,15 +46,20 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-cov flake8 || true
+          pip install pytest pytest-cov flake8
 
       - name: Lint
         working-directory: backend
-        run: flake8 . --count --max-line-length=120 --statistics || echo "⚠ Lint issues — non-blocking"
+        run: flake8 . --count --max-line-length=120 --statistics
 
       - name: Test
         working-directory: backend
-        run: pytest --cov=. --cov-report=xml || echo "⚠ No tests found — skipping"
+        run: |
+          if find . -name "test_*.py" -o -name "*_test.py" | grep -q .; then
+            pytest --cov=. --cov-report=xml
+          else
+            echo "No test files found — skipping (non-blocking)"
+          fi
 
       - name: SonarQube Scan
         if: github.event_name == 'pull_request' && github.base_ref == 'v1-dev'
@@ -70,6 +79,7 @@ jobs:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
       - name: Build Docker Image
+        if: github.event_name == 'push'
         run: |
           docker build \
             -t neurapodacr.azurecr.io/backend:${{ github.sha }} \
@@ -78,20 +88,20 @@ jobs:
 
       - name: Login to ACR & Push
         if: |
-          github.ref == 'refs/heads/v1-dev' ||
-          github.ref == 'refs/heads/v1-staging' ||
-          github.ref == 'refs/heads/v1'
+          github.event_name == 'push' && (
+            github.ref == 'refs/heads/v1-dev' ||
+            github.ref == 'refs/heads/v1-staging' ||
+            github.ref == 'refs/heads/v1'
+          )
         run: |
           echo "${{ secrets.AZURE_CR_PASSWORD }}" | \
             docker login neurapodacr.azurecr.io \
               -u "${{ secrets.AZURE_CR_USERNAME }}" \
               --password-stdin
 
-          docker push neurapodacr.azurecr.io/backend:latest
           docker push neurapodacr.azurecr.io/backend:${{ github.sha }}
-          echo "✓ Pushed neurapodacr.azurecr.io/backend:${{ github.sha }}"
+          echo "Pushed neurapodacr.azurecr.io/backend:${{ github.sha }}"
 
-  # ── Deploy to development (on push to v1-dev) ─────────────────────────────
   deploy-dev:
     needs: ci
     if: github.ref == 'refs/heads/v1-dev' && github.event_name == 'push'
@@ -104,7 +114,6 @@ jobs:
       image_sha: ${{ github.sha }}
     secrets: inherit
 
-  # ── Deploy to staging (on push to v1-staging) ─────────────────────────────
   deploy-staging:
     needs: ci
     if: github.ref == 'refs/heads/v1-staging' && github.event_name == 'push'
@@ -117,7 +126,6 @@ jobs:
       image_sha: ${{ github.sha }}
     secrets: inherit
 
-  # ── Deploy to production (on push to v1 — requires manual approval) ────────
   deploy-production:
     needs: ci
     if: github.ref == 'refs/heads/v1' && github.event_name == 'push'
