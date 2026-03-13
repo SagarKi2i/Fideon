@@ -12,14 +12,14 @@ on:
     branches:
       - 'v1'
     paths:
-      - 'neurapod-app/**'
+      - 'frontend/**'
       - 'backend/**'
 
   push:
     branches:
       - 'v1'
     paths:
-      - 'neurapod-app/**'
+      - 'frontend/**'
       - 'backend/**'
 
 jobs:
@@ -33,10 +33,10 @@ jobs:
       - name: Build Frontend Docker Image
         run: |
           docker build \
-            -t neurapodacr.azurecr.io/neurapod-app:hotfix-${{ github.sha }} \
-            -t neurapodacr.azurecr.io/neurapod-app:latest \
-            -f neurapod-app/docker/Dockerfile \
-            neurapod-app/
+            -t neurapodacr.azurecr.io/frontend:hotfix-${{ github.sha }} \
+            -t neurapodacr.azurecr.io/frontend:latest \
+            -f frontend/docker/Dockerfile \
+            frontend/
 
       - name: Push to ACR
         if: github.event_name == 'push'
@@ -45,8 +45,8 @@ jobs:
             docker login neurapodacr.azurecr.io \
               -u "${{ secrets.AZURE_CR_USERNAME }}" \
               --password-stdin
-          docker push neurapodacr.azurecr.io/neurapod-app:latest
-          docker push neurapodacr.azurecr.io/neurapod-app:hotfix-${{ github.sha }}
+          docker push neurapodacr.azurecr.io/frontend:latest
+          docker push neurapodacr.azurecr.io/frontend:hotfix-${{ github.sha }}
 
   # ── Build & push backend ───────────────────────────────────────────────────
   build-backend:
@@ -99,14 +99,14 @@ jobs:
                 --password-stdin
 
             # Restart frontend
-            docker pull neurapodacr.azurecr.io/neurapod-app:hotfix-${{ github.sha }}
+            docker pull neurapodacr.azurecr.io/frontend:hotfix-${{ github.sha }}
             docker stop neurapod-frontend 2>/dev/null || true
             docker rm   neurapod-frontend 2>/dev/null || true
             docker run -d --name neurapod-frontend --restart unless-stopped \
               -p 4200:4200 \
               -e NEXT_PUBLIC_SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
               -e NEXT_PUBLIC_SUPABASE_ANON_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}" \
-              neurapodacr.azurecr.io/neurapod-app:hotfix-${{ github.sha }}
+              neurapodacr.azurecr.io/frontend:hotfix-${{ github.sha }}
 
             # Restart backend
             docker pull neurapodacr.azurecr.io/backend:hotfix-${{ github.sha }}

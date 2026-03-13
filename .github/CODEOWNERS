@@ -1,0 +1,15 @@
+# Frontend changes require Frontend Team review
+/frontend/   @shubhammakeshwar23 @Samarth-i2i @Akshayi2i
+
+# Backend changes require Backend Team review
+/backend/    @Samarth-i2i @Akshayi2i @shubhammakeshwar23
+
+# QA Test Scripts require QA Team review
+/qa/         @SKOTWALI2I
+
+# Shared automation scripts require DevOps review
+/scripts/    @sakshi-i2i
+
+# Workflow and CI/CD changes require DevOps review
+/.github/    @sakshi-i2i
+
