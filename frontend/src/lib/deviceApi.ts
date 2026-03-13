@@ -17,6 +17,46 @@ export interface DeviceModelsResponse {
   total_models: number;
 }
 
+export interface DevicePairingStartRequest {
+  frontend_base_url?: string;
+  expires_in_seconds?: number;
+  primary_device_label?: string;
+  requested_device_profile?: Record<string, unknown>;
+}
+
+export interface DevicePairingStartResponse {
+  success: boolean;
+  pairing_id: string;
+  pairing_code: string;
+  pairing_url: string;
+  expires_at: string;
+  status: "pending" | "confirmed" | "expired" | "cancelled";
+}
+
+export interface DevicePairingStatusResponse {
+  success: boolean;
+  pairing: {
+    id: string;
+    status: "pending" | "confirmed" | "expired" | "cancelled";
+    expires_at: string;
+    consumed_at: string | null;
+    linked_device_id: string | null;
+    created_at: string;
+    confirmed_device_profile?: Record<string, unknown>;
+  };
+}
+
+export interface DevicePairingConfirmResponse {
+  success: boolean;
+  pairing_id: string;
+  status: "confirmed";
+  device: {
+    id: string;
+    name: string;
+    token: string;
+  };
+}
+
 export async function fetchDeviceModels(deviceToken: string): Promise<DeviceModelsResponse> {
   const response = await fetch(`${getApiBaseUrl()}/api/device-models`, {
     method: 'GET',
@@ -68,4 +108,68 @@ export function setStoredDeviceToken(token: string): void {
 
 export function clearStoredDeviceToken(): void {
   localStorage.removeItem('device_token');
+}
+
+export async function startDevicePairing(
+  accessToken: string,
+  payload: DevicePairingStartRequest
+): Promise<DevicePairingStartResponse> {
+  const response = await fetch(`${getApiBaseUrl()}/api/devices/pairing/start`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || "Failed to create pairing QR");
+  }
+
+  return response.json();
+}
+
+export async function getDevicePairingStatus(
+  accessToken: string,
+  pairingId: string
+): Promise<DevicePairingStatusResponse> {
+  const response = await fetch(`${getApiBaseUrl()}/api/devices/pairing/status/${encodeURIComponent(pairingId)}`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || "Failed to fetch pairing status");
+  }
+
+  return response.json();
+}
+
+export async function confirmDevicePairing(payload: {
+  pairing_id: string;
+  pairing_code: string;
+  device_name?: string;
+  os_type?: string;
+  app_version?: string;
+  confirmed_device_profile?: Record<string, unknown>;
+}): Promise<DevicePairingConfirmResponse> {
+  const response = await fetch(`${getApiBaseUrl()}/api/devices/pairing/confirm`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || "Failed to confirm pairing");
+  }
+
+  return response.json();
 }

@@ -30,9 +30,14 @@ GROQ_MODEL_CHAT = os.getenv("GROQ_MODEL_CHAT", "llama-3.3-70b-versatile")
 GROQ_MODEL_HELP = os.getenv("GROQ_MODEL_HELP", "llama-3.3-70b-versatile")
 GROQ_MODEL_WORKFLOW = os.getenv("GROQ_MODEL_WORKFLOW", "llama-3.3-70b-versatile")
 
-# RunPod (OpenAI-compatible endpoints)
+# RunPod
+# - RUNPOD_OPENAI_COMPAT_URL supports OpenAI-compatible endpoints (legacy path)
+# - RUNPOD_GENERATE_URL supports direct /generate style endpoints
+# - FIDEON_SECRET_KEY is preferred for Bearer auth with /generate endpoints
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY", "")
+FIDEON_SECRET_KEY = os.getenv("FIDEON_SECRET_KEY", "")
 RUNPOD_OPENAI_COMPAT_URL = os.getenv("RUNPOD_OPENAI_COMPAT_URL", "")
+RUNPOD_GENERATE_URL = os.getenv("RUNPOD_GENERATE_URL", "https://8e7k92f9vcuxzh-8000.proxy.runpod.net/generate")
 RUNPOD_MODEL_LLAMA = os.getenv("RUNPOD_MODEL_LLAMA", "meta-llama/Meta-Llama-3.1-8B-Instruct")
 RUNPOD_MODEL_MISTRAL = os.getenv("RUNPOD_MODEL_MISTRAL", "mistralai/Mistral-7B-Instruct-v0.3")
 

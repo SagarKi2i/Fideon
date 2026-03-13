@@ -6,7 +6,14 @@ import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 
 from app.core.config import SUPABASE_URL
-from app.core.supabase import admin_list_users, postgrest_get, postgrest_insert, service_headers, verify_user
+from app.core.supabase import (
+    admin_list_users,
+    postgrest_get,
+    postgrest_insert,
+    postgrest_patch,
+    service_headers,
+    verify_user,
+)
 
 router = APIRouter()
 VALID_ROLES = {"global_admin", "admin", "user", "viewer", "guest"}

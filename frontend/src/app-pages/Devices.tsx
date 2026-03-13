@@ -39,6 +39,44 @@ interface AllocatedModel {
   activated_at: string | null;
 }
 
+type AppRole = "global_admin" | "admin" | "user" | "viewer" | "guest";
+
+const roleDisplay: Record<AppRole, { label: string; badgeClass: string; privileged: boolean }> = {
+  global_admin: {
+    label: "Global Admin",
+    badgeClass: "bg-purple-600/15 text-purple-700 border-purple-600/30 dark:text-purple-300",
+    privileged: true,
+  },
+  admin: {
+    label: "Admin",
+    badgeClass: "bg-blue-600/15 text-blue-700 border-blue-600/30 dark:text-blue-300",
+    privileged: true,
+  },
+  user: {
+    label: "User",
+    badgeClass: "bg-emerald-600/15 text-emerald-700 border-emerald-600/30 dark:text-emerald-300",
+    privileged: false,
+  },
+  viewer: {
+    label: "Viewer",
+    badgeClass: "bg-amber-600/15 text-amber-700 border-amber-600/30 dark:text-amber-300",
+    privileged: false,
+  },
+  guest: {
+    label: "Guest",
+    badgeClass: "bg-slate-600/15 text-slate-700 border-slate-600/30 dark:text-slate-300",
+    privileged: false,
+  },
+};
+
+function normalizeRole(role?: string): AppRole {
+  const value = (role || "").toLowerCase();
+  if (value === "global_admin" || value === "admin" || value === "user" || value === "viewer" || value === "guest") {
+    return value;
+  }
+  return "user";
+}
+
 const allMarketplaceModels = [
   ...brokerModels.map(m => ({ id: m.id, name: m.name, domain: m.domain })),
   ...mgaModels.map(m => ({ id: m.id, name: m.name, domain: m.domain })),
@@ -255,7 +293,9 @@ export default function Devices() {
           <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
             {users.map((user, index) => {
               const models = userModels[user.id] || [];
-              const isAdmin = user.role === "admin" || user.role === "global_admin";
+              const normalizedRole = normalizeRole(user.role);
+              const roleMeta = roleDisplay[normalizedRole];
+              const isAdmin = roleMeta.privileged;
               const isPickerOpen = allocatingForUser === user.id;
               const availableModels = allMarketplaceModels.filter(
                 m => !models.some(um => um.model_id === m.id)
@@ -281,8 +321,8 @@ export default function Devices() {
                           <User className="h-6 w-6 text-primary" />
                         )}
                       </div>
-                      <Badge variant={isAdmin ? "default" : "secondary"}>
-                        {isAdmin ? "Admin" : "User"}
+                      <Badge variant="outline" className={roleMeta.badgeClass}>
+                        {roleMeta.label}
                       </Badge>
                     </div>
                     <CardTitle className="text-lg font-display font-bold group-hover:text-primary transition-colors truncate">

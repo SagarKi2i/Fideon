@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { apiUrl } from "@/lib/apiBaseUrl";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -33,13 +34,20 @@ export function PodActivationRequests() {
 
   const loadRequests = async () => {
     try {
-      const { data, error } = await supabase
-        .from("pod_activation_requests")
-        .select("*")
-        .order("requested_at", { ascending: false });
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
 
-      if (error) throw error;
-      setRequests(data || []);
+      const response = await fetch(apiUrl("/api/pod-activation/requests"), {
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          "Content-Type": "application/json",
+        },
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error || "Failed to load activation requests");
+      }
+      setRequests(payload.requests || []);
     } catch (error) {
       console.error("Error loading requests:", error);
     } finally {
@@ -50,38 +58,20 @@ export function PodActivationRequests() {
   const handleApprove = async (request: ActivationRequest) => {
     setProcessingId(request.id);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
 
-      // Insert into activated_models
-      const { error: insertError } = await supabase
-        .from("activated_models")
-        .insert([{
-          user_id: request.user_id,
-          model_id: request.model_id,
-          model_name: request.model_name,
-          domain: request.domain as "banking" | "healthcare" | "insurance" | "legal" | "travel",
-        }]);
-
-      if (insertError) {
-        if (insertError.code === "23505") {
-          // Already activated, just update request status
-        } else {
-          throw insertError;
-        }
+      const response = await fetch(apiUrl(`/api/pod-activation/${request.id}/approve`), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          "Content-Type": "application/json",
+        },
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error || "Failed to approve request");
       }
-
-      // Update request status
-      const { error: updateError } = await supabase
-        .from("pod_activation_requests")
-        .update({
-          status: "approved",
-          reviewed_at: new Date().toISOString(),
-          reviewed_by: user.id,
-        })
-        .eq("id", request.id);
-
-      if (updateError) throw updateError;
 
       toast({
         title: "Request Approved",
@@ -104,20 +94,23 @@ export function PodActivationRequests() {
   const handleReject = async (request: ActivationRequest) => {
     setProcessingId(request.id);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
 
-      const { error } = await supabase
-        .from("pod_activation_requests")
-        .update({
-          status: "rejected",
-          reviewed_at: new Date().toISOString(),
-          reviewed_by: user.id,
+      const response = await fetch(apiUrl(`/api/pod-activation/${request.id}/reject`), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
           rejection_reason: rejectionReason[request.id] || null,
-        })
-        .eq("id", request.id);
-
-      if (error) throw error;
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error || "Failed to reject request");
+      }
 
       toast({
         title: "Request Rejected",

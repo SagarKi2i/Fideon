@@ -15,7 +15,9 @@ from app.core.config import (
     OPENAI_API_KEY,
     OPENAI_CHAT_COMPLETIONS_URL,
     OPENAI_MODEL,
+    FIDEON_SECRET_KEY,
     RUNPOD_API_KEY,
+    RUNPOD_GENERATE_URL,
     RUNPOD_MODEL_LLAMA,
     RUNPOD_MODEL_MISTRAL,
     RUNPOD_OPENAI_COMPAT_URL,
@@ -23,11 +25,13 @@ from app.core.config import (
 
 
 def ensure_llm_configured() -> None:
-    if any([GROQ_API_KEY, RUNPOD_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY]):
+    runpod_token = FIDEON_SECRET_KEY or RUNPOD_API_KEY
+    runpod_ready = bool(runpod_token and (RUNPOD_GENERATE_URL or RUNPOD_OPENAI_COMPAT_URL))
+    if any([GROQ_API_KEY, runpod_ready, GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY]):
         return
     raise HTTPException(
         status_code=500,
-        detail="No LLM provider configured. Set at least one of: GROQ_API_KEY, RUNPOD_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY",
+        detail="No LLM provider configured. Set at least one of: GROQ_API_KEY, FIDEON_SECRET_KEY/RUNPOD_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY",
     )
 
 
@@ -83,6 +87,76 @@ async def _openai_compatible_stream(
             await client.aclose()
 
     return 200, {"Content-Type": "text/event-stream"}, iterator()
+
+
+def _clean_bearer_token(raw_token: str) -> str:
+    token = (raw_token or "").strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    return token
+
+
+def _extract_runpod_text(data: dict[str, Any]) -> str:
+    # Handle common response payload shapes from /generate style endpoints.
+    direct_keys = ["response", "generated_text", "text", "output"]
+    for key in direct_keys:
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        message = first.get("message", {}) if isinstance(first, dict) else {}
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        text = first.get("text") if isinstance(first, dict) else None
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+
+    data_value = data.get("data")
+    if isinstance(data_value, dict):
+        for key in direct_keys:
+            value = data_value.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    raise RuntimeError("RunPod returned empty content")
+
+
+async def _runpod_generate_text(payload: dict[str, Any], model_name: str) -> str:
+    runpod_token = _clean_bearer_token(FIDEON_SECRET_KEY or RUNPOD_API_KEY)
+    if not runpod_token:
+        raise RuntimeError("RunPod token not configured")
+    if not RUNPOD_GENERATE_URL:
+        raise RuntimeError("RUNPOD_GENERATE_URL is not configured")
+
+    prompt = _collect_text_from_messages(payload.get("messages", []))
+    if not prompt:
+        prompt = "Please help the user."
+
+    async with httpx.AsyncClient(timeout=90) as client:
+        resp = await client.post(
+            RUNPOD_GENERATE_URL,
+            params={
+                "prompt": prompt,
+                "model": model_name,
+            },
+            headers={
+                "Authorization": f"Bearer {runpod_token}",
+            },
+        )
+        if resp.status_code >= 400:
+            raise RuntimeError(f"{resp.status_code}: {resp.text}")
+        content_type = (resp.headers.get("content-type") or "").lower()
+        if "application/json" in content_type:
+            data = resp.json()
+            return _extract_runpod_text(data)
+        text = resp.text.strip()
+        if text:
+            return text
+        raise RuntimeError("RunPod returned empty response")
 
 
 async def _gemini_text(payload: dict[str, Any]) -> str:
@@ -189,16 +263,30 @@ async def llm_stream(payload: dict[str, Any]) -> tuple[int, dict[str, str], Asyn
         except Exception as exc:
             errors.append(f"groq: {exc}")
 
-    if RUNPOD_API_KEY and RUNPOD_OPENAI_COMPAT_URL:
+    runpod_token = _clean_bearer_token(FIDEON_SECRET_KEY or RUNPOD_API_KEY)
+    if runpod_token and RUNPOD_GENERATE_URL:
+        try:
+            text = await _runpod_generate_text(payload, RUNPOD_MODEL_LLAMA)
+            return 200, {"Content-Type": "text/event-stream"}, _single_sse_stream(text, RUNPOD_MODEL_LLAMA)
+        except Exception as exc:
+            errors.append(f"runpod-generate-llama: {exc}")
+
+        try:
+            text = await _runpod_generate_text(payload, RUNPOD_MODEL_MISTRAL)
+            return 200, {"Content-Type": "text/event-stream"}, _single_sse_stream(text, RUNPOD_MODEL_MISTRAL)
+        except Exception as exc:
+            errors.append(f"runpod-generate-mistral: {exc}")
+
+    if runpod_token and RUNPOD_OPENAI_COMPAT_URL:
         try:
             runpod_llama_payload = {**stream_payload, "model": RUNPOD_MODEL_LLAMA}
-            return await _openai_compatible_stream(RUNPOD_OPENAI_COMPAT_URL, RUNPOD_API_KEY, runpod_llama_payload)
+            return await _openai_compatible_stream(RUNPOD_OPENAI_COMPAT_URL, runpod_token, runpod_llama_payload)
         except Exception as exc:
             errors.append(f"runpod-llama: {exc}")
 
         try:
             runpod_mistral_payload = {**stream_payload, "model": RUNPOD_MODEL_MISTRAL}
-            return await _openai_compatible_stream(RUNPOD_OPENAI_COMPAT_URL, RUNPOD_API_KEY, runpod_mistral_payload)
+            return await _openai_compatible_stream(RUNPOD_OPENAI_COMPAT_URL, runpod_token, runpod_mistral_payload)
         except Exception as exc:
             errors.append(f"runpod-mistral: {exc}")
 

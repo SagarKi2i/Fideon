@@ -71,6 +71,16 @@ async def postgrest_patch(table: str, query: str, payload: dict[str, Any]) -> No
         raise HTTPException(status_code=500, detail=resp.text)
 
 
+async def postgrest_delete(table: str, query: str) -> None:
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.delete(
+            f"{SUPABASE_URL}/rest/v1/{table}?{query}",
+            headers=service_headers(json_body=False),
+        )
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=500, detail=resp.text)
+
+
 async def get_device_by_token(device_token: str) -> Dict[str, Any]:
     encoded = quote(device_token, safe="")
     rows = await postgrest_get("devices", f"select=*&device_token=eq.{encoded}&limit=1")
