@@ -16,6 +16,7 @@ import Mailbox from "./app-pages/Mailbox";
 import Devices from "./app-pages/Devices";
 import DeviceDetails from "./app-pages/DeviceDetails";
 import DeviceSetup from "./app-pages/DeviceSetup";
+import LinkDevices from "./app-pages/LinkDevices";
 import Settings from "./app-pages/Settings";
 import PolicyComparison from "./app-pages/PolicyComparison";
 import PitchDeck from "./app-pages/PitchDeck";
@@ -29,6 +30,7 @@ import Workflows from "./app-pages/Workflows";
 import AgentSchedules from "./app-pages/AgentSchedules";
 import AgentWorkflows from "./app-pages/AgentWorkflows";
 import ReviewQueue from "./app-pages/ReviewQueue";
+import DeviceLinkConfirm from "./app-pages/DeviceLinkConfirm";
 
 
 
@@ -44,6 +46,7 @@ const App = () => (
           <Route path="/electron-playground" element={<ElectronPlayground />} />
           <Route path="/auth" element={<Auth />} />
           <Route path="/signup" element={<Signup />} />
+          <Route path="/device-link" element={<DeviceLinkConfirm />} />
           <Route path="/*" element={
             <ProtectedRoute>
               <Layout>
@@ -96,6 +99,11 @@ const App = () => (
                     </ProtectedRoute>
                   } />
                   <Route path="/device-setup" element={<DeviceSetup />} />
+                  <Route path="/link-devices" element={
+                    <ProtectedRoute allowedRoles={["global_admin", "admin", "user", "viewer", "guest"]}>
+                      <LinkDevices />
+                    </ProtectedRoute>
+                  } />
                   <Route path="/training" element={
                     <ProtectedRoute allowedRoles={["global_admin", "admin", "user"]}>
                       <Training />

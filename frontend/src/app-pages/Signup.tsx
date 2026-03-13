@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import type { Database } from "@/integrations/supabase/types";
@@ -12,6 +12,7 @@ import { CheckCircle2, ChevronLeft, ChevronRight, Cpu, MonitorSmartphone, Shield
 
 type WizardStep = 0 | 1 | 2 | 3;
 type AppRole = Database["public"]["Enums"]["app_role"];
+type DeviceType = "desktop" | "laptop" | "mobile" | "tablet" | "other";
 
 const APP_ROLES: Array<{ label: string; value: AppRole }> = [
   { label: "Global Admin", value: "global_admin" },
@@ -93,7 +94,82 @@ export default function Signup() {
   const [selectedPlan, setSelectedPlan] = useState<(typeof PLANS)[number]["id"]>("starter");
   const [selectedModelId, setSelectedModelId] = useState<(typeof ALL_MODELS)[number]["id"]>("quote-generation");
   const [deviceName, setDeviceName] = useState("My First Edge Device");
+  const [deviceType, setDeviceType] = useState<DeviceType>("desktop");
+  const [osName, setOsName] = useState("");
+  const [osVersion, setOsVersion] = useState("");
+  const [browserName, setBrowserName] = useState("");
+  const [browserVersion, setBrowserVersion] = useState("");
+  const [appVersion, setAppVersion] = useState("web-1.0.0");
+  const [locale, setLocale] = useState("");
+  const [timezone, setTimezone] = useState("");
+  const [platform, setPlatform] = useState("");
+  const [hardwareFingerprint, setHardwareFingerprint] = useState("");
   const [showAllModels, setShowAllModels] = useState(false);
+
+  useEffect(() => {
+    const parseBrowser = (ua: string) => {
+      const checks = [
+        { key: "Edg/", name: "Edge" },
+        { key: "OPR/", name: "Opera" },
+        { key: "Chrome/", name: "Chrome" },
+        { key: "Firefox/", name: "Firefox" },
+        { key: "Safari/", name: "Safari" },
+      ];
+      for (const check of checks) {
+        const idx = ua.indexOf(check.key);
+        if (idx >= 0) {
+          const version = ua.slice(idx + check.key.length).split(/[ ;)]/)[0];
+          return { name: check.name, version: version || "" };
+        }
+      }
+      return { name: "Unknown", version: "" };
+    };
+
+    const detectOs = (ua: string) => {
+      if (ua.includes("Windows")) return "Windows";
+      if (ua.includes("Mac OS X")) return "macOS";
+      if (ua.includes("Android")) return "Android";
+      if (ua.includes("iPhone") || ua.includes("iPad")) return "iOS";
+      if (ua.includes("Linux")) return "Linux";
+      return "Unknown";
+    };
+
+    const detectDeviceType = (ua: string): DeviceType => {
+      if (/iPad|Tablet|PlayBook|Silk/i.test(ua)) return "tablet";
+      if (/Mobi|Android|iPhone/i.test(ua)) return "mobile";
+      if (/Macintosh|Windows NT|Linux x86_64|X11/i.test(ua)) return "desktop";
+      return "other";
+    };
+
+    const toSha256 = async (value: string) => {
+      if (!window.crypto?.subtle) return "";
+      const bytes = new TextEncoder().encode(value);
+      const hash = await window.crypto.subtle.digest("SHA-256", bytes);
+      return Array.from(new Uint8Array(hash))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+    };
+
+    const ua = navigator.userAgent;
+    const parsedBrowser = parseBrowser(ua);
+    setBrowserName(parsedBrowser.name);
+    setBrowserVersion(parsedBrowser.version);
+    setOsName(detectOs(ua));
+    setDeviceType(detectDeviceType(ua));
+    setLocale(navigator.language || "");
+    setPlatform(navigator.platform || "");
+    setTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone || "");
+
+    const fingerprintSeed = [
+      navigator.userAgent,
+      navigator.language,
+      navigator.platform,
+      String(navigator.hardwareConcurrency || ""),
+      `${window.screen?.width || ""}x${window.screen?.height || ""}`,
+      Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+    ].join("|");
+    toSha256(fingerprintSeed).then(setHardwareFingerprint).catch(() => setHardwareFingerprint(""));
+  }, []);
 
   const canGoNext = () => {
     if (step === 0) {
@@ -104,6 +180,9 @@ export default function Signup() {
     }
     if (step === 2) {
       return !!selectedModelId;
+    }
+    if (step === 3) {
+      return !!deviceName.trim();
     }
     return true;
   };
@@ -153,16 +232,32 @@ export default function Signup() {
     setLoading(true);
     try {
       const { data, error } = await supabase.auth.signUp({
-        email,
+        email: email.trim(),
         password,
         options: {
           data: {
-            tenant_name: tenantName,
-            full_name: fullName,
+            tenant_name: tenantName.trim(),
+            full_name: fullName.trim(),
             requested_role: selectedRole,
             plan: selectedPlan,
             default_model_id: selectedModelId,
-            device_name: deviceName,
+            device_name: deviceName.trim(),
+            device_profile: {
+              device_name: deviceName.trim(),
+              device_type: deviceType,
+              os_name: osName,
+              os_version: osVersion,
+              app_version: appVersion,
+              browser_name: browserName,
+              browser_version: browserVersion,
+              locale,
+              timezone,
+              platform,
+              user_agent: navigator.userAgent,
+              hardware_fingerprint_sha256: hardwareFingerprint,
+              captured_at: new Date().toISOString(),
+              source: "signup_wizard",
+            },
           },
         },
       });
@@ -404,6 +499,77 @@ export default function Signup() {
                 onChange={(e) => setDeviceName(e.target.value)}
                 placeholder="Claims Desktop - Chicago Office"
               />
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="device-type">Device Type</Label>
+                <select
+                  id="device-type"
+                  value={deviceType}
+                  onChange={(e) => setDeviceType(e.target.value as DeviceType)}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                >
+                  <option value="desktop">Desktop</option>
+                  <option value="laptop">Laptop</option>
+                  <option value="mobile">Mobile</option>
+                  <option value="tablet">Tablet</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="app-version">App Version</Label>
+                <Input
+                  id="app-version"
+                  value={appVersion}
+                  onChange={(e) => setAppVersion(e.target.value)}
+                  placeholder="web-1.0.0"
+                />
+              </div>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="os-name">OS Name</Label>
+                <Input
+                  id="os-name"
+                  value={osName}
+                  onChange={(e) => setOsName(e.target.value)}
+                  placeholder="Windows / macOS / Linux"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="os-version">OS Version</Label>
+                <Input
+                  id="os-version"
+                  value={osVersion}
+                  onChange={(e) => setOsVersion(e.target.value)}
+                  placeholder="Optional"
+                />
+              </div>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="browser-name">Browser Name</Label>
+                <Input
+                  id="browser-name"
+                  value={browserName}
+                  onChange={(e) => setBrowserName(e.target.value)}
+                  placeholder="Chrome / Edge / Safari"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="browser-version">Browser Version</Label>
+                <Input
+                  id="browser-version"
+                  value={browserVersion}
+                  onChange={(e) => setBrowserVersion(e.target.value)}
+                  placeholder="Optional"
+                />
+              </div>
+            </div>
+            <div className="rounded-lg border bg-muted/30 p-3 text-xs text-muted-foreground space-y-1">
+              <p>Locale: {locale || "unknown"} | Timezone: {timezone || "unknown"}</p>
+              <p>Platform: {platform || "unknown"}</p>
+              <p>Fingerprint (sha256): {hardwareFingerprint ? `${hardwareFingerprint.slice(0, 20)}...` : "pending"}</p>
             </div>
             <div className="rounded-lg border bg-muted/40 p-4 text-xs text-muted-foreground flex gap-3">
               <MonitorSmartphone className="h-4 w-4 text-primary mt-0.5" />

@@ -8,6 +8,7 @@ from app.routes.device import router as device_router
 from app.routes.federated_learning import router as federated_router
 from app.routes.health import router as health_router
 from app.routes.help_assistant import router as help_router
+from app.routes.pod_activation import router as pod_activation_router
 from app.routes.workflow_ai import router as workflow_router
 
 
@@ -28,6 +29,7 @@ def create_app() -> FastAPI:
     app.include_router(device_router)
     app.include_router(federated_router)
     app.include_router(admin_router)
+    app.include_router(pod_activation_router)
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_: Request, exc: HTTPException):

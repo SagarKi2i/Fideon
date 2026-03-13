@@ -38,6 +38,7 @@ import {
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
+import { apiUrl } from "@/lib/apiBaseUrl";
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { SendHorizontal, Clock as ClockIcon } from "lucide-react";
@@ -202,19 +203,23 @@ export default function Marketplace() {
 
   const loadActivatedModels = async () => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
         setLoading(false);
         return;
       }
 
-      const { data, error } = await supabase
-        .from("activated_models")
-        .select("model_id")
-        .eq("user_id", user.id);
-
-      if (error) throw error;
-      setActivatedModelIds(new Set(data?.map(m => m.model_id) || []));
+      const response = await fetch(apiUrl("/api/pod-activation/my-activations"), {
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          "Content-Type": "application/json",
+        },
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error || "Failed to load activated models");
+      }
+      setActivatedModelIds(new Set(payload.model_ids || []));
     } catch (error) {
       console.error("Error loading activated models:", error);
     } finally {
@@ -224,17 +229,20 @@ export default function Marketplace() {
 
   const loadPendingRequests = async () => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
 
-      const { data, error } = await supabase
-        .from("pod_activation_requests")
-        .select("model_id")
-        .eq("user_id", user.id)
-        .eq("status", "pending");
-
-      if (error) throw error;
-      setPendingRequestIds(new Set(data?.map(r => r.model_id) || []));
+      const response = await fetch(apiUrl("/api/pod-activation/my-requests?status=pending"), {
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          "Content-Type": "application/json",
+        },
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error || "Failed to load pending requests");
+      }
+      setPendingRequestIds(new Set((payload.requests || []).map((r: any) => r.model_id)));
     } catch (error) {
       console.error("Error loading pending requests:", error);
     }
@@ -259,23 +267,27 @@ export default function Marketplace() {
     }
 
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
         navigate("/auth");
         return;
       }
 
-      const { error } = await supabase
-        .from("pod_activation_requests")
-        .insert([{
-          user_id: user.id,
+      const response = await fetch(apiUrl("/api/pod-activation/request"), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
           model_id: model.id,
           model_name: model.name,
           domain: model.domain,
-        }]);
-
-      if (error) {
-        if (error.code === "23505") {
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (response.status === 409) {
           toast({
             title: "Already Requested",
             description: "You already have a pending request for this pod",
@@ -284,7 +296,7 @@ export default function Marketplace() {
         } else {
           toast({
             title: "Request Error",
-            description: error.message || "Failed to send request",
+            description: payload?.error || "Failed to send request",
             variant: "destructive",
           });
         }

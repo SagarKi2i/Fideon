@@ -477,6 +477,59 @@ export type Database = {
           },
         ]
       }
+      device_pairings: {
+        Row: {
+          confirmed_device_profile: Json
+          consumed_at: string | null
+          created_at: string
+          expires_at: string
+          id: string
+          linked_device_id: string | null
+          pairing_code_hash: string
+          primary_device_label: string | null
+          requested_device_profile: Json
+          status: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          confirmed_device_profile?: Json
+          consumed_at?: string | null
+          created_at?: string
+          expires_at: string
+          id?: string
+          linked_device_id?: string | null
+          pairing_code_hash: string
+          primary_device_label?: string | null
+          requested_device_profile?: Json
+          status?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          confirmed_device_profile?: Json
+          consumed_at?: string | null
+          created_at?: string
+          expires_at?: string
+          id?: string
+          linked_device_id?: string | null
+          pairing_code_hash?: string
+          primary_device_label?: string | null
+          requested_device_profile?: Json
+          status?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "device_pairings_linked_device_id_fkey"
+            columns: ["linked_device_id"]
+            isOneToOne: false
+            referencedRelation: "devices"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       device_sync_logs: {
         Row: {
           created_at: string

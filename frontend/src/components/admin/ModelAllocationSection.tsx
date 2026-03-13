@@ -114,14 +114,18 @@ export function ModelAllocationSection() {
   async function fetchAllocatedModels(userId: string) {
     setLoadingModels(true);
     try {
-      const { data, error } = await supabase
-        .from('activated_models')
-        .select('*')
-        .eq('user_id', userId)
-        .order('activated_at', { ascending: false });
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
 
-      if (error) throw error;
-      setAllocatedModels(data || []);
+      const response = await fetch(apiUrl(`/api/pod-activation/user/${userId}/activations`), {
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.error || 'Failed to fetch allocations');
+      setAllocatedModels(payload.allocations || []);
     } catch (error) {
       console.error('Error fetching allocated models:', error);
     } finally {
@@ -137,20 +141,28 @@ export function ModelAllocationSection() {
 
     setAllocating(true);
     try {
-      const { error } = await supabase
-        .from('activated_models')
-        .insert({
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
+
+      const response = await fetch(apiUrl('/api/pod-activation/allocate'), {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
           user_id: selectedUserId,
           model_id: model.id,
           model_name: model.name,
-          domain: model.domain as any,
-        });
-
-      if (error) {
-        if (error.code === '23505') {
+          domain: model.domain,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (response.status === 409) {
           toast({ title: 'Already Allocated', description: 'This model is already allocated to this user', variant: 'destructive' });
         } else {
-          throw error;
+          throw new Error(payload?.error || 'Failed to allocate model');
         }
         return;
       }
@@ -168,12 +180,17 @@ export function ModelAllocationSection() {
 
   async function handleDeallocate(allocationId: string, modelName: string) {
     try {
-      const { error } = await supabase
-        .from('activated_models')
-        .delete()
-        .eq('id', allocationId);
-
-      if (error) throw error;
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
+      const response = await fetch(apiUrl(`/api/pod-activation/allocations/${allocationId}`), {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.error || 'Failed to remove allocation');
 
       toast({ title: 'Model Removed', description: `${modelName} deallocated successfully` });
       fetchAllocatedModels(selectedUserId);

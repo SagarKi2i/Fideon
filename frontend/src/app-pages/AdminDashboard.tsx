@@ -1,12 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Server, CheckCircle, XCircle, Clock, AlertTriangle, HardDrive, Activity, TrendingUp } from 'lucide-react';
+import { Server, CheckCircle, XCircle, Clock, AlertTriangle, HardDrive, Activity, TrendingUp, QrCode, Link2 } from 'lucide-react';
 import { Progress } from '@/components/ui/progress';
 import { ModelAllocationSection } from '@/components/admin/ModelAllocationSection';
 import { PodActivationRequests } from '@/components/admin/PodActivationRequests';
 import { useUserRole } from '@/hooks/useUserRole';
 import { GlobalAdminRoleManager } from '@/components/admin/GlobalAdminRoleManager';
+import { Badge } from '@/components/ui/badge';
 
 interface DashboardStats {
   totalDevices: number;
@@ -18,6 +19,81 @@ interface DashboardStats {
   totalModelsAssigned: number;
   totalUsageToday: number;
 }
+
+interface PairingSession {
+  id: string;
+  status: string;
+  created_at: string;
+  expires_at: string;
+  consumed_at: string | null;
+  linked_device_id: string | null;
+  primary_device_label: string | null;
+}
+
+interface LinkedDevice {
+  id: string;
+  device_name: string;
+  registered_at: string;
+  status: string;
+  os_type: string | null;
+  app_version: string | null;
+  metadata: any;
+}
+
+const STAT_CARDS_TEMPLATE: Record<string, {
+  title: string;
+  icon: any;
+  description: string;
+  color?: string;
+  trend?: string;
+  value?: number;
+}> = {
+  totalDevices: {
+    title: 'Total Devices',
+    icon: Server,
+    description: 'Registered devices',
+  },
+  onlineDevices: {
+    title: 'Online',
+    icon: CheckCircle,
+    description: 'Active right now',
+    color: 'text-green-500',
+  },
+  offlineDevices: {
+    title: 'Offline',
+    icon: XCircle,
+    description: 'Not connected',
+    color: 'text-gray-500',
+  },
+  pendingApprovals: {
+    title: 'Pending Approvals',
+    icon: Clock,
+    description: 'Pending pod requests',
+    color: 'text-yellow-500',
+  },
+  expiringSoon: {
+    title: 'License Expiring',
+    icon: AlertTriangle,
+    description: 'Within 30 days',
+    color: 'text-orange-500',
+  },
+  syncFailures: {
+    title: 'Sync Failures',
+    icon: AlertTriangle,
+    description: 'Last 24 hours',
+    color: 'text-red-500',
+  },
+  totalModelsAssigned: {
+    title: 'Models Assigned',
+    icon: HardDrive,
+    description: 'Total allocations',
+  },
+  totalUsageToday: {
+    title: 'Usage Today',
+    icon: Activity,
+    description: 'Chat queries (24h)',
+  },
+};
 
 export default function AdminDashboard() {
   const { isGlobalAdmin } = useUserRole();
@@ -32,12 +108,11 @@ export default function AdminDashboard() {
     totalUsageToday: 0,
   });
   const [loading, setLoading] = useState(true);
+  const [pairings, setPairings] = useState<PairingSession[]>([]);
+  const [linkedDevices, setLinkedDevices] = useState<LinkedDevice[]>([]);
+  const [pairingDbReady, setPairingDbReady] = useState(true);
 
-  useEffect(() => {
-    fetchDashboardStats();
-  }, []);
-
-  async function fetchDashboardStats() {
+  const fetchDashboardStats = useCallback(async () => {
     try {
       const dayMs = 24 * 60 * 60 * 1000;
       const nowIso = new Date().toISOString();
@@ -100,81 +175,80 @@ export default function AdminDashboard() {
       });
 
       // attach real-time trend notes to card descriptors where relevant
-      statCardsTemplate.totalDevices.trend = devicesCreatedThisWeekCount
+      STAT_CARDS_TEMPLATE.totalDevices.trend = devicesCreatedThisWeekCount
         ? `+${devicesCreatedThisWeekCount} this week`
         : undefined;
-      statCardsTemplate.totalUsageToday.trend = usageTrend;
+      STAT_CARDS_TEMPLATE.totalUsageToday.trend = usageTrend;
     } catch (error) {
       console.error('Error fetching dashboard stats:', error);
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
 
-  const statCardsTemplate: Record<string, {
-    title: string;
-    icon: any;
-    description: string;
-    color?: string;
-    trend?: string;
-    value?: number;
-  }> = {
-    totalDevices: {
-      title: 'Total Devices',
-      icon: Server,
-      description: 'Registered devices',
-    },
-    onlineDevices: {
-      title: 'Online',
-      icon: CheckCircle,
-      description: 'Active right now',
-      color: 'text-green-500',
-    },
-    offlineDevices: {
-      title: 'Offline',
-      icon: XCircle,
-      description: 'Not connected',
-      color: 'text-gray-500',
-    },
-    pendingApprovals: {
-      title: 'Pending Approvals',
-      icon: Clock,
-      description: 'Pending pod requests',
-      color: 'text-yellow-500',
-    },
-    expiringSoon: {
-      title: 'License Expiring',
-      icon: AlertTriangle,
-      description: 'Within 30 days',
-      color: 'text-orange-500',
-    },
-    syncFailures: {
-      title: 'Sync Failures',
-      icon: AlertTriangle,
-      description: 'Last 24 hours',
-      color: 'text-red-500',
-    },
-    totalModelsAssigned: {
-      title: 'Models Assigned',
-      icon: HardDrive,
-      description: 'Total allocations',
-    },
-    totalUsageToday: {
-      title: 'Usage Today',
-      icon: Activity,
-      description: 'Chat queries (24h)',
-    },
-  };
+  const fetchPairingInsights = useCallback(async () => {
+    try {
+      const { data: pairingRows, error: pairingError } = await supabase
+        .from('device_pairings')
+        .select('id,status,created_at,expires_at,consumed_at,linked_device_id,primary_device_label')
+        .order('created_at', { ascending: false })
+        .limit(12);
+
+      if (pairingError) {
+        const missingTable = String(pairingError.message || '').toLowerCase().includes('device_pairings');
+        if (missingTable) {
+          setPairingDbReady(false);
+          return;
+        }
+        throw pairingError;
+      }
+
+      setPairingDbReady(true);
+      setPairings(pairingRows || []);
+
+      const { data: allRecentDevices, error: devicesError } = await supabase
+        .from('devices')
+        .select('id,device_name,registered_at,status,os_type,app_version,metadata')
+        .order('registered_at', { ascending: false })
+        .limit(40);
+
+      if (devicesError) throw devicesError;
+
+      const linked = (allRecentDevices || []).filter((row: any) => row?.metadata?.linked_from_pairing === true);
+      setLinkedDevices(linked.slice(0, 12));
+    } catch (error) {
+      console.error('Error fetching device pairing insights:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchDashboardStats();
+    fetchPairingInsights();
+
+    const pairingChannel = supabase
+      .channel('admin-device-pairings-live')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'device_pairings' }, () => {
+        fetchPairingInsights();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'devices' }, () => {
+        fetchPairingInsights();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(pairingChannel);
+    };
+  }, [fetchDashboardStats, fetchPairingInsights]);
 
   const statCards = [
-    { ...statCardsTemplate.totalDevices, value: stats.totalDevices },
-    { ...statCardsTemplate.onlineDevices, value: stats.onlineDevices },
-    { ...statCardsTemplate.offlineDevices, value: stats.offlineDevices },
-    { ...statCardsTemplate.pendingApprovals, value: stats.pendingApprovals },
-    { ...statCardsTemplate.expiringSoon, value: stats.expiringSoon },
-    { ...statCardsTemplate.syncFailures, value: stats.syncFailures },
-    { ...statCardsTemplate.totalModelsAssigned, value: stats.totalModelsAssigned },
-    { ...statCardsTemplate.totalUsageToday, value: stats.totalUsageToday },
+    { ...STAT_CARDS_TEMPLATE.totalDevices, value: stats.totalDevices },
+    { ...STAT_CARDS_TEMPLATE.onlineDevices, value: stats.onlineDevices },
+    { ...STAT_CARDS_TEMPLATE.offlineDevices, value: stats.offlineDevices },
+    { ...STAT_CARDS_TEMPLATE.pendingApprovals, value: stats.pendingApprovals },
+    { ...STAT_CARDS_TEMPLATE.expiringSoon, value: stats.expiringSoon },
+    { ...STAT_CARDS_TEMPLATE.syncFailures, value: stats.syncFailures },
+    { ...STAT_CARDS_TEMPLATE.totalModelsAssigned, value: stats.totalModelsAssigned },
+    { ...STAT_CARDS_TEMPLATE.totalUsageToday, value: stats.totalUsageToday },
   ];
 
   return (
@@ -323,6 +397,67 @@ export default function AdminDashboard() {
       {/* Pod Activation Requests */}
       <div className="mt-6 animate-fade-in">
         <PodActivationRequests />
+      </div>
+
+      {/* Device Pairing Insights */}
+      <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-6 animate-fade-in">
+        <Card className="border-border/50 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 shadow-premium">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <QrCode className="h-5 w-5 text-primary" />
+              Recent Pairing Sessions
+            </CardTitle>
+            <CardDescription>Live status for QR link sessions</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {!pairingDbReady ? (
+              <div className="text-sm text-muted-foreground">
+                `device_pairings` table not found yet. Apply latest Supabase migrations to enable this view.
+              </div>
+            ) : pairings.length === 0 ? (
+              <div className="text-sm text-muted-foreground">No pairing sessions yet.</div>
+            ) : (
+              pairings.map((p) => (
+                <div key={p.id} className="rounded-lg border border-border/60 p-3 flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium truncate">{p.primary_device_label || 'Primary session'}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {new Date(p.created_at).toLocaleString()} - expires {new Date(p.expires_at).toLocaleTimeString()}
+                    </p>
+                  </div>
+                  <Badge variant={p.status === 'confirmed' ? 'default' : 'outline'}>{p.status}</Badge>
+                </div>
+              ))
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="border-border/50 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 shadow-premium">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Link2 className="h-5 w-5 text-primary" />
+              Linked Devices (QR)
+            </CardTitle>
+            <CardDescription>Devices linked through pairing QR flow</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {linkedDevices.length === 0 ? (
+              <div className="text-sm text-muted-foreground">No QR-linked devices found yet.</div>
+            ) : (
+              linkedDevices.map((d) => (
+                <div key={d.id} className="rounded-lg border border-border/60 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-medium truncate">{d.device_name}</p>
+                    <Badge variant="outline">{d.status}</Badge>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {d.os_type || 'Unknown OS'} | {d.app_version || 'Unknown app'} | {new Date(d.registered_at).toLocaleString()}
+                  </p>
+                </div>
+              ))
+            )}
+          </CardContent>
+        </Card>
       </div>
 
       {/* Model Allocation */}
