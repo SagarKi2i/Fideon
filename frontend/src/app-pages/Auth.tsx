@@ -1,6 +1,6 @@
 import React from "react";
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import type { Provider } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -16,6 +16,7 @@ type AuthView = "signin" | "forgot" | "reset";
 
 export default function Auth() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { toast } = useToast();
   const authEnableSso = process.env.NEXT_PUBLIC_AUTH_ENABLE_SSO === "true";
   const authEnableMfa = process.env.NEXT_PUBLIC_AUTH_ENABLE_MFA === "true";
@@ -68,6 +69,16 @@ export default function Auth() {
 
     return () => subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const pid = params.get("pid");
+    const code = params.get("code");
+    const pair = params.get("pair");
+    if (pid && code && pair === "1") {
+      navigate(`/device-link?pid=${encodeURIComponent(pid)}&code=${encodeURIComponent(code)}`, { replace: true });
+    }
+  }, [location.search, navigate]);
 
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
