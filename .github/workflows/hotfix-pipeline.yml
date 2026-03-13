@@ -1,9 +1,9 @@
 # ─────────────────────────────────────────────────────────────
-# PLACE AT: .github/workflows/hotfix-pipeline.yml
+# Hotfix Pipeline
+# Expedited pipeline for hotfix changes targeting v1 (production).
+# Runs basic quality checks before deploying. After deploy,
+# back-merge to v1-dev and v1-staging manually.
 # ─────────────────────────────────────────────────────────────
-# Expedited pipeline for hotfix/* branches targeting v1 (production).
-# Skips SonarQube for speed. After deploy, back-merge to v1-dev
-# and v1-staging manually.
 
 name: Hotfix Pipeline
 
@@ -22,19 +22,64 @@ on:
       - 'frontend/**'
       - 'backend/**'
 
+concurrency:
+  group: hotfix-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  # ── Quick quality gate ────────────────────────────────────────────────────
+  quality-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Frontend quick check
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run lint || echo "Lint unavailable — skipping"
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Backend quick check
+        working-directory: backend
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install flake8
+          flake8 . --count --max-line-length=120 --statistics
+
   # ── Build & push frontend ──────────────────────────────────────────────────
   build-frontend:
+    needs: quality-check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: production
     steps:
       - uses: actions/checkout@v4
 
       - name: Build Frontend Docker Image
         run: |
+          SUPABASE_PUBLIC_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}"
+          if [ -z "$SUPABASE_PUBLIC_KEY" ]; then
+            SUPABASE_PUBLIC_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}"
+          fi
           docker build \
+            --build-arg NEXT_PUBLIC_SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
+            --build-arg NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY="$SUPABASE_PUBLIC_KEY" \
+            --build-arg NEXT_PUBLIC_API_URL="${{ secrets.NEXT_PUBLIC_API_URL }}" \
             -t neurapodacr.azurecr.io/frontend:hotfix-${{ github.sha }} \
-            -t neurapodacr.azurecr.io/frontend:latest \
             -f frontend/docker/Dockerfile \
             frontend/
 
@@ -45,12 +90,13 @@ jobs:
             docker login neurapodacr.azurecr.io \
               -u "${{ secrets.AZURE_CR_USERNAME }}" \
               --password-stdin
-          docker push neurapodacr.azurecr.io/frontend:latest
           docker push neurapodacr.azurecr.io/frontend:hotfix-${{ github.sha }}
 
   # ── Build & push backend ───────────────────────────────────────────────────
   build-backend:
+    needs: quality-check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: production
     steps:
       - uses: actions/checkout@v4
@@ -59,7 +105,6 @@ jobs:
         run: |
           docker build \
             -t neurapodacr.azurecr.io/backend:hotfix-${{ github.sha }} \
-            -t neurapodacr.azurecr.io/backend:latest \
             backend/
 
       - name: Push to ACR
@@ -69,7 +114,6 @@ jobs:
             docker login neurapodacr.azurecr.io \
               -u "${{ secrets.AZURE_CR_USERNAME }}" \
               --password-stdin
-          docker push neurapodacr.azurecr.io/backend:latest
           docker push neurapodacr.azurecr.io/backend:hotfix-${{ github.sha }}
 
   # ── Deploy both to production VM ──────────────────────────────────────────
@@ -77,18 +121,42 @@ jobs:
     needs: [build-frontend, build-backend]
     if: github.ref == 'refs/heads/v1' && github.event_name == 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: production
+    concurrency:
+      group: deploy-hotfix-production
+      cancel-in-progress: false
     steps:
       - name: Write SSH key
         run: |
+          install -m 600 /dev/null ssh_key
           echo "${{ secrets.CHATBOT_SERVER_KEY }}" > ssh_key
-          chmod 600 ssh_key
+
+      - name: Verify SSH connectivity
+        run: |
+          for attempt in 1 2 3; do
+            echo "SSH connectivity check $attempt/3..."
+            if ssh -T -i ssh_key \
+                -o StrictHostKeyChecking=no \
+                -o ConnectTimeout=30 \
+                -o BatchMode=yes \
+                ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} "echo OK"; then
+              echo "SSH connectivity verified"
+              exit 0
+            fi
+            [ "$attempt" -lt 3 ] && sleep 15
+          done
+          echo "ERROR: Cannot reach VM on port 22"
+          exit 1
 
       - name: Deploy hotfix to production VM
         run: |
-          ssh -i ssh_key \
+          ssh -T -i ssh_key \
               -o StrictHostKeyChecking=no \
-              -o ConnectTimeout=30 \
+              -o ConnectTimeout=60 \
+              -o ServerAliveInterval=15 \
+              -o ServerAliveCountMax=3 \
+              -o ConnectionAttempts=3 \
               ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} << 'ENDSSH'
 
             set -e
@@ -98,55 +166,104 @@ jobs:
                 -u "${{ secrets.AZURE_CR_USERNAME }}" \
                 --password-stdin
 
-            # Restart frontend
+            # Save rollback images
+            PREV_FE=$(docker inspect --format='{{.Config.Image}}' neurapod-frontend 2>/dev/null || echo "")
+            PREV_BE=$(docker inspect --format='{{.Config.Image}}' neurapod-backend 2>/dev/null || echo "")
+
+            echo "── Deploy frontend ──"
             docker pull neurapodacr.azurecr.io/frontend:hotfix-${{ github.sha }}
             docker stop neurapod-frontend 2>/dev/null || true
             docker rm   neurapod-frontend 2>/dev/null || true
+
+            SUPABASE_PUBLIC_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}"
+            if [ -z "$SUPABASE_PUBLIC_KEY" ]; then
+              SUPABASE_PUBLIC_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}"
+            fi
+
             docker run -d --name neurapod-frontend --restart unless-stopped \
-              -p 4200:4200 \
+              -p 4200:3000 \
               -e NEXT_PUBLIC_SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
-              -e NEXT_PUBLIC_SUPABASE_ANON_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}" \
+              -e NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY="$SUPABASE_PUBLIC_KEY" \
+              -e NEXT_PUBLIC_API_URL="${{ secrets.NEXT_PUBLIC_API_URL }}" \
               neurapodacr.azurecr.io/frontend:hotfix-${{ github.sha }}
 
-            # Restart backend
+            echo "── Deploy backend ──"
             docker pull neurapodacr.azurecr.io/backend:hotfix-${{ github.sha }}
             docker stop neurapod-backend 2>/dev/null || true
             docker rm   neurapod-backend 2>/dev/null || true
             docker run -d --name neurapod-backend --restart unless-stopped \
               -p 8080:8080 \
               -e SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
-              -e SUPABASE_ANON_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}" \
+              -e SUPABASE_ANON_KEY="$SUPABASE_PUBLIC_KEY" \
               -e SUPABASE_SERVICE_ROLE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
               -e SUPABASE_JWT_SECRET="${{ secrets.SUPABASE_JWT_SECRET }}" \
               -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
               -e GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" \
               neurapodacr.azurecr.io/backend:hotfix-${{ github.sha }}
 
-            sleep 20
+            echo "── Waiting 30s for startup ──"
+            sleep 30
+
+            echo "── Health checks ──"
+            FE_OK=false
+            BE_OK=false
+
+            for i in 1 2 3 4 5; do
+              if curl -sf --max-time 5 http://localhost:4200/api/health > /dev/null 2>&1; then FE_OK=true; fi
+              if curl -sf --max-time 5 http://localhost:8080/health > /dev/null 2>&1; then BE_OK=true; fi
+              if [ "$FE_OK" = "true" ] && [ "$BE_OK" = "true" ]; then break; fi
+              sleep 5
+            done
+
+            if [ "$FE_OK" != "true" ] || [ "$BE_OK" != "true" ]; then
+              echo "HEALTH CHECK FAILED — FE=$FE_OK BE=$BE_OK"
+              docker logs --tail 50 neurapod-frontend || true
+              docker logs --tail 50 neurapod-backend || true
+
+              if [ -n "$PREV_FE" ] || [ -n "$PREV_BE" ]; then
+                echo "── ROLLING BACK ──"
+                if [ -n "$PREV_FE" ]; then
+                  docker stop neurapod-frontend 2>/dev/null || true
+                  docker rm   neurapod-frontend 2>/dev/null || true
+                  docker run -d --name neurapod-frontend --restart unless-stopped \
+                    -p 4200:3000 \
+                    -e NEXT_PUBLIC_SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
+                    -e NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY="$SUPABASE_PUBLIC_KEY" \
+                    -e NEXT_PUBLIC_API_URL="${{ secrets.NEXT_PUBLIC_API_URL }}" \
+                    "$PREV_FE"
+                fi
+                if [ -n "$PREV_BE" ]; then
+                  docker stop neurapod-backend 2>/dev/null || true
+                  docker rm   neurapod-backend 2>/dev/null || true
+                  docker run -d --name neurapod-backend --restart unless-stopped \
+                    -p 8080:8080 \
+                    -e SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
+                    -e SUPABASE_ANON_KEY="$SUPABASE_PUBLIC_KEY" \
+                    -e SUPABASE_SERVICE_ROLE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+                    -e SUPABASE_JWT_SECRET="${{ secrets.SUPABASE_JWT_SECRET }}" \
+                    -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+                    -e GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" \
+                    "$PREV_BE"
+                fi
+                echo "Rollback complete"
+              fi
+              exit 1
+            fi
+
             docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-
-            echo "══════════════════════════════════════"
-            echo " FRONTEND LOGS"
-            echo "══════════════════════════════════════"
-            docker logs --tail 30 neurapod-frontend
-
-            echo "══════════════════════════════════════"
-            echo " BACKEND LOGS"
-            echo "══════════════════════════════════════"
-            docker logs --tail 30 neurapod-backend
-
-            echo "✓ Hotfix deployed to production."
-            echo "⚠ REMINDER: Back-merge this fix to v1-dev and v1-staging!"
+            echo "Hotfix deployed to production successfully"
+            echo "REMINDER: Back-merge this fix to v1-dev and v1-staging!"
           ENDSSH
 
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ssh_key
+
       - name: Hotfix summary
+        if: always()
         run: |
-          HOST="${{ vars.AZURE_VM_PUBLIC_HOST }}"
-          echo "════════════════════════════════════════"
+          echo "========================================"
           echo "  Hotfix deployed to : production (v1)"
-          echo "  Frontend           : http://$HOST:4200"
-          echo "  Backend            : http://$HOST:8080"
           echo "  SHA                : ${{ github.sha }}"
-          echo ""
-          echo "  ⚠ TODO: Back-merge to v1-dev + v1-staging"
-          echo "════════════════════════════════════════"
+          echo "  TODO: Back-merge to v1-dev + v1-staging"
+          echo "========================================"

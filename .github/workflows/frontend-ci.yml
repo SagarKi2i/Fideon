@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────
-# PLACE AT: .github/workflows/frontend-ci.yml
+# Frontend CI/CD
 # ─────────────────────────────────────────────────────────────
 
 name: Frontend CI/CD
@@ -22,8 +22,11 @@ on:
     paths:
       - 'frontend/**'
 
+concurrency:
+  group: frontend-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  # ── Build, lint, test, docker build, push to ACR ──────────────────────────
   ci:
     uses: ./.github/workflows/ci-component.yml
     with:
@@ -35,7 +38,6 @@ jobs:
       environment: ${{ github.ref_name == 'v1' && 'production' || github.ref_name == 'v1-staging' && 'staging' || 'development' }}
     secrets: inherit
 
-  # ── Deploy to development (on push to v1-dev) ─────────────────────────────
   deploy-dev:
     needs: ci
     if: github.ref == 'refs/heads/v1-dev' && github.event_name == 'push'
@@ -48,7 +50,6 @@ jobs:
       image_sha: ${{ github.sha }}
     secrets: inherit
 
-  # ── Deploy to staging (on push to v1-staging) ─────────────────────────────
   deploy-staging:
     needs: ci
     if: github.ref == 'refs/heads/v1-staging' && github.event_name == 'push'
@@ -61,7 +62,6 @@ jobs:
       image_sha: ${{ github.sha }}
     secrets: inherit
 
-  # ── Deploy to production (on push to v1 — requires manual approval) ────────
   deploy-production:
     needs: ci
     if: github.ref == 'refs/heads/v1' && github.event_name == 'push'
