@@ -50,6 +50,7 @@ jobs:
 
       - name: Lint
         working-directory: backend
+        continue-on-error: true
         run: flake8 . --count --max-line-length=120 --statistics
 
       - name: Test

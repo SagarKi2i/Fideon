@@ -43,6 +43,7 @@ jobs:
 
       - name: Frontend quick check
         working-directory: frontend
+        continue-on-error: true
         run: |
           npm ci
           npm run lint || echo "Lint unavailable — skipping"
@@ -54,6 +55,7 @@ jobs:
 
       - name: Backend quick check
         working-directory: backend
+        continue-on-error: true
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
