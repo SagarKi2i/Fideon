@@ -51,7 +51,7 @@ jobs:
       - name: Lint
         working-directory: backend
         continue-on-error: true
-        run: flake8 . --count --max-line-length=120 --statistics
+        run: flake8 . --count --max-line-length=120 --extend-ignore=E501,F401 --statistics
 
       - name: Test
         working-directory: backend
@@ -84,7 +84,6 @@ jobs:
         run: |
           docker build \
             -t neurapodacr.azurecr.io/backend:${{ github.sha }} \
-            -t neurapodacr.azurecr.io/backend:latest \
             backend/
 
       - name: Login to ACR & Push

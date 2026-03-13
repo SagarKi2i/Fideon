@@ -58,7 +58,6 @@ jobs:
 
           Released: $(date -u +"%Y-%m-%d %H:%M UTC")
           EOF
-          sed -i 's/^          //' VERSION.md
 
           git add VERSION.md
           git commit -m "chore: release ${{ github.event.inputs.version }} — update VERSION.md"
