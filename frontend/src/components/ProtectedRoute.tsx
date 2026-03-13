@@ -1,5 +1,5 @@
 import React from 'react';
-import { Navigate } from 'react-router-dom';
+import { Navigate, useLocation } from 'react-router-dom';
 import { useUserRole } from '@/hooks/useUserRole';
 import { Loader2 } from 'lucide-react';
 import type { Database } from '@/integrations/supabase/types';
@@ -14,6 +14,7 @@ interface ProtectedRouteProps {
 
 export function ProtectedRoute({ children, requireAdmin = false, allowedRoles }: ProtectedRouteProps) {
   const { loading, isAdmin, isAuthenticated, role } = useUserRole();
+  const location = useLocation();
 
   if (loading) {
     return (
@@ -24,7 +25,8 @@ export function ProtectedRoute({ children, requireAdmin = false, allowedRoles }:
   }
 
   if (!isAuthenticated) {
-    return <Navigate to="/auth" replace />;
+    const query = location.search || "";
+    return <Navigate to={`/auth${query}`} replace />;
   }
 
   if (requireAdmin && !isAdmin) {

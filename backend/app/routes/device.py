@@ -1,14 +1,53 @@
 from datetime import datetime, timezone
+import json
 import hashlib
 import secrets
 from typing import Optional
 from urllib.parse import quote
 
+import httpx
 from fastapi import APIRouter, Header, HTTPException, Path, Request
 
+from app.core.config import SUPABASE_URL
 from app.core.supabase import get_device_by_token, postgrest_get, postgrest_insert, postgrest_patch, verify_user
+from app.core.supabase import service_headers
 
 router = APIRouter()
+
+
+async def _generate_magic_login_link(
+    user_email: str, redirect_to: str
+) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    payload = {
+        "type": "magiclink",
+        "email": user_email,
+        "options": {"redirect_to": redirect_to},
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{SUPABASE_URL}/auth/v1/admin/generate_link",
+            headers=service_headers(),
+            content=json.dumps(payload),
+        )
+    if resp.status_code >= 400:
+        return None, None, None, resp.text
+    body = resp.json()
+    if isinstance(body, dict):
+        action_link_top = body.get("action_link")
+        email_otp_top = body.get("email_otp")
+        if isinstance(action_link_top, str) and action_link_top:
+            return action_link_top, None, None, None
+        if isinstance(email_otp_top, str) and email_otp_top:
+            return None, user_email, email_otp_top, None
+    properties = body.get("properties") if isinstance(body, dict) else None
+    if isinstance(properties, dict):
+        action_link = properties.get("action_link")
+        email_otp = properties.get("email_otp")
+        if isinstance(action_link, str) and action_link:
+            return action_link, None, None, None
+        if isinstance(email_otp, str) and email_otp:
+            return None, user_email, email_otp, None
+    return None, None, None, "No action_link or email_otp returned from Supabase generate_link API"
 
 
 @router.get("/api/device-models")
@@ -140,7 +179,9 @@ async def start_device_pairing(request: Request, authorization: Optional[str] = 
     if not frontend_base:
         frontend_base = "http://localhost:3000"
 
-    pairing_url = f"{frontend_base}/device-link?pid={quote(pairing_id, safe='')}&code={quote(pairing_code, safe='')}"
+    # Use root URL + query so QR opens reliably on deployments
+    # where deep links like /device-link return 404 from the web server.
+    pairing_url = f"{frontend_base}/?pair=1&pid={quote(pairing_id, safe='')}&code={quote(pairing_code, safe='')}"
 
     return {
         "success": True,
@@ -259,6 +300,28 @@ async def confirm_device_pairing(request: Request):
         },
     )
 
+    user_rows = await postgrest_get(
+        "app_users",
+        f"select=email&user_id=eq.{quote(pairing['user_id'], safe='')}&limit=1",
+    )
+    user_email = user_rows[0].get("email") if user_rows else None
+    redirect_to = str(body.get("auth_redirect_to") or "").strip()
+    if not redirect_to:
+        origin = request.headers.get("origin")
+        redirect_to = f"{origin.rstrip('/')}/auth" if origin else ""
+    login_action_link = None
+    login_email = None
+    login_email_otp = None
+    login_handoff_error = None
+    if user_email and redirect_to:
+        login_action_link, login_email, login_email_otp, login_handoff_error = await _generate_magic_login_link(
+            user_email, redirect_to
+        )
+    elif not user_email:
+        login_handoff_error = "User email not found"
+    else:
+        login_handoff_error = "auth_redirect_to is required for login handoff"
+
     return {
         "success": True,
         "pairing_id": pairing_id,
@@ -267,5 +330,9 @@ async def confirm_device_pairing(request: Request):
             "name": linked_device["device_name"],
             "token": linked_device["device_token"],
         },
+        "login_action_link": login_action_link,
+        "login_email": login_email,
+        "login_email_otp": login_email_otp,
+        "login_handoff_error": login_handoff_error,
         "status": "confirmed",
     }
