@@ -1,5 +1,7 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+> Note: This README also carries a small documentation-only change to help bootstrap initial SonarQube analysis without affecting any runtime logic.
+
 ## Getting Started
 
 First, run the development server:
