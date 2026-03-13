@@ -26,7 +26,7 @@ from app.core.config import (
 
 def ensure_llm_configured() -> None:
     runpod_token = FIDEON_SECRET_KEY or RUNPOD_API_KEY
-    runpod_ready = bool(runpod_token and (RUNPOD_GENERATE_URL or RUNPOD_OPENAI_COMPAT_URL))
+    runpod_ready = bool(RUNPOD_GENERATE_URL or (runpod_token and RUNPOD_OPENAI_COMPAT_URL))
     if any([GROQ_API_KEY, runpod_ready, GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY]):
         return
     raise HTTPException(
@@ -159,6 +159,36 @@ async def _runpod_generate_text(payload: dict[str, Any], model_name: str) -> str
         raise RuntimeError("RunPod returned empty response")
 
 
+async def _offline_fallback_stream(payload: dict[str, Any]) -> tuple[int, dict[str, str], AsyncGenerator[bytes, None]]:
+    prompt = str(payload.get("prompt") or "").strip()
+    if not prompt:
+        prompt = _collect_text_from_messages(payload.get("messages", []))
+    if not prompt:
+        prompt = "Please help the user."
+    if not RUNPOD_GENERATE_URL:
+        raise RuntimeError("RUNPOD_GENERATE_URL is not configured")
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        offline_resp = await client.post(
+            RUNPOD_GENERATE_URL,
+            json={"prompt": prompt},
+            headers={"Content-Type": "application/json"},
+        )
+        if offline_resp.status_code >= 400:
+            raise RuntimeError(f"{offline_resp.status_code}: {offline_resp.text}")
+
+        content_type = (offline_resp.headers.get("content-type") or "").lower()
+        if "application/json" in content_type:
+            data = offline_resp.json()
+            offline_text = _extract_runpod_text(data)
+        else:
+            offline_text = offline_resp.text.strip()
+
+    if not offline_text:
+        raise RuntimeError("offline-llm returned empty response")
+    return 200, {"Content-Type": "text/event-stream"}, _single_sse_stream(offline_text, "offline-llm")
+
+
 async def _gemini_text(payload: dict[str, Any]) -> str:
     messages = payload.get("messages", [])
     merged = _collect_text_from_messages(messages)
@@ -262,6 +292,11 @@ async def llm_stream(payload: dict[str, Any]) -> tuple[int, dict[str, str], Asyn
             return await _openai_compatible_stream(GROQ_OPENAI_COMPAT_URL, GROQ_API_KEY, groq_payload)
         except Exception as exc:
             errors.append(f"groq: {exc}")
+
+    try:
+        return await _offline_fallback_stream(payload)
+    except Exception as offline_exc:
+        errors.append(f"offline-llm: {offline_exc}")
 
     runpod_token = _clean_bearer_token(FIDEON_SECRET_KEY or RUNPOD_API_KEY)
     if runpod_token and RUNPOD_GENERATE_URL:
