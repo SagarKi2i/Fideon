@@ -39,10 +39,12 @@ jobs:
       - name: Link to ${{ github.event.inputs.environment }} project
         run: |
           supabase link \
-            --project-ref ${{ github.event.inputs.environment == 'production' && secrets.PROD_SUPABASE_PROJECT_REF || secrets.STAGING_SUPABASE_PROJECT_REF }} \
-            --password ${{ github.event.inputs.environment == 'production' && secrets.PROD_SUPABASE_DB_PASSWORD || secrets.STAGING_SUPABASE_DB_PASSWORD }}
+            --project-ref "$SUPABASE_PROJECT_REF" \
+            --password "$SUPABASE_DB_PASSWORD"
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_PROJECT_REF: ${{ github.event.inputs.environment == 'production' && secrets.PROD_SUPABASE_PROJECT_REF || secrets.STAGING_SUPABASE_PROJECT_REF }}
+          SUPABASE_DB_PASSWORD: ${{ github.event.inputs.environment == 'production' && secrets.PROD_SUPABASE_DB_PASSWORD || secrets.STAGING_SUPABASE_DB_PASSWORD }}
 
       - name: Show pending migrations (dry run)
         run: |
@@ -75,10 +77,12 @@ jobs:
       - name: Link project
         run: |
           supabase link \
-            --project-ref ${{ github.event.inputs.environment == 'production' && secrets.PROD_SUPABASE_PROJECT_REF || secrets.STAGING_SUPABASE_PROJECT_REF }} \
-            --password ${{ github.event.inputs.environment == 'production' && secrets.PROD_SUPABASE_DB_PASSWORD || secrets.STAGING_SUPABASE_DB_PASSWORD }}
+            --project-ref "$SUPABASE_PROJECT_REF" \
+            --password "$SUPABASE_DB_PASSWORD"
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_PROJECT_REF: ${{ github.event.inputs.environment == 'production' && secrets.PROD_SUPABASE_PROJECT_REF || secrets.STAGING_SUPABASE_PROJECT_REF }}
+          SUPABASE_DB_PASSWORD: ${{ github.event.inputs.environment == 'production' && secrets.PROD_SUPABASE_DB_PASSWORD || secrets.STAGING_SUPABASE_DB_PASSWORD }}
 
       - name: Apply migrations
         run: |
@@ -90,10 +94,14 @@ jobs:
 
       - name: Run schema tests post-migration
         run: |
-          supabase db execute --file supabase/seed/schema_tests.sql \
-            2>&1 | tee schema_test_output.txt
-          if grep -q "0 rows" schema_test_output.txt; then
-            echo "✅ Schema tests passed"
+          if [ -f supabase/seed/schema_tests.sql ]; then
+            supabase db execute --file supabase/seed/schema_tests.sql \
+              2>&1 | tee schema_test_output.txt
+            if grep -q "0 rows" schema_test_output.txt; then
+              echo "✅ Schema tests passed"
+            fi
+          else
+            echo "⚠ supabase/seed/schema_tests.sql not found — skipping schema tests"
           fi
 
       - name: Notify Slack

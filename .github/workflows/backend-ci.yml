@@ -61,6 +61,14 @@ jobs:
         with:
           projectBaseDir: backend
 
+      - name: SonarQube Quality Gate
+        if: github.event_name == 'pull_request' && github.base_ref == 'v1-dev'
+        uses: SonarSource/sonarqube-quality-gate-action@v1.1.0
+        timeout-minutes: 15
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
       - name: Build Docker Image
         run: |
           docker build \
