@@ -50,6 +50,10 @@ export interface DevicePairingConfirmResponse {
   success: boolean;
   pairing_id: string;
   status: "confirmed";
+  login_action_link?: string | null;
+  login_email?: string | null;
+  login_email_otp?: string | null;
+  login_handoff_error?: string | null;
   device: {
     id: string;
     name: string;
@@ -153,6 +157,7 @@ export async function getDevicePairingStatus(
 export async function confirmDevicePairing(payload: {
   pairing_id: string;
   pairing_code: string;
+  auth_redirect_to?: string;
   device_name?: string;
   os_type?: string;
   app_version?: string;

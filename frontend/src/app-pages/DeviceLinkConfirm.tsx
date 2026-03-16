@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
 import { confirmDevicePairing, setStoredDeviceToken } from "@/lib/deviceApi";
+import { supabase } from "@/integrations/supabase/client";
 import { CheckCircle2, Link2, Loader2 } from "lucide-react";
 
 function detectDeviceProfile() {
@@ -50,6 +51,7 @@ export default function DeviceLinkConfirm() {
       const result = await confirmDevicePairing({
         pairing_id: pairingId,
         pairing_code: pairingCode,
+        auth_redirect_to: `${window.location.origin}/auth`,
         device_name: deviceName || profile.device_name,
         os_type: profile.os_name,
         app_version: profile.app_version,
@@ -59,6 +61,27 @@ export default function DeviceLinkConfirm() {
       setDeviceToken(result.device.token);
       setLinked(true);
       toast({ title: "Device linked", description: "This device is now linked and ready to use." });
+      if (result.login_action_link) {
+        setTimeout(() => {
+          window.location.href = result.login_action_link as string;
+        }, 600);
+      } else if (result.login_email && result.login_email_otp) {
+        const { error } = await supabase.auth.verifyOtp({
+          email: result.login_email,
+          token: result.login_email_otp,
+          type: "magiclink",
+        });
+        if (error) {
+          throw new Error(`Device linked but auto-login failed: ${error.message}`);
+        }
+        window.location.href = "/";
+      } else {
+        toast({
+          title: "Login handoff unavailable",
+          description: result.login_handoff_error || "Device linked, but automatic sign-in link was not generated.",
+          variant: "destructive",
+        });
+      }
     } catch (error: any) {
       toast({ title: "Link failed", description: error.message, variant: "destructive" });
     } finally {
