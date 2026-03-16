@@ -68,6 +68,7 @@ const items = [
   { title: "Custom Workflows", url: "/workflows", icon: Workflow, allowedRoles: ["global_admin", "admin", "user"] as AppRole[] },
   { title: "Schedules", url: "/schedules", icon: CalendarClock, allowedRoles: ["global_admin", "admin", "user"] as AppRole[] },
   { title: "Review Queue", url: "/review-queue", icon: ClipboardCheck, allowedRoles: ["global_admin", "admin", "user"] as AppRole[] },
+  { title: "Activity", url: "/activity", icon: Activity, allowedRoles: ["global_admin", "admin", "user", "viewer"] as AppRole[] },
   
   { title: "Mailbox", url: "/mailbox", icon: Mail, allowedRoles: ["global_admin", "admin", "user"] as AppRole[] },
   { title: "Settings", url: "/settings", icon: Settings, allowedRoles: ["global_admin", "admin", "user", "viewer", "guest"] as AppRole[] },

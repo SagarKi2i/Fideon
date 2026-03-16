@@ -30,6 +30,7 @@ import Workflows from "./app-pages/Workflows";
 import AgentSchedules from "./app-pages/AgentSchedules";
 import AgentWorkflows from "./app-pages/AgentWorkflows";
 import ReviewQueue from "./app-pages/ReviewQueue";
+import Activity from "./app-pages/Activity";
 import DeviceLinkConfirm from "./app-pages/DeviceLinkConfirm";
 
 
@@ -129,8 +130,15 @@ const App = () => (
                       <ReviewQueue />
                     </ProtectedRoute>
                   } />
-                  
-                  
+                  <Route
+                    path="/activity"
+                    element={
+                      <ProtectedRoute allowedRoles={["global_admin", "admin", "user", "viewer"]}>
+                        <Activity />
+                      </ProtectedRoute>
+                    }
+                  />
+
                   <Route path="/settings" element={<Settings />} />
                   <Route path="/pitch-deck" element={<PitchDeck />} />
                   {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
