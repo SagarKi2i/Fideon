@@ -666,7 +666,7 @@ export default function DeviceDetails() {
                   </Button>
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  Use this token in the Electron app to authenticate with Fideon Fabric
+                  Use this token in the Electron app to authenticate with Fideon OS
                 </p>
               </div>
 

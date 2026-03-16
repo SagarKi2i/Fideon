@@ -10,8 +10,8 @@ import { FideonLogo } from "@/components/FideonLogo";
 
 const faqs = [
   {
-    question: "What is Fideon Fabric?",
-    answer: "Fideon Fabric is a platform with specialized AI models designed for specific insurance workflows. Each pod is optimized for tasks like document retrieval, quote generation, policy comparison, or claims processing. You can activate multiple pods from the marketplace to automate different parts of your workflow."
+    question: "What is Fideon OS?",
+    answer: "Fideon OS is a platform with specialized AI models designed for specific insurance workflows. Each pod is optimized for tasks like document retrieval, quote generation, policy comparison, or claims processing. You can activate multiple pods from the marketplace to automate different parts of your workflow."
   },
   {
     question: "How do I activate an AI Pod?",
@@ -27,7 +27,7 @@ const faqs = [
   },
   {
     question: "Is my data secure?",
-    answer: "Yes! Fideon Fabric runs on private, secure infrastructure. Your data is encrypted in transit and at rest. AI models can run locally on your devices for maximum privacy, or you can use cloud sync for enhanced performance while maintaining enterprise-grade security."
+    answer: "Yes! Fideon OS runs on private, secure infrastructure. Your data is encrypted in transit and at rest. AI models can run locally on your devices for maximum privacy, or you can use cloud sync for enhanced performance while maintaining enterprise-grade security."
   },
   {
     question: "What does the Pod Dashboard show?",

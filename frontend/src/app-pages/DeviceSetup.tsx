@@ -86,7 +86,7 @@ export default function DeviceSetup() {
       setIsConnected(true);
       toast({
         title: "Connected",
-        description: "Successfully connected to Fideon Fabric",
+        description: "Successfully connected to Fideon OS",
       });
     } catch (error: any) {
       toast({

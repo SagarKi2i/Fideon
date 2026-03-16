@@ -16,7 +16,7 @@ async def chat(req: ChatRequest, authorization: Optional[str] = Header(default=N
     ensure_llm_configured()
     user = await verify_user(authorization)
 
-    system_prompt = "You are a helpful AI assistant in the Fideon Fabric platform."
+    system_prompt = "You are a helpful AI assistant in the Fideon OS platform."
     if req.modelId:
         domain_prompts = {
             "insurance": "You are an insurance domain expert. Help users analyze policies, compare coverage, identify exclusions, and answer insurance-related questions with accuracy and clarity.",
