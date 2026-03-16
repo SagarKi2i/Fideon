@@ -16,3 +16,4 @@ litellm>=1.0.0
 
 # Optional: Momento serverless cache backend
 # momento>=1.5.0
+structlog

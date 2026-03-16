@@ -1,24 +1,23 @@
 # ─────────────────────────────────────────────────────────────
-# PLACE AT: .github/workflows/_reusable/deploy-env.yml
-# ─────────────────────────────────────────────────────────────
 # Reusable Docker deployment to Azure VM via SSH
 # Called by frontend-ci.yml and backend-ci.yml after images are pushed
+# ─────────────────────────────────────────────────────────────
 
 on:
   workflow_call:
     inputs:
       environment:
         required: true
-        type: string           # development | staging | production
+        type: string
       component:
         required: true
-        type: string           # neurapod-app | backend
+        type: string
       container_name:
         required: true
-        type: string           # neurapod-frontend | neurapod-backend
+        type: string
       port:
         required: true
-        type: string           # 4200 | 8080
+        type: string
       image_sha:
         required: true
         type: string
@@ -53,7 +52,11 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: ${{ inputs.environment }}
+    concurrency:
+      group: deploy-${{ inputs.component }}-${{ inputs.environment }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -61,48 +64,66 @@ jobs:
         if: inputs.environment == 'staging'
         run: |
           chmod +x ./scripts/staging-automation.sh 2>/dev/null || true
-          ./scripts/staging-automation.sh 2>/dev/null || echo "⚠ No staging-automation.sh — skipping"
+          ./scripts/staging-automation.sh 2>/dev/null || echo "No staging-automation.sh — skipping"
 
       - name: Write SSH key
         run: |
+          install -m 600 /dev/null ssh_key
           echo "${{ secrets.CHATBOT_SERVER_KEY }}" > ssh_key
-          chmod 600 ssh_key
+
+      - name: Verify SSH connectivity
+        run: |
+          for attempt in 1 2 3; do
+            echo "SSH connectivity check $attempt/3..."
+            if ssh -T -i ssh_key \
+                -o StrictHostKeyChecking=no \
+                -o ConnectTimeout=30 \
+                -o BatchMode=yes \
+                ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} "echo OK"; then
+              echo "SSH connectivity verified"
+              exit 0
+            fi
+            [ "$attempt" -lt 3 ] && sleep 15
+          done
+          echo "ERROR: Cannot reach VM on port 22"
+          echo "Check: VM running, NSG allows port 22, AZURE_VM_HOST secret correct, sshd running"
+          exit 1
 
       - name: Deploy ${{ inputs.component }} → ${{ inputs.environment }}
         run: |
-          ssh -i ssh_key \
+          ssh -T -i ssh_key \
               -o StrictHostKeyChecking=no \
-              -o ConnectTimeout=30 \
+              -o ConnectTimeout=60 \
+              -o ServerAliveInterval=15 \
+              -o ServerAliveCountMax=3 \
+              -o ConnectionAttempts=3 \
               ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} << 'ENDSSH'
 
             set -e
 
-            echo "──────────────────────────────────────"
-            echo " Login to ACR"
-            echo "──────────────────────────────────────"
+            echo "── Login to ACR ──"
             echo "${{ secrets.AZURE_CR_PASSWORD }}" | \
               docker login neurapodacr.azurecr.io \
                 -u "${{ secrets.AZURE_CR_USERNAME }}" \
                 --password-stdin
 
-            echo "──────────────────────────────────────"
-            echo " Pull image"
-            echo "──────────────────────────────────────"
+            echo "── Pull new image ──"
             docker pull neurapodacr.azurecr.io/${{ inputs.component }}:${{ inputs.image_sha }}
 
-            echo "──────────────────────────────────────"
-            echo " Stop & remove old container"
-            echo "──────────────────────────────────────"
+            echo "── Save rollback info ──"
+            PREV_IMAGE=$(docker inspect --format='{{.Config.Image}}' ${{ inputs.container_name }} 2>/dev/null || echo "")
+            echo "Previous image: ${PREV_IMAGE:-none}"
+
+            echo "── Stop & remove old container ──"
             docker stop ${{ inputs.container_name }} 2>/dev/null || true
             docker rm   ${{ inputs.container_name }} 2>/dev/null || true
 
-            echo "──────────────────────────────────────"
-            echo " Start new container"
-            echo "──────────────────────────────────────"
+            echo "── Start new container ──"
             SUPABASE_PUBLIC_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}"
             if [ -z "$SUPABASE_PUBLIC_KEY" ]; then
               SUPABASE_PUBLIC_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}"
             fi
+
             if [ "${{ inputs.component }}" = "neurapod-app" ] || [ "${{ inputs.component }}" = "frontend" ]; then
               docker run -d \
                 --name ${{ inputs.container_name }} \
@@ -126,39 +147,83 @@ jobs:
                 neurapodacr.azurecr.io/${{ inputs.component }}:${{ inputs.image_sha }}
             fi
 
-            echo "──────────────────────────────────────"
-            echo " Waiting for startup (30s)..."
-            echo "──────────────────────────────────────"
+            echo "── Waiting for container to stabilize (30s) ──"
             sleep 30
 
-            echo "──────────────────────────────────────"
-            echo " Container status"
-            echo "──────────────────────────────────────"
+            echo "── HTTP health check ──"
+            HEALTH_PORT="${{ inputs.port }}"
+            if [ "${{ inputs.component }}" = "neurapod-app" ] || [ "${{ inputs.component }}" = "frontend" ]; then
+              HEALTH_URL="http://localhost:${HEALTH_PORT}/"
+            else
+              HEALTH_URL="http://localhost:${HEALTH_PORT}/health"
+            fi
+
+            HEALTHY=false
+            for i in 1 2 3 4 5; do
+              if curl -sf --max-time 5 "$HEALTH_URL" > /dev/null 2>&1; then
+                HEALTHY=true
+                break
+              fi
+              echo "Health check attempt $i/5 failed, retrying in 5s..."
+              sleep 5
+            done
+
+            if [ "$HEALTHY" = "true" ]; then
+              echo "${{ inputs.container_name }} is healthy at $HEALTH_URL"
+            else
+              echo "ERROR: ${{ inputs.container_name }} failed health check at $HEALTH_URL"
+              echo "── Container logs ──"
+              docker logs --tail 80 ${{ inputs.container_name }} || true
+
+              if [ -n "$PREV_IMAGE" ]; then
+                echo "── ROLLING BACK to $PREV_IMAGE ──"
+                docker stop ${{ inputs.container_name }} 2>/dev/null || true
+                docker rm   ${{ inputs.container_name }} 2>/dev/null || true
+
+                if [ "${{ inputs.component }}" = "neurapod-app" ] || [ "${{ inputs.component }}" = "frontend" ]; then
+                  docker run -d \
+                    --name ${{ inputs.container_name }} \
+                    --restart unless-stopped \
+                    -p ${{ inputs.port }}:3000 \
+                    -e NEXT_PUBLIC_SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
+                    -e NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY="$SUPABASE_PUBLIC_KEY" \
+                    -e NEXT_PUBLIC_API_URL="${{ secrets.NEXT_PUBLIC_API_URL }}" \
+                    "$PREV_IMAGE"
+                else
+                  docker run -d \
+                    --name ${{ inputs.container_name }} \
+                    --restart unless-stopped \
+                    -p ${{ inputs.port }}:${{ inputs.port }} \
+                    -e SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
+                    -e SUPABASE_ANON_KEY="$SUPABASE_PUBLIC_KEY" \
+                    -e SUPABASE_SERVICE_ROLE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+                    -e SUPABASE_JWT_SECRET="${{ secrets.SUPABASE_JWT_SECRET }}" \
+                    -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+                    -e GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" \
+                    "$PREV_IMAGE"
+                fi
+                echo "Rollback complete — previous container restored"
+              fi
+              exit 1
+            fi
+
+            echo "── Container status ──"
             docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" \
               --filter name=${{ inputs.container_name }}
 
-            echo ""
-            echo "══════════════════════════════════════"
-            echo " LOGS — last 50 lines"
-            echo "══════════════════════════════════════"
-            docker logs --tail 50 ${{ inputs.container_name }}
-
-            echo "──────────────────────────────────────"
-            echo " Health check"
-            echo "──────────────────────────────────────"
-            if [ "$(docker inspect -f '{{.State.Running}}' ${{ inputs.container_name }})" != "true" ]; then
-              echo "ERROR: ${{ inputs.container_name }} is not running!"
-              exit 1
-            fi
-            echo "✓ ${{ inputs.container_name }} is running."
+            echo "── Last 30 log lines ──"
+            docker logs --tail 30 ${{ inputs.container_name }}
           ENDSSH
 
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ssh_key
+
       - name: Deployment summary
+        if: always()
         run: |
-          HOST="${{ secrets.AZURE_VM_PUBLIC_HOST }}"
-          echo "════════════════════════════════════════"
+          echo "========================================"
           echo "  Component   : ${{ inputs.component }}"
           echo "  Environment : ${{ inputs.environment }}"
-          echo "  URL         : http://$HOST:${{ inputs.port }}"
           echo "  Image SHA   : ${{ inputs.image_sha }}"
-          echo "════════════════════════════════════════"
+          echo "========================================"
