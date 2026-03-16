@@ -8,6 +8,8 @@ import { User, LogOut } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import type { User as SupabaseUser } from "@supabase/supabase-js";
 import { useUserRole } from "@/hooks/useUserRole";
+import { safeLog } from "@/logger";
+import { computeAuditIntegrityHash } from "@/lib/auditHash";
 
 interface LayoutProps {
   children: ReactNode;
@@ -49,7 +51,47 @@ export function Layout({ children }: LayoutProps) {
   }, [navigate]);
 
   const handleLogout = async () => {
-    await supabase.auth.signOut();
+    const currentUser = user;
+    const currentRole = role;
+
+    try {
+      // Attempt to write a logout audit entry before signing out
+      if (currentUser) {
+        try {
+          const createdAt = new Date().toISOString();
+          const integrity_hash = await computeAuditIntegrityHash({
+            user_id: currentUser.id,
+            role: currentRole || "user",
+            event: "logout",
+            action_code: "E",
+            outcome_code: 0,
+            resource_type: "auth_session",
+            resource_id: currentUser.id,
+            created_at: createdAt,
+          });
+
+          await supabase.from("auth_audit").insert({
+            user_id: currentUser.id,
+            email: currentUser.email,
+            role: currentRole || "user",
+            event: "logout",
+            action_code: "E",           // Execute (end auth session)
+            outcome_code: 0,
+            resource_type: "auth_session",
+            resource_id: currentUser.id,
+            created_at: createdAt,
+            integrity_hash,
+          });
+        } catch (auditError) {
+          safeLog.error("auth_audit_logout_error", {
+            error:
+              auditError instanceof Error ? auditError.message : String(auditError),
+          });
+        }
+      }
+    } finally {
+      await supabase.auth.signOut();
+    }
     toast({
       title: "Signed out",
       description: "You have been signed out successfully.",

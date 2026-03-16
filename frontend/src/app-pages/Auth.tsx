@@ -10,7 +10,9 @@ import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 import { Shield, Lock, Cpu, KeyRound, Mail } from "lucide-react";
 import { FideonLogo } from "@/components/FideonLogo";
+import { safeLog } from "@/logger";
 import privateTenantBg from "@/assets/private-ai-tenant-bg.jpg";
+import { computeAuditIntegrityHash } from "@/lib/auditHash";
 
 type AuthView = "signin" | "forgot" | "reset";
 
@@ -74,6 +76,7 @@ export default function Auth() {
     setLoading(true);
 
     try {
+      safeLog.info("auth_signin_attempt", { email });
       const { data: signInData, error } = await supabase.auth.signInWithPassword({
         email,
         password,
@@ -83,20 +86,62 @@ export default function Auth() {
 
       if (signInData.user) {
         const { data: roleData } = await supabase
-          .from('user_roles')
-          .select('role')
-          .eq('user_id', signInData.user.id)
+          .from("user_roles")
+          .select("role")
+          .eq("user_id", signInData.user.id)
           .maybeSingle();
 
-        if (roleData?.role === 'admin' || roleData?.role === 'global_admin') {
+        const effectiveRole = roleData?.role ?? "user";
+
+        safeLog.info("auth_signin_success", {
+          user_id: signInData.user.id,
+          role: effectiveRole,
+        });
+
+        // Insert audit log row (Supabase RLS controls visibility)
+        try {
+          const createdAt = new Date().toISOString();
+          const integrity_hash = await computeAuditIntegrityHash({
+            user_id: signInData.user.id,
+            role: effectiveRole,
+            event: "login",
+            action_code: "E",
+            outcome_code: 0,
+            resource_type: "auth_session",
+            resource_id: signInData.user.id,
+            created_at: createdAt,
+          });
+
+          await supabase.from("auth_audit").insert({
+            user_id: signInData.user.id,
+            email,
+            role: effectiveRole,
+            event: "login",
+            action_code: "E",          // Execute (auth workflow)
+            outcome_code: 0,           // Success
+            resource_type: "auth_session",
+            resource_id: signInData.user.id,
+            created_at: createdAt,
+            integrity_hash,
+          });
+        } catch (auditError) {
+          safeLog.error("auth_audit_insert_error", {
+            error:
+              auditError instanceof Error ? auditError.message : String(auditError),
+          });
+        }
+
+        if (effectiveRole === "admin" || effectiveRole === "global_admin") {
           navigate("/admin");
         } else {
           navigate("/");
         }
       } else {
+        safeLog.info("auth_signin_success_no_user", { email });
         navigate("/");
       }
     } catch (error: any) {
+      safeLog.error("auth_signin_error", { email, error: error.message });
       toast({
         title: "Error",
         description: error.message,

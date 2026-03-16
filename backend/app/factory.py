@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.logger import setup_logging
 from app.routes.admin import router as admin_router
 from app.routes.chat import router as chat_router
 from app.routes.device import router as device_router
@@ -30,6 +31,9 @@ def create_app() -> FastAPI:
     app.include_router(federated_router)
     app.include_router(admin_router)
     app.include_router(pod_activation_router)
+
+    # Configure structured logging and HTTP request audit logs
+    setup_logging(app)
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_: Request, exc: HTTPException):
