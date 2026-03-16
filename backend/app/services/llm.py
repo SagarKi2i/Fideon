@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Any, AsyncGenerator
 
 import httpx
@@ -21,12 +22,32 @@ from app.core.config import (
     RUNPOD_MODEL_LLAMA,
     RUNPOD_MODEL_MISTRAL,
     RUNPOD_OPENAI_COMPAT_URL,
+    OFFLINE_LLM_FALLBACK_ENABLED,
+    LLM_CACHE_BACKEND,
+    LLM_SEMANTIC_CACHE_ENABLED,
 )
+
+logger = logging.getLogger(__name__)
+
+# LLMFallbackService (from llm_fallback folder — ported from LLM Fallback 3)
+# Handles: HuggingFace → Gemini → OpenAI → Claude via litellm after Groq/RunPod fail
+try:
+    from app.llm_fallback.service import LLMFallbackService, build_default_fallback_chain
+    _fallback_service = LLMFallbackService(
+        cache_backend=LLM_CACHE_BACKEND,
+        semantic_caching=str(LLM_SEMANTIC_CACHE_ENABLED).strip().lower() in {"1", "true", "yes", "on"},
+    )
+    _FALLBACK_SERVICE_AVAILABLE = True
+    logger.info("LLMFallbackService loaded successfully")
+except Exception as _fb_exc:
+    _FALLBACK_SERVICE_AVAILABLE = False
+    _fallback_service = None
+    logger.warning(f"LLMFallbackService unavailable: {_fb_exc}")
 
 
 def ensure_llm_configured() -> None:
     runpod_token = FIDEON_SECRET_KEY or RUNPOD_API_KEY
-    runpod_ready = bool(RUNPOD_GENERATE_URL or (runpod_token and RUNPOD_OPENAI_COMPAT_URL))
+    runpod_ready = bool(runpod_token and (RUNPOD_GENERATE_URL or RUNPOD_OPENAI_COMPAT_URL))
     if any([GROQ_API_KEY, runpod_ready, GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY]):
         return
     raise HTTPException(
@@ -60,15 +81,20 @@ async def _openai_compatible_stream(
     endpoint: str,
     api_key: str,
     payload: dict[str, Any],
+    extra_headers: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, str], AsyncGenerator[bytes, None]]:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+
     client = httpx.AsyncClient(timeout=None)
     req = client.build_request(
         "POST",
         endpoint,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers=headers,
         json=payload,
     )
     resp = await client.send(req, stream=True)
@@ -94,6 +120,18 @@ def _clean_bearer_token(raw_token: str) -> str:
     if token.lower().startswith("bearer "):
         token = token[7:].strip()
     return token
+
+
+def _runpod_auth_headers(runpod_token: str) -> dict[str, str]:
+    """
+    Send both bearer and x-api-key headers for RunPod/proxy auth.
+    Some gateway setups enforce x-api-key while others use Authorization.
+    """
+    return {
+        "Authorization": f"Bearer {runpod_token}",
+        "x-api-key": runpod_token,
+        "Content-Type": "application/json",
+    }
 
 
 def _extract_runpod_text(data: dict[str, Any]) -> str:
@@ -136,27 +174,39 @@ async def _runpod_generate_text(payload: dict[str, Any], model_name: str) -> str
     if not prompt:
         prompt = "Please help the user."
 
+    # RunPod /generate endpoints vary between deployments (query params vs JSON body).
+    # Try common request shapes in order for better local/VM compatibility.
+    attempts = [
+        {
+            "params": {"prompt": prompt, "model": model_name},
+            "json": None,
+        },
+        {
+            "params": None,
+            "json": {"prompt": prompt, "model": model_name},
+        },
+    ]
+    errors: list[str] = []
     async with httpx.AsyncClient(timeout=90) as client:
-        resp = await client.post(
-            RUNPOD_GENERATE_URL,
-            params={
-                "prompt": prompt,
-                "model": model_name,
-            },
-            headers={
-                "Authorization": f"Bearer {runpod_token}",
-            },
-        )
-        if resp.status_code >= 400:
-            raise RuntimeError(f"{resp.status_code}: {resp.text}")
-        content_type = (resp.headers.get("content-type") or "").lower()
-        if "application/json" in content_type:
-            data = resp.json()
-            return _extract_runpod_text(data)
-        text = resp.text.strip()
-        if text:
-            return text
-        raise RuntimeError("RunPod returned empty response")
+        for attempt in attempts:
+            resp = await client.post(
+                RUNPOD_GENERATE_URL,
+                params=attempt["params"],
+                json=attempt["json"],
+                headers=_runpod_auth_headers(runpod_token),
+            )
+            if resp.status_code >= 400:
+                errors.append(f"{resp.status_code}: {resp.text[:300]}")
+                continue
+            content_type = (resp.headers.get("content-type") or "").lower()
+            if "application/json" in content_type:
+                data = resp.json()
+                return _extract_runpod_text(data)
+            text = resp.text.strip()
+            if text:
+                return text
+            errors.append("empty response body")
+    raise RuntimeError(f"RunPod /generate failed across request formats: {' | '.join(errors)}")
 
 
 async def _offline_fallback_stream(payload: dict[str, Any]) -> tuple[int, dict[str, str], AsyncGenerator[bytes, None]]:
@@ -167,12 +217,16 @@ async def _offline_fallback_stream(payload: dict[str, Any]) -> tuple[int, dict[s
         prompt = "Please help the user."
     if not RUNPOD_GENERATE_URL:
         raise RuntimeError("RUNPOD_GENERATE_URL is not configured")
+    runpod_token = _clean_bearer_token(FIDEON_SECRET_KEY or RUNPOD_API_KEY)
 
     async with httpx.AsyncClient(timeout=60) as client:
+        headers = {"Content-Type": "application/json"}
+        if runpod_token:
+            headers = _runpod_auth_headers(runpod_token)
         offline_resp = await client.post(
             RUNPOD_GENERATE_URL,
             json={"prompt": prompt},
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         )
         if offline_resp.status_code >= 400:
             raise RuntimeError(f"{offline_resp.status_code}: {offline_resp.text}")
@@ -289,62 +343,157 @@ async def llm_stream(payload: dict[str, Any]) -> tuple[int, dict[str, str], Asyn
     if GROQ_API_KEY:
         try:
             groq_payload = {**stream_payload, "model": model_name or stream_payload.get("model")}
-            return await _openai_compatible_stream(GROQ_OPENAI_COMPAT_URL, GROQ_API_KEY, groq_payload)
+            status, headers, stream = await _openai_compatible_stream(GROQ_OPENAI_COMPAT_URL, GROQ_API_KEY, groq_payload)
+            headers = {
+                **headers,
+                "x-llm-provider": "groq",
+                "x-llm-model": str(groq_payload.get("model") or ""),
+            }
+            logger.info(f"LLM success provider=groq model={groq_payload.get('model')}")
+            return status, headers, stream
         except Exception as exc:
             errors.append(f"groq: {exc}")
-
-    try:
-        return await _offline_fallback_stream(payload)
-    except Exception as offline_exc:
-        errors.append(f"offline-llm: {offline_exc}")
 
     runpod_token = _clean_bearer_token(FIDEON_SECRET_KEY or RUNPOD_API_KEY)
     if runpod_token and RUNPOD_GENERATE_URL:
         try:
             text = await _runpod_generate_text(payload, RUNPOD_MODEL_LLAMA)
-            return 200, {"Content-Type": "text/event-stream"}, _single_sse_stream(text, RUNPOD_MODEL_LLAMA)
+            logger.info(f"LLM success provider=runpod_generate model={RUNPOD_MODEL_LLAMA}")
+            return 200, {
+                "Content-Type": "text/event-stream",
+                "x-llm-provider": "runpod_generate",
+                "x-llm-model": RUNPOD_MODEL_LLAMA,
+            }, _single_sse_stream(text, RUNPOD_MODEL_LLAMA)
         except Exception as exc:
             errors.append(f"runpod-generate-llama: {exc}")
 
         try:
             text = await _runpod_generate_text(payload, RUNPOD_MODEL_MISTRAL)
-            return 200, {"Content-Type": "text/event-stream"}, _single_sse_stream(text, RUNPOD_MODEL_MISTRAL)
+            logger.info(f"LLM success provider=runpod_generate model={RUNPOD_MODEL_MISTRAL}")
+            return 200, {
+                "Content-Type": "text/event-stream",
+                "x-llm-provider": "runpod_generate",
+                "x-llm-model": RUNPOD_MODEL_MISTRAL,
+            }, _single_sse_stream(text, RUNPOD_MODEL_MISTRAL)
         except Exception as exc:
             errors.append(f"runpod-generate-mistral: {exc}")
 
     if runpod_token and RUNPOD_OPENAI_COMPAT_URL:
         try:
             runpod_llama_payload = {**stream_payload, "model": RUNPOD_MODEL_LLAMA}
-            return await _openai_compatible_stream(RUNPOD_OPENAI_COMPAT_URL, runpod_token, runpod_llama_payload)
+            status, headers, stream = await _openai_compatible_stream(
+                RUNPOD_OPENAI_COMPAT_URL,
+                runpod_token,
+                runpod_llama_payload,
+                extra_headers={"x-api-key": runpod_token},
+            )
+            headers = {
+                **headers,
+                "x-llm-provider": "runpod_openai_compat",
+                "x-llm-model": RUNPOD_MODEL_LLAMA,
+            }
+            logger.info(f"LLM success provider=runpod_openai_compat model={RUNPOD_MODEL_LLAMA}")
+            return status, headers, stream
         except Exception as exc:
             errors.append(f"runpod-llama: {exc}")
 
         try:
             runpod_mistral_payload = {**stream_payload, "model": RUNPOD_MODEL_MISTRAL}
-            return await _openai_compatible_stream(RUNPOD_OPENAI_COMPAT_URL, runpod_token, runpod_mistral_payload)
+            status, headers, stream = await _openai_compatible_stream(
+                RUNPOD_OPENAI_COMPAT_URL,
+                runpod_token,
+                runpod_mistral_payload,
+                extra_headers={"x-api-key": runpod_token},
+            )
+            headers = {
+                **headers,
+                "x-llm-provider": "runpod_openai_compat",
+                "x-llm-model": RUNPOD_MODEL_MISTRAL,
+            }
+            logger.info(f"LLM success provider=runpod_openai_compat model={RUNPOD_MODEL_MISTRAL}")
+            return status, headers, stream
         except Exception as exc:
             errors.append(f"runpod-mistral: {exc}")
 
-    if GEMINI_API_KEY:
+    if str(OFFLINE_LLM_FALLBACK_ENABLED).strip().lower() in {"1", "true", "yes", "on"}:
         try:
-            text = await _gemini_text(payload)
-            return 200, {"Content-Type": "text/event-stream"}, _single_sse_stream(text, GEMINI_MODEL)
-        except Exception as exc:
-            errors.append(f"gemini: {exc}")
+            status, headers, stream = await _offline_fallback_stream(payload)
+            headers = {
+                **headers,
+                "x-llm-provider": "offline-llm",
+                "x-llm-model": "offline-llm",
+            }
+            logger.info("LLM success provider=offline-llm model=offline-llm")
+            return status, headers, stream
+        except Exception as offline_exc:
+            errors.append(f"offline-llm: {offline_exc}")
 
-    if OPENAI_API_KEY:
+    # ── LLMFallbackService chain (ported from LLM Fallback 3) ─────────────
+    # Handles: HuggingFace → Gemini → OpenAI → Claude via litellm
+    # Falls back to individual httpx calls if litellm is not installed.
+    if _FALLBACK_SERVICE_AVAILABLE and _fallback_service is not None:
         try:
-            text = await _openai_text(payload)
-            return 200, {"Content-Type": "text/event-stream"}, _single_sse_stream(text, OPENAI_MODEL)
-        except Exception as exc:
-            errors.append(f"openai: {exc}")
+            fb_chain = build_default_fallback_chain()
+            if fb_chain:
+                fb_result = await _fallback_service.execute(
+                    messages=payload.get("messages", []),
+                    models=fb_chain,
+                )
+                if fb_result.success and fb_result.content:
+                    logger.info(f"LLMFallbackService succeeded via {fb_result.model} "
+                                f"(fallbacks={fb_result.fallback_count})")
+                    return (
+                        200,
+                        {
+                            "Content-Type": "text/event-stream",
+                            "x-llm-provider": "litellm-fallback",
+                            "x-llm-model": str(fb_result.model or ""),
+                        },
+                        _single_sse_stream(fb_result.content, fb_result.model),
+                    )
+                if fb_result.errors:
+                    for e in fb_result.errors:
+                        errors.append(f"litellm-fallback/{e}")
+        except Exception as fb_exc:
+            errors.append(f"litellm-fallback: {fb_exc}")
+            logger.warning(f"LLMFallbackService chain error: {fb_exc}")
+    else:
+        # litellm not available — use direct httpx calls as before
+        if GEMINI_API_KEY:
+            try:
+                text = await _gemini_text(payload)
+                logger.info(f"LLM success provider=gemini model={GEMINI_MODEL}")
+                return 200, {
+                    "Content-Type": "text/event-stream",
+                    "x-llm-provider": "gemini",
+                    "x-llm-model": GEMINI_MODEL,
+                }, _single_sse_stream(text, GEMINI_MODEL)
+            except Exception as exc:
+                errors.append(f"gemini: {exc}")
 
-    if ANTHROPIC_API_KEY:
-        try:
-            text = await _claude_text(payload)
-            return 200, {"Content-Type": "text/event-stream"}, _single_sse_stream(text, CLAUDE_MODEL)
-        except Exception as exc:
-            errors.append(f"claude: {exc}")
+        if OPENAI_API_KEY:
+            try:
+                text = await _openai_text(payload)
+                logger.info(f"LLM success provider=openai model={OPENAI_MODEL}")
+                return 200, {
+                    "Content-Type": "text/event-stream",
+                    "x-llm-provider": "openai",
+                    "x-llm-model": OPENAI_MODEL,
+                }, _single_sse_stream(text, OPENAI_MODEL)
+            except Exception as exc:
+                errors.append(f"openai: {exc}")
+
+        if ANTHROPIC_API_KEY:
+            try:
+                text = await _claude_text(payload)
+                logger.info(f"LLM success provider=claude model={CLAUDE_MODEL}")
+                return 200, {
+                    "Content-Type": "text/event-stream",
+                    "x-llm-provider": "claude",
+                    "x-llm-model": CLAUDE_MODEL,
+                }, _single_sse_stream(text, CLAUDE_MODEL)
+            except Exception as exc:
+                errors.append(f"claude: {exc}")
 
     # Preserve common UX status codes where possible.
     combined = " | ".join(errors) if errors else "No provider available"

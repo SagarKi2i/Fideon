@@ -40,8 +40,6 @@ export async function streamChat({
           "http://127.0.0.1:8080/api/chat",
           "http://localhost:8001/api/chat",
           "http://127.0.0.1:8001/api/chat",
-          "http://localhost:8000/api/chat",
-          "http://127.0.0.1:8000/api/chat",
         ].filter(Boolean)
       )
     );
