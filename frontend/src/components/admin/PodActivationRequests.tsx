@@ -7,6 +7,9 @@ import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { CheckCircle2, XCircle, Clock, Package, User } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
+import { useUserRole } from "@/hooks/useUserRole";
+import { safeLog } from "@/logger";
+import { computeAuditIntegrityHash } from "@/lib/auditHash";
 
 interface ActivationRequest {
   id: string;
@@ -27,6 +30,7 @@ export function PodActivationRequests() {
   const [processingId, setProcessingId] = useState<string | null>(null);
   const [rejectionReason, setRejectionReason] = useState<Record<string, string>>({});
   const [showRejectInput, setShowRejectInput] = useState<string | null>(null);
+  const { role } = useUserRole();
 
   useEffect(() => {
     loadRequests();
@@ -73,6 +77,42 @@ export function PodActivationRequests() {
         throw new Error(payload?.error || "Failed to approve request");
       }
 
+      // Audit: admin/global_admin approving a pod request
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+          const createdAt = new Date().toISOString();
+          const integrity_hash = await computeAuditIntegrityHash({
+            user_id: user.id,
+            role: role || "admin",
+            event: `approve_pod:${request.model_id}`,
+            action_code: "U",
+            outcome_code: 0,
+            resource_type: "pod_activation",
+            resource_id: request.id,
+            created_at: createdAt,
+          });
+
+          await (supabase as any).from("auth_audit").insert({
+            user_id: user.id,
+            email: user.email,
+            role: role || "admin",
+            event: `approve_pod:${request.model_id}`,
+            action_code: "U",              // Update allocation state
+            outcome_code: 0,
+            resource_type: "pod_activation",
+            resource_id: request.id,
+            created_at: createdAt,
+            integrity_hash,
+          });
+        }
+      } catch (auditError) {
+        safeLog.error("auth_audit_pod_approve_error", {
+          error:
+            auditError instanceof Error ? auditError.message : String(auditError),
+        });
+      }
+
       toast({
         title: "Request Approved",
         description: `${request.model_name} has been activated for the user`,
@@ -110,6 +150,42 @@ export function PodActivationRequests() {
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(payload?.error || "Failed to reject request");
+      }
+
+      // Audit: admin/global_admin rejecting a pod request
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+          const createdAt = new Date().toISOString();
+          const integrity_hash = await computeAuditIntegrityHash({
+            user_id: user.id,
+            role: role || "admin",
+            event: `reject_pod:${request.model_id}`,
+            action_code: "U",
+            outcome_code: 0,
+            resource_type: "pod_activation",
+            resource_id: request.id,
+            created_at: createdAt,
+          });
+
+          await (supabase as any).from("auth_audit").insert({
+            user_id: user.id,
+            email: user.email,
+            role: role || "admin",
+            event: `reject_pod:${request.model_id}`,
+            action_code: "U",              // Update request status
+            outcome_code: 0,
+            resource_type: "pod_activation",
+            resource_id: request.id,
+            created_at: createdAt,
+            integrity_hash,
+          });
+        }
+      } catch (auditError) {
+        safeLog.error("auth_audit_pod_reject_error", {
+          error:
+            auditError instanceof Error ? auditError.message : String(auditError),
+        });
       }
 
       toast({

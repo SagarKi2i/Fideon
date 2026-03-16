@@ -9,6 +9,8 @@ frontend/.next/
 # Python artifacts
 **/__pycache__/
 *.pyc
+**/venv/
+**/logs/
 
 # Supabase local temp/state
 supabase/.temp/
