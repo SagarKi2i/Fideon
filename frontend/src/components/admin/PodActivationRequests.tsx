@@ -93,7 +93,7 @@ export function PodActivationRequests() {
             created_at: createdAt,
           });
 
-          await supabase.from("auth_audit").insert({
+          await (supabase as any).from("auth_audit").insert({
             user_id: user.id,
             email: user.email,
             role: role || "admin",
@@ -168,7 +168,7 @@ export function PodActivationRequests() {
             created_at: createdAt,
           });
 
-          await supabase.from("auth_audit").insert({
+          await (supabase as any).from("auth_audit").insert({
             user_id: user.id,
             email: user.email,
             role: role || "admin",

@@ -123,7 +123,7 @@ export default function Auth() {
             created_at: createdAt,
           });
 
-          await supabase.from("auth_audit").insert({
+          await (supabase as any).from("auth_audit").insert({
             user_id: signInData.user.id,
             email,
             role: effectiveRole,
