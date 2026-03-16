@@ -87,7 +87,7 @@ curl -N -X POST "http://127.0.0.1:8001/api/help-assistant" \
   -H "Content-Type: application/json" \
   -d '{
     "messages": [
-      {"role":"user","content":"What is Fideon Fabric?"}
+      {"role":"user","content":"What is Fideon OS?"}
     ]
   }'
 ```

@@ -151,7 +151,7 @@ export function AppSidebar() {
         <div className="px-3 py-4 flex items-center gap-2">
           <FideonLogo size={36} className="flex-shrink-0" />
           <div className="flex flex-col min-w-0 group-data-[collapsible=icon]:hidden">
-            <span className="font-semibold text-sidebar-foreground truncate">Fideon Fabric</span>
+            <span className="font-semibold text-sidebar-foreground truncate">Fideon OS</span>
             <span className="text-xs text-sidebar-foreground/70 truncate">AI for Insurance</span>
           </div>
         </div>

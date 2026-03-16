@@ -7,7 +7,7 @@ import { toast } from "sonner";
 const slides = [
   {
     id: 1,
-    title: "Fideon Fabric",
+    title: "Fideon OS",
     subtitle: "Enterprise AI Infrastructure at the Edge",
     content: (
       <div className="flex flex-col items-center justify-center h-full space-y-8">
@@ -19,7 +19,7 @@ const slides = [
             </div>
           </div>
           <h1 className="text-7xl font-bold bg-gradient-to-r from-primary via-primary/80 to-primary/60 bg-clip-text text-transparent">
-            Fideon Fabric
+            Fideon OS
           </h1>
           <p className="text-3xl text-muted-foreground font-light">
             Private AI Tenant Infrastructure for Enterprise
@@ -1183,7 +1183,7 @@ const slides = [
             "Testing: Spectron or Playwright for Electron E2E, mocking Ollama responses in integration tests",
           ],
           responsibilities: [
-            "Architect and develop the Fideon Fabric Electron desktop app (Windows, macOS, Linux)",
+            "Architect and develop the Fideon OS Electron desktop app (Windows, macOS, Linux)",
             "Integrate Ollama runtime for on-device local AI inference without cloud dependency",
             "Build offline-first sync queue, model download manager, and auto-update pipeline",
             "Implement secure IPC between renderer and main process",
@@ -1833,7 +1833,7 @@ export default function PitchDeck() {
           "Testing: Playwright for Electron E2E, mocking Ollama responses in integration test suites",
         ],
         responsibilities: [
-          "Architect and develop the Fideon Fabric Electron desktop app (Windows, macOS, Linux).",
+          "Architect and develop the Fideon OS Electron desktop app (Windows, macOS, Linux).",
           "Integrate Ollama runtime for on-device local AI inference without cloud dependency.",
           "Build offline-first sync queue, model download manager, and auto-update pipeline.",
           "Implement secure IPC between renderer and main process.",
@@ -1886,7 +1886,7 @@ export default function PitchDeck() {
       doc.setTextColor(255, 255, 255);
       doc.setFont("helvetica", "bold");
       doc.setFontSize(9);
-      doc.text("Fideon Fabric", marginL, 9);
+      doc.text("Fideon OS", marginL, 9);
       doc.setFont("helvetica", "normal");
       doc.setFontSize(8);
       doc.text(`Page ${pageNum} of ${total}`, pageW - marginR, 9, { align: "right" });
@@ -1989,9 +1989,9 @@ export default function PitchDeck() {
       return;
     }
     const pptx = new pptxgen();
-    pptx.author = "Fideon Fabric";
+    pptx.author = "Fideon OS";
     pptx.company = "Fideon";
-    pptx.title = "Fideon Fabric - Investor Pitch Deck";
+    pptx.title = "Fideon OS - Investor Pitch Deck";
     pptx.subject = "Enterprise AI Infrastructure";
     pptx.layout = "LAYOUT_WIDE";
 
@@ -2018,7 +2018,7 @@ export default function PitchDeck() {
     };
 
     const addFooter = (slide: any, num: number, total: number) => {
-      slide.addText(`Fideon Fabric`, { x: 0.5, y: 7.0, w: 4, h: 0.3, fontSize: 8, color: COLORS.muted });
+      slide.addText(`Fideon OS`, { x: 0.5, y: 7.0, w: 4, h: 0.3, fontSize: 8, color: COLORS.muted });
       slide.addText(`${num} / ${total}`, { x: 11.5, y: 7.0, w: 1.5, h: 0.3, fontSize: 8, color: COLORS.muted, align: "right" });
     };
 
@@ -2046,7 +2046,7 @@ export default function PitchDeck() {
         build: (slide) => {
           slide.addShape(pptx.ShapeType.rect, { x: 0, y: 0, w: "100%", h: "100%", fill: { color: COLORS.dark } });
           slide.addShape(pptx.ShapeType.rect, { x: 0, y: 3.2, w: "100%", h: 0.08, fill: { color: COLORS.primary } });
-          slide.addText("Fideon Fabric", { x: 1, y: 1.5, w: 11, h: 1.2, fontSize: 44, bold: true, color: COLORS.white, fontFace: "Arial", align: "center" });
+          slide.addText("Fideon OS", { x: 1, y: 1.5, w: 11, h: 1.2, fontSize: 44, bold: true, color: COLORS.white, fontFace: "Arial", align: "center" });
           slide.addText("Private AI Tenant Infrastructure for Enterprise", { x: 1, y: 3.5, w: 11, h: 0.8, fontSize: 22, color: "AAAACC", fontFace: "Arial", align: "center" });
           slide.addText("Deploy domain-specific AI models on-premise with complete data sovereignty\nwhile maintaining cloud scalability", { x: 2, y: 4.5, w: 9, h: 1, fontSize: 14, color: COLORS.muted, fontFace: "Arial", align: "center" });
         },
@@ -2936,7 +2936,7 @@ export default function PitchDeck() {
             "Excellent organizational abilities for managing multi-platform release tracks.",
           ],
           responsibilities: [
-            "Architect and develop the Fideon Fabric Electron desktop app (Windows, macOS, Linux).",
+            "Architect and develop the Fideon OS Electron desktop app (Windows, macOS, Linux).",
             "Integrate Ollama runtime for on-device local AI inference without cloud dependency.",
             "Build offline-first sync queue, model download manager, and auto-update pipeline.",
             "Implement secure IPC between renderer and main process.",

@@ -13,7 +13,7 @@ async def help_assistant(request: Request):
     body = await request.json()
     messages = body.get("messages", [])
     help_system_prompt = (
-        "You are the Fideon Fabric AI Help Assistant. You help users understand and use the Fideon Fabric platform.\n\n"
+        "You are the Fideon OS AI Help Assistant. You help users understand and use the Fideon OS platform.\n\n"
         "Key platform features you should explain:\n"
         "- Pods: Specialized AI models for insurance, healthcare, banking, legal, and travel workflows\n"
         "- Marketplace: Where users browse and activate AI pods by domain\n"

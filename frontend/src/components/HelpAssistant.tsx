@@ -13,7 +13,7 @@ interface Message {
 }
 
 const QUICK_PROMPTS = [
-  { label: "What is Fideon Fabric?", icon: Brain },
+  { label: "What is Fideon OS?", icon: Brain },
   { label: "How do I activate a pod?", icon: Sparkles },
   { label: "What's the Playground?", icon: MessageSquare },
   { label: "Is my data secure?", icon: ArrowRight },
@@ -240,7 +240,7 @@ export function HelpAssistant() {
         <Input
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Ask about Fideon Fabric..."
+          placeholder="Ask about Fideon OS..."
           disabled={isLoading}
           className="flex-1 h-8 text-xs bg-sidebar-accent/30 border-sidebar-border/50 focus:border-primary/50"
         />

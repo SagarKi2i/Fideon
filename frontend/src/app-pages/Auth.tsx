@@ -432,7 +432,7 @@ export default function Auth() {
                 <FideonLogo size={40} />
               </div>
               <div>
-                <h1 className="text-4xl font-bold text-foreground">Fideon Fabric</h1>
+                <h1 className="text-4xl font-bold text-foreground">Fideon OS</h1>
                 <p className="text-lg text-muted-foreground">AI for Insurance</p>
               </div>
             </div>
@@ -492,7 +492,7 @@ export default function Auth() {
                 </div>
               </div>
               <CardTitle className="text-2xl lg:text-3xl text-center text-foreground">
-                Welcome to Fideon Fabric
+                Welcome to Fideon OS
               </CardTitle>
               <CardDescription className="text-center">
                 {view === "signin" && "Sign in to access your Private AI Tenant"}
