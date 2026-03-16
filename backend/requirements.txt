@@ -2,3 +2,17 @@ fastapi
 uvicorn[standard]
 httpx
 pydantic
+python-dotenv
+
+# LLM Fallback Service (ported from LLM Fallback 3)
+litellm>=1.0.0
+
+# Optional: semantic caching
+# sentence-transformers>=2.2.0
+# numpy>=1.24.0
+
+# Optional: Redis cache backend
+# redis>=5.0.0
+
+# Optional: Momento serverless cache backend
+# momento>=1.5.0

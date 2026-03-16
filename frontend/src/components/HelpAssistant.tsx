@@ -57,8 +57,6 @@ export function HelpAssistant() {
           "http://127.0.0.1:8080/api/help-assistant",
           "http://localhost:8001/api/help-assistant",
           "http://127.0.0.1:8001/api/help-assistant",
-          "http://localhost:8000/api/help-assistant",
-          "http://127.0.0.1:8000/api/help-assistant",
         ].filter(Boolean))
       );
       
