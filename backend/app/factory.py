@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -15,9 +17,11 @@ from app.routes.workflow_ai import router as workflow_router
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Fideon FastAPI Backend")
+    _origins_env = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000")
+    allow_origins = [o.strip() for o in _origins_env.split(",") if o.strip()]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=allow_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

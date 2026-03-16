@@ -4,7 +4,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Header, HTTPException, Request
 
-from app.core.supabase import postgrest_delete, postgrest_get, postgrest_insert, postgrest_patch, verify_user
+from app.core.supabase import insert_audit_log, postgrest_delete, postgrest_get, postgrest_insert, postgrest_patch, verify_user
 
 router = APIRouter()
 VALID_STATUSES = {"pending", "approved", "rejected"}
@@ -102,6 +102,7 @@ async def list_activation_requests(
 @router.post("/api/pod-activation/{request_id}/approve")
 async def approve_activation_request(
     request_id: str,
+    request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
     requester, requester_role = await _get_requester_role(authorization)
@@ -147,6 +148,16 @@ async def approve_activation_request(
             "rejection_reason": None,
         },
     )
+    await insert_audit_log(
+        request=request,
+        user_id=requester["id"],
+        action="approve_pod",
+        resource_type="pod_activation_request",
+        resource_id=request_id,
+        details={"model_id": activation_request.get("model_id")},
+        previous_value={"status": "pending"},
+        new_value={"status": "approved"},
+    )
     return {"success": True}
 
 
@@ -182,6 +193,16 @@ async def reject_activation_request(
             "rejection_reason": rejection_reason,
         },
     )
+    await insert_audit_log(
+        request=request,
+        user_id=requester["id"],
+        action="reject_pod",
+        resource_type="pod_activation_request",
+        resource_id=request_id,
+        details={"model_id": activation_request.get("model_id"), "rejection_reason": rejection_reason},
+        previous_value={"status": "pending"},
+        new_value={"status": "rejected"},
+    )
     return {"success": True}
 
 
@@ -205,7 +226,7 @@ async def allocate_model_to_user(
     request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
-    _, requester_role = await _get_requester_role(authorization)
+    requester, requester_role = await _get_requester_role(authorization)
     _require_admin(requester_role)
 
     body = await request.json()
@@ -237,20 +258,31 @@ async def allocate_model_to_user(
             "domain": domain,
         },
     )
+    await insert_audit_log(
+        request=request,
+        user_id=requester["id"],
+        action="allocate_model",
+        resource_type="activated_model",
+        resource_id=model_id,
+        details={"target_user_id": user_id, "model_name": model_name, "domain": domain},
+        previous_value=None,
+        new_value={"model_id": model_id, "domain": domain},
+    )
     return {"success": True, "allocation": created[0] if created else None}
 
 
 @router.delete("/api/pod-activation/allocations/{allocation_id}")
 async def deallocate_model(
     allocation_id: str,
+    request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
-    _, requester_role = await _get_requester_role(authorization)
+    requester, requester_role = await _get_requester_role(authorization)
     _require_admin(requester_role)
 
     allocation_rows = await postgrest_get(
         "activated_models",
-        f"select=id&id=eq.{quote(allocation_id, safe='')}&limit=1",
+        f"select=id,model_id,user_id&id=eq.{quote(allocation_id, safe='')}&limit=1",
     )
     if not allocation_rows:
         raise HTTPException(status_code=404, detail="Allocation not found")
@@ -258,5 +290,15 @@ async def deallocate_model(
     await postgrest_delete(
         "activated_models",
         f"id=eq.{quote(allocation_id, safe='')}",
+    )
+    await insert_audit_log(
+        request=request,
+        user_id=requester["id"],
+        action="deallocate_model",
+        resource_type="activated_model",
+        resource_id=allocation_id,
+        details={"model_id": allocation_rows[0].get("model_id"), "target_user_id": allocation_rows[0].get("user_id")},
+        previous_value={"model_id": allocation_rows[0].get("model_id"), "domain": allocation_rows[0].get("domain")},
+        new_value=None,
     )
     return {"success": True}

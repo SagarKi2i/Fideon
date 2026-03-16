@@ -119,7 +119,7 @@ export default function Auth() {
             action_code: "E",
             outcome_code: 0,
             resource_type: "auth_session",
-            resource_id: signInData.user.id,
+            resource_id: null,
             created_at: createdAt,
           });
 
@@ -131,7 +131,7 @@ export default function Auth() {
             action_code: "E",          // Execute (auth workflow)
             outcome_code: 0,           // Success
             resource_type: "auth_session",
-            resource_id: signInData.user.id,
+            resource_id: null,         // null for auth_session events (no specific resource)
             created_at: createdAt,
             integrity_hash,
           });
@@ -152,7 +152,19 @@ export default function Auth() {
         navigate("/");
       }
     } catch (error: any) {
-      safeLog.error("auth_signin_error", { email, error: error.message });
+      // ATNA login_failed event (action_code: E, outcome_code: 8 = Serious failure).
+      // Cannot insert into auth_audit from client — no authenticated session exists
+      // after a failed login (auth.uid() is null, RLS would reject the insert).
+      // Logged here via structlog as the server-side audit trail for this event.
+      safeLog.error("login_failed", {
+        email,
+        event: "login_failed",
+        action_code: "E",
+        outcome_code: 8,
+        resource_type: "auth_session",
+        resource_id: null,
+        error: error.message,
+      });
       toast({
         title: "Error",
         description: error.message,
