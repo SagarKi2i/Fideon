@@ -8,6 +8,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from app.core.config import SUPABASE_URL
 from app.core.supabase import (
     admin_list_users,
+    insert_audit_log,
     postgrest_get,
     postgrest_insert,
     postgrest_patch,
@@ -52,7 +53,7 @@ async def list_users(authorization: Optional[str] = Header(default=None)):
 
 @router.post("/api/admin-create-user")
 async def admin_create_user(request: Request, authorization: Optional[str] = Header(default=None)):
-    _, requester_role = await _get_requester_role(authorization)
+    requester, requester_role = await _get_requester_role(authorization)
     if requester_role not in {"admin", "global_admin"}:
         raise HTTPException(status_code=403, detail="Admin access required")
 
@@ -80,6 +81,16 @@ async def admin_create_user(request: Request, authorization: Optional[str] = Hea
             )
         if resp.status_code >= 400:
             raise HTTPException(status_code=400, detail=resp.text)
+        # Never store previous/new password values — both are None.
+        await insert_audit_log(
+            request=request,
+            user_id=requester["id"],
+            action="update_password",
+            resource_type="user",
+            resource_id=user["id"],
+            previous_value=None,
+            new_value=None,
+        )
         return {"success": True, "message": "Password updated successfully"}
 
     async with httpx.AsyncClient(timeout=30) as client:
@@ -115,12 +126,22 @@ async def admin_create_user(request: Request, authorization: Optional[str] = Hea
                 )
             except Exception:
                 pass
+        await insert_audit_log(
+            request=request,
+            user_id=requester["id"],
+            action="create_user",
+            resource_type="user",
+            resource_id=user_data["id"],
+            details={"role": role},
+            previous_value=None,                   # new user — no prior state
+            new_value={"role": role},
+        )
     return {"success": True, "user": {"id": user_data.get("id"), "email": user_data.get("email")}}
 
 
 @router.post("/api/admin-set-user-role")
 async def admin_set_user_role(request: Request, authorization: Optional[str] = Header(default=None)):
-    _, requester_role = await _get_requester_role(authorization)
+    requester, requester_role = await _get_requester_role(authorization)
     if requester_role != "global_admin":
         raise HTTPException(status_code=403, detail="Global admin access required")
 
@@ -129,6 +150,12 @@ async def admin_set_user_role(request: Request, authorization: Optional[str] = H
     role = body.get("role")
     if not user_id or role not in VALID_ROLES:
         raise HTTPException(status_code=400, detail="Valid user_id and role are required")
+
+    # Fetch the current role BEFORE the update so we can record the previous value.
+    current_roles = await postgrest_get(
+        "user_roles", f"select=role&user_id=eq.{quote(user_id, safe='')}&limit=1"
+    )
+    old_role = current_roles[0].get("role") if current_roles else None
 
     headers = service_headers()
     headers["Prefer"] = "resolution=merge-duplicates,return=representation"
@@ -141,4 +168,14 @@ async def admin_set_user_role(request: Request, authorization: Optional[str] = H
     if resp.status_code >= 400:
         raise HTTPException(status_code=400, detail=resp.text)
 
+    await insert_audit_log(
+        request=request,
+        user_id=requester["id"],
+        action="set_user_role",
+        resource_type="user_role",
+        resource_id=user_id,
+        details={"role": role},
+        previous_value={"role": old_role} if old_role else None,
+        new_value={"role": role},
+    )
     return {"success": True, "user_id": user_id, "role": role}

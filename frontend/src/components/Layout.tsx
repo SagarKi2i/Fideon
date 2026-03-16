@@ -66,7 +66,7 @@ export function Layout({ children }: LayoutProps) {
             action_code: "E",
             outcome_code: 0,
             resource_type: "auth_session",
-            resource_id: currentUser.id,
+            resource_id: null,
             created_at: createdAt,
           });
 
@@ -78,7 +78,7 @@ export function Layout({ children }: LayoutProps) {
             action_code: "E",           // Execute (end auth session)
             outcome_code: 0,
             resource_type: "auth_session",
-            resource_id: currentUser.id,
+            resource_id: null,          // null for auth_session events (no specific resource)
             created_at: createdAt,
             integrity_hash,
           });
