@@ -25,7 +25,8 @@ export default function Activity() {
   useEffect(() => {
     const load = async () => {
       try {
-        const { data, error } = await supabase
+        const { data, error } = await (supabase as any)
+          // Untyped access because auth_audit is not in generated Database types
           .from("auth_audit")
           .select("*")
           .order("created_at", { ascending: false });

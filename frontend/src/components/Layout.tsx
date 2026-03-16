@@ -70,7 +70,7 @@ export function Layout({ children }: LayoutProps) {
             created_at: createdAt,
           });
 
-          await supabase.from("auth_audit").insert({
+          await (supabase as any).from("auth_audit").insert({
             user_id: currentUser.id,
             email: currentUser.email,
             role: currentRole || "user",
