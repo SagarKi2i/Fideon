@@ -144,16 +144,6 @@ declare global {
         removePullProgressListener: () => void;
         removeGenerateChunkListener: () => void;
       };
-      training: {
-        createModelfile: (params: { baseModel: string; systemPrompt: string; parameters?: Record<string, unknown> }) => Promise<{ success: boolean; modelName: string }>;
-        startFineTune: (params: { modelId: string; trainingData: Array<{ prompt: string; response: string }>; config?: Record<string, unknown> }) => Promise<{ success: boolean; jobId: string }>;
-        getTrainingStatus: (jobId: string) => Promise<{ success: boolean; status: string; metrics?: Record<string, unknown> }>;
-        cancelTraining: (jobId: string) => Promise<{ success: boolean }>;
-        exportGradients: (params: { modelId: string; jobId: string }) => Promise<{ success: boolean; gradientHash: string; gradientSize: number; gradientData: ArrayBuffer }>;
-        applyModelUpdate: (params: { modelId: string; updateData: ArrayBuffer }) => Promise<{ success: boolean }>;
-        onTrainingProgress: (callback: (data: { jobId: string; progress: number; loss?: number; epoch?: number }) => void) => void;
-        removeTrainingProgressListener: () => void;
-      };
       network: {
         checkStatus: () => Promise<{ online: boolean }>;
       };

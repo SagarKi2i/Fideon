@@ -1,0 +1,48 @@
+{
+  "name": "fideon-electron",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "electron .",
+    "dev": "npm run build && npm start",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "@types/node": "^22.16.5",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.5",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1"
+  },
+  "build": {
+    "appId": "com.fideon.os",
+    "productName": "Fideon OS",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "../frontend/src/assets/fideon-logo.png"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "../frontend/src/assets/fideon-logo.png"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "icon": "../frontend/src/assets/fideon-logo.png"
+    }
+  }
+}
