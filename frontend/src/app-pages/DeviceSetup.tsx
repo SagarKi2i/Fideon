@@ -55,6 +55,28 @@ export default function DeviceSetup() {
     checkOllama();
   }, []);
 
+  // Background heartbeat: every 60s, report device + local model status to cloud.
+  useEffect(() => {
+    if (!isElectronApp || !deviceToken || !isConnected) {
+      return;
+    }
+
+    const intervalId = window.setInterval(async () => {
+      try {
+        if (!deviceToken) return;
+        const localModelStatuses = allocatedModels.map(model => ({
+          model_id: model.model_id,
+          is_downloaded: isModelInstalled(model.ollama_model_name),
+        }));
+        await performDeviceCheckin(deviceToken, localModelStatuses);
+      } catch {
+        // Best-effort heartbeat; errors are intentionally swallowed to avoid UI noise.
+      }
+    }, 60000); // 60s
+
+    return () => window.clearInterval(intervalId);
+  }, [isElectronApp, deviceToken, isConnected, allocatedModels, localModels]);
+
   const checkElectron = async () => {
     const result = await isElectron();
     setIsElectronApp(result);
