@@ -150,24 +150,38 @@ jobs:
       - name: Write SSH key
         run: |
           install -m 600 /dev/null ssh_key
-          echo "${{ secrets.CHATBOT_SERVER_KEY }}" > ssh_key
+          # Normalize key: strip CRLF and ensure single trailing newline (fixes secrets pasted from Windows)
+          echo "${{ secrets.CHATBOT_SERVER_KEY }}" | sed 's/\r$//' | sed -e '$a\' > ssh_key
+          chmod 600 ssh_key
+
+      - name: Check port 22 reachable
+        run: |
+          echo "Testing TCP connection to ${{ secrets.AZURE_VM_HOST }}:22..."
+          if command -v nc >/dev/null 2>&1; then
+            nc -z -w 15 "${{ secrets.AZURE_VM_HOST }}" 22 && echo "Port 22 is open" || echo "Port 22 not reachable (timeout or refused)"
+          else
+            ( bash -c 'echo >/dev/tcp/'"${{ secrets.AZURE_VM_HOST }}"'/22' 2>/dev/null ) && echo "Port 22 is open" || echo "Port 22 not reachable"
+          fi
+        continue-on-error: true
 
       - name: Verify SSH connectivity
         run: |
-          for attempt in 1 2 3; do
-            echo "SSH connectivity check $attempt/3..."
+          for attempt in 1 2 3 4 5; do
+            echo "SSH connectivity check $attempt/5..."
             if ssh -T -i ssh_key \
                 -o StrictHostKeyChecking=no \
-                -o ConnectTimeout=30 \
+                -o ConnectTimeout=60 \
                 -o BatchMode=yes \
+                -o ServerAliveInterval=10 \
                 ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} "echo OK"; then
               echo "SSH connectivity verified"
               exit 0
             fi
-            [ "$attempt" -lt 3 ] && sleep 15
+            [ "$attempt" -lt 5 ] && echo "Retrying in 20s..." && sleep 20
           done
           echo "ERROR: Cannot reach VM on port 22 (SSH connection timed out)."
-          echo "Check: VM running, NSG allows port 22 from GitHub runners, AZURE_VM_HOST correct, sshd running on VM."
+          echo "Check: VM running, AZURE_VM_HOST is the VM public IP (Azure Portal → VM → Overview), NSG allows port 22 from Any, sshd running on VM."
+          echo "If NSG allows port 22: check VM firewall (ufw/iptables) and Application Security Groups on the NIC."
           echo "Troubleshooting: .github/DEPLOY-TROUBLESHOOTING.md#ssh-connection-timed-out"
           exit 1
 
