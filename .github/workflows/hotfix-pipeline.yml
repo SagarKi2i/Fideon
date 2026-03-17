@@ -129,6 +129,24 @@ jobs:
       group: deploy-hotfix-production
       cancel-in-progress: false
     steps:
+      - name: Preflight – verify VM deploy secrets
+        env:
+          AZURE_VM_HOST: ${{ secrets.AZURE_VM_HOST }}
+          AZURE_VM_USERNAME: ${{ secrets.AZURE_VM_USERNAME }}
+          CHATBOT_SERVER_KEY: ${{ secrets.CHATBOT_SERVER_KEY }}
+        run: |
+          missing=""
+          [ -z "$AZURE_VM_HOST" ] && missing="$missing AZURE_VM_HOST"
+          [ -z "$AZURE_VM_USERNAME" ] && missing="$missing AZURE_VM_USERNAME"
+          [ -z "$CHATBOT_SERVER_KEY" ] && missing="$missing CHATBOT_SERVER_KEY"
+          if [ -n "$missing" ]; then
+            echo "ERROR: Missing required secrets for VM deploy:$missing"
+            echo "Add them in: GitHub → Settings → Environments → production → Environment secrets"
+            echo "See: .github/DEPLOY-TROUBLESHOOTING.md"
+            exit 1
+          fi
+          echo "Required VM deploy secrets are set."
+
       - name: Write SSH key
         run: |
           install -m 600 /dev/null ssh_key
@@ -148,7 +166,9 @@ jobs:
             fi
             [ "$attempt" -lt 3 ] && sleep 15
           done
-          echo "ERROR: Cannot reach VM on port 22"
+          echo "ERROR: Cannot reach VM on port 22 (SSH connection timed out)."
+          echo "Check: VM running, NSG allows port 22 from GitHub runners, AZURE_VM_HOST correct, sshd running on VM."
+          echo "Troubleshooting: .github/DEPLOY-TROUBLESHOOTING.md#ssh-connection-timed-out"
           exit 1
 
       - name: Deploy hotfix to production VM
