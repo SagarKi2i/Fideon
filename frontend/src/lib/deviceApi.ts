@@ -88,7 +88,7 @@ export async function performDeviceCheckin(
       'x-device-token': deviceToken,
     },
     body: JSON.stringify({
-      os_type: navigator.platform,
+      os_type: (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform ?? navigator.userAgent,
       app_version: '1.0.0',
       local_models: localModels,
     }),
@@ -97,6 +97,24 @@ export async function performDeviceCheckin(
   if (!response.ok) {
     const error = await response.json();
     throw new Error(error.error || 'Failed to perform check-in');
+  }
+
+  return response.json();
+}
+
+export async function sendDeviceHeartbeat(
+  deviceJwt: string
+): Promise<{ success: boolean; device_id: string; last_seen_at: string }> {
+  const response = await fetch(`${getApiBaseUrl()}/api/v1/devices/heartbeat`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${deviceJwt}`,
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || "Heartbeat failed");
   }
 
   return response.json();

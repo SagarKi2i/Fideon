@@ -23,6 +23,17 @@ export default function PendingDevices() {
 
   useEffect(() => {
     fetchPendingDevices();
+
+    const channel = supabase
+      .channel('pending-devices-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'devices' }, () => {
+        fetchPendingDevices();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
   async function fetchPendingDevices() {

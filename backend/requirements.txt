@@ -1,8 +1,10 @@
 fastapi
 uvicorn[standard]
+slowapi>=0.1.9
 httpx
 pydantic
 python-dotenv
+PyJWT>=2.0.0
 
 # LLM Fallback Service (ported from LLM Fallback 3)
 litellm>=1.0.0

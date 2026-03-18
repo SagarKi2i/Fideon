@@ -10,6 +10,8 @@ DECLARE
   resolved_tenant_id UUID;
   requested_tenant_name TEXT;
   requested_plan TEXT;
+  requested_role TEXT;
+  requested_signup_version TEXT;
   requested_model_id TEXT;
   requested_device_name TEXT;
   requested_device_profile JSONB;
@@ -20,9 +22,14 @@ DECLARE
 BEGIN
   requested_tenant_name := NULLIF(trim(COALESCE(NEW.raw_user_meta_data ->> 'tenant_name', '')), '');
   requested_plan := NULLIF(trim(COALESCE(NEW.raw_user_meta_data ->> 'plan', '')), '');
+  requested_role := NULLIF(trim(COALESCE(NEW.raw_user_meta_data ->> 'requested_role', '')), '');
+  requested_signup_version := NULLIF(trim(COALESCE(NEW.raw_user_meta_data ->> 'signup_wizard_version', '')), '');
   requested_model_id := NULLIF(trim(COALESCE(NEW.raw_user_meta_data ->> 'default_model_id', '')), '');
   requested_device_name := NULLIF(trim(COALESCE(NEW.raw_user_meta_data ->> 'device_name', '')), '');
   requested_device_profile := COALESCE(NEW.raw_user_meta_data -> 'device_profile', '{}'::jsonb);
+  IF requested_device_name IS NULL THEN
+    requested_device_name := NULLIF(trim(COALESCE(requested_device_profile ->> 'device_name', '')), '');
+  END IF;
 
   SELECT id INTO default_tenant_id
   FROM public.tenants
@@ -70,6 +77,8 @@ BEGIN
     jsonb_strip_nulls(
       jsonb_build_object(
         'onboarding_plan', requested_plan,
+        'onboarding_requested_role', requested_role,
+        'onboarding_signup_wizard_version', requested_signup_version,
         'onboarding_default_model_id', requested_model_id,
         'onboarding_device_name', requested_device_name,
         'onboarding_tenant_name', requested_tenant_name,
