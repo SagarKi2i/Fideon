@@ -98,6 +98,17 @@ export default function Devices() {
 
   useEffect(() => {
     checkAccessAndLoad();
+
+    const channel = supabase
+      .channel("devices-page-live")
+      .on("postgres_changes", { event: "*", schema: "public", table: "activated_models" }, () => {
+        loadUsers();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
   // Close dropdown on outside click

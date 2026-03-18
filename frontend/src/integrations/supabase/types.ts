@@ -134,33 +134,62 @@ export type Database = {
           created_at: string
           details: Json | null
           id: string
+          integrity_hash: string | null
+          chain_hash: string | null
+          sequence_num: number | null
           ip_address: string | null
           resource_id: string | null
           resource_type: string
           user_agent: string | null
           user_id: string | null
+          previous_value: Json | null
+          new_value: Json | null
+          /** Identifier of the AI model that produced the decision */
+          model_id: string | null
+          /** Model output / decision outcome */
+          prediction: Json | null
+          /** SHAP feature-contribution map: { feature_name: shap_float } */
+          shap_values: Json | null
+          /** Auto-generated human-readable SHAP explanation */
+          reasoning: string | null
         }
         Insert: {
           action: string
           created_at?: string
           details?: Json | null
           id?: string
+          integrity_hash?: string | null
+          chain_hash?: string | null
           ip_address?: string | null
           resource_id?: string | null
           resource_type: string
           user_agent?: string | null
           user_id?: string | null
+          previous_value?: Json | null
+          new_value?: Json | null
+          model_id?: string | null
+          prediction?: Json | null
+          shap_values?: Json | null
+          reasoning?: string | null
         }
         Update: {
           action?: string
           created_at?: string
           details?: Json | null
           id?: string
+          integrity_hash?: string | null
+          chain_hash?: string | null
           ip_address?: string | null
           resource_id?: string | null
           resource_type?: string
           user_agent?: string | null
           user_id?: string | null
+          previous_value?: Json | null
+          new_value?: Json | null
+          model_id?: string | null
+          prediction?: Json | null
+          shap_values?: Json | null
+          reasoning?: string | null
         }
         Relationships: []
       }

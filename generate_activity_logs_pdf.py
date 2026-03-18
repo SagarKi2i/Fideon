@@ -441,15 +441,16 @@ def diag_rls():
     result_box(ax, 7.5, 4.3, 2.2, 0.6, C["no"], "NO Row hidden\n(global_admin rows)", fontsize=7.5)
     arrow(ax, 6.85, 5.5, 7.5, 4.6, "#c0392b", lw=1.8, label="global_admin")
 
-    # user/viewer branch
-    result_box(ax, 9.5, 5.5, 2.5, 0.65, C["user"],
-               "YES Own rows only\nWHERE user_id=uid()", fontsize=8)
-    arrow(ax, 8.4, 6.9, 9.5, 5.82, C["user"], lw=2, label="user/viewer")
+    # user/viewer/guest branch — all share "Users see own" policy (user_id = auth.uid())
+    result_box(ax, 9.5, 5.5, 2.8, 0.75, C["user"],
+               "YES Own rows only\nWHERE user_id=uid()\n(user / viewer / guest ¹)", fontsize=7.5)
+    arrow(ax, 8.4, 6.9, 9.5, 5.88, C["user"], lw=2, label="user/viewer/guest")
 
-    # guest — NO policy matches; guest has zero access via RLS
-    result_box(ax, 11.5, 6.9, 1.8, 0.6, C["no"],
-               "guest\nNO policy match\n0 rows returned", fontsize=7.5)
-    arrow(ax, 8.4, 6.9, 11.3, 6.9, C["guest"], lw=2, label="guest")
+    # footnote for guest
+    ax.text(0.3, 0.25,
+            "¹ Guest: 'Users see own' has no role restriction — condition is user_id = auth.uid() for ALL authenticated users.\n"
+            "  Guest CAN query own rows at DB level. The /activity frontend page is blocked by route guard (UX decision, not RLS).",
+            fontsize=6.5, color="#555555", va="bottom", style="italic")
 
     # INSERT section
     ax.axhline(y=3.3, xmin=0.03, xmax=0.97, color="#aaa", lw=1, linestyle="--")
@@ -922,22 +923,22 @@ def diag_access_matrix():
     col_colors_hdr = [C["ga"], C["admin"], C["user"], C["viewer"], C["guest"]]
 
     data = [
-        ["YES", "YES", "YES", "YES", "NO"],
-        ["YES", "YES", "YES", "YES", "NO"],
-        ["YES", "YES", "NO", "NO", "NO"],
-        ["YES", "YES", "NO", "NO", "NO"],
-        ["YES", "YES", "NO", "NO", "NO"],
-        ["YES", "YES", "NO", "NO", "NO"],
-        ["YES", "NO", "NO", "NO", "NO"],
-        ["YES", "YES", "NO", "NO", "NO"],
-        ["YES", "YES", "YES", "YES", "NO"],
-        ["YES", "YES", "NO", "NO", "NO"],
-        ["YES", "YES", "NO", "NO", "NO"],
-        ["YES", "YES", "NO", "NO", "NO"],
-        ["YES", "NO", "NO", "NO", "NO"],
-        ["YES", "YES", "NO", "NO", "NO"],
-        ["YES", "YES", "NO", "NO", "NO"],
-        ["YES", "YES", "NO", "NO", "NO"],
+        ["YES", "YES", "YES",  "YES",  "NO"],      # Access /activity page — UI blocked for guest
+        ["YES", "YES", "YES",  "YES",  "YES*"],     # View own audit rows — guest YES at DB level ¹
+        ["YES", "YES", "NO",   "NO",   "NO"],
+        ["YES", "YES", "NO",   "NO",   "NO"],
+        ["YES", "YES", "NO",   "NO",   "NO"],
+        ["YES", "YES", "NO",   "NO",   "NO"],
+        ["YES", "NO",  "NO",   "NO",   "NO"],
+        ["YES", "YES", "NO",   "NO",   "NO"],
+        ["YES", "YES", "YES",  "YES",  "YES*"],     # View own audit_logs — guest YES at DB level ¹
+        ["YES", "YES", "NO",   "NO",   "NO"],
+        ["YES", "YES", "NO",   "NO",   "NO"],
+        ["YES", "YES", "NO",   "NO",   "NO"],
+        ["YES", "NO",  "NO",   "NO",   "NO"],
+        ["YES", "YES", "NO",   "NO",   "NO"],
+        ["YES", "YES", "NO",   "NO",   "NO"],
+        ["YES", "YES", "NO",   "NO",   "NO"],
     ]
 
     cell_w = 1.8
@@ -970,11 +971,18 @@ def diag_access_matrix():
                                    cell_w, cell_h,
                                    facecolor=bg_color, edgecolor=C["border"], lw=0.5, zorder=2)
             ax.add_patch(rect2)
-            color = C["ok"] if val == "YES" else C["no"]
-            ax.text(x, y, val, ha="center", va="center", fontsize=11,
+            color = C["ok"] if val in ("YES", "YES*") else C["no"]
+            ax.text(x, y, val, ha="center", va="center", fontsize=9,
                     color=color, fontweight="bold", zorder=3)
 
-    ax.set_xlim(0, 14); ax.set_ylim(0, 9)
+    # footnote
+    ax.text(x0, -0.35,
+            "¹ YES* (DB-level only): Guest can query own rows directly via Supabase SDK — "
+            "the 'Users see own' RLS policy applies to all authenticated users. "
+            "The /activity frontend page is blocked by route guard (intentional: permissive at DB, restricted at UI).",
+            fontsize=6.8, color="#555555", va="top", style="italic")
+
+    ax.set_xlim(0, 14); ax.set_ylim(-0.5, 9)
     return save_fig(fig, "11_access_matrix")
 
 # ══════════════════════════════════════════════════════════════════════════════

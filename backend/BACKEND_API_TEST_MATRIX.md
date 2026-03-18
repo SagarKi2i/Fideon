@@ -276,89 +276,26 @@ curl -X POST "http://127.0.0.1:8001/api/admin-set-user-role" \
 
 ---
 
-## 4) Device APIs
+## 4) Device APIs (JWT v1)
 
-## 4.1 Device Models
+## 4.1 Device Registration (v1)
 
-### `GET /api/device-models`
+### `POST /api/v1/devices/register`
 
-- **Purpose:** get assigned models for a device
-- **Auth:** `x-device-token` header required
-
-**cURL**
-
-```bash
-curl -X GET "http://127.0.0.1:8001/api/device-models" \
-  -H "x-device-token: <DEVICE_TOKEN>"
-```
-
-**Expected success**
-
-- `200` with `device_id`, `models[]`, `total_models`
-
-**Common failures**
-
-- `400` missing token
-- `401` invalid token
-- `403` device deactivated
-
----
-
-## 4.2 Device Check-in
-
-### `POST /api/device-checkin`
-
-- **Purpose:** heartbeat/update device status and sync flags
-- **Auth:** `x-device-token` header required
-- **Request body (optional fields):**
-  - `os_type`
-  - `app_version`
-  - `local_models` (array; each item can be `model_id` or object containing `model_id`)
-
-**cURL**
-
-```bash
-curl -X POST "http://127.0.0.1:8001/api/device-checkin" \
-  -H "Content-Type: application/json" \
-  -H "x-device-token: <DEVICE_TOKEN>" \
-  -d '{
-    "os_type":"windows",
-    "app_version":"1.0.0",
-    "local_models":[{"model_id":"policy-comparison"}]
-  }'
-```
-
-**Expected success**
-
-- `200` with `{"success":true,"device_id":"...","status":"online","message":"Check-in successful"}`
-
-**Common failures**
-
-- `400` missing token
-- `401` invalid token
-- `403` device deactivated
-
----
-
-## 4.3 Device Register
-
-### `POST /api/device-register`
-
-- **Purpose:** finalize device registration by token
-- **Auth:** body token required (no bearer required)
+- **Purpose:** idempotent registration by hardware fingerprint + signed device JWT issuance
+- **Auth:** none (registration payload only)
+- **Rate limit:** `10/minute`
 - **Request body:**
-  - `device_token` (required)
-  - `device_name` (optional)
-  - `os_type` (optional)
-  - `app_version` (optional)
+  - `hardware_fingerprint` (required)
+  - `device_name`, `os_type`, `app_version`, `metadata` (optional)
 
 **cURL**
 
 ```bash
-curl -X POST "http://127.0.0.1:8001/api/device-register" \
+curl -X POST "http://127.0.0.1:8001/api/v1/devices/register" \
   -H "Content-Type: application/json" \
   -d '{
-    "device_token":"<DEVICE_TOKEN>",
+    "hardware_fingerprint":"MACHINE-UNIQUE-ID",
     "device_name":"Claims Desktop - Chicago",
     "os_type":"windows",
     "app_version":"1.0.0"
@@ -367,13 +304,53 @@ curl -X POST "http://127.0.0.1:8001/api/device-register" \
 
 **Expected success**
 
-- `200` with `{"success":true,"device_id":"...","device_name":"...","message":"Device registered successfully"}`
+- `200` with `device_token` (JWT), `device_id`, `device_name`, `is_new`
 
 **Common failures**
 
-- `400` missing `device_token`
-- `401` invalid token
+- `400` missing `hardware_fingerprint`
+- `429` registration flood rate-limited
+
+---
+
+## 4.2 Device Heartbeat (v1)
+
+### `PUT /api/v1/devices/heartbeat`
+
+- **Purpose:** keep device online and update `last_seen_at`
+- **Auth:** `Authorization: Bearer <DEVICE_JWT>`
+- **Rate limit:** `5/minute`
+- **Offline detector:** devices become offline after 3 missed beats (180 s)
+
+**cURL**
+
+```bash
+curl -X PUT "http://127.0.0.1:8001/api/v1/devices/heartbeat" \
+  -H "Authorization: Bearer <DEVICE_JWT>"
+```
+
+**Expected success**
+
+- `200` with `{"success":true,"device_id":"...","last_seen_at":"..."}`
+
+**Common failures**
+
+- `401` missing/invalid/revoked/expired JWT
 - `403` device deactivated
+- `404` device not found
+- `429` heartbeat flood rate-limited
+
+---
+
+## 4.3 Legacy Device Token APIs (optional compatibility mode)
+
+- Endpoints:
+  - `GET /api/device-models`
+  - `POST /api/device-checkin`
+  - `POST /api/device-register`
+- These are disabled by default for production hardening.
+- Enable only if required for older clients: `LEGACY_DEVICE_TOKEN_APIS_ENABLED=true`.
+- Disabled response: `410 Gone`
 
 ---
 
@@ -381,6 +358,7 @@ curl -X POST "http://127.0.0.1:8001/api/device-register" \
 
 - LLM endpoints stream SSE; use `curl -N`.
 - For auth-protected admin/chat APIs, use a valid Supabase access token.
-- For device APIs, use a valid `device_token` generated in `public.devices`.
+- For v1 device APIs, set `DEVICE_JWT_SECRET` and use a valid device JWT from `/api/v1/devices/register`.
+- If testing legacy `/api/device-*` routes, explicitly set `LEGACY_DEVICE_TOKEN_APIS_ENABLED=true`.
 - Fallback provider order in backend:
   - Groq -> RunPod Llama -> RunPod Mistral -> Gemini -> OpenAI -> Claude

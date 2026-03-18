@@ -13,6 +13,7 @@ import { CheckCircle2, ChevronLeft, ChevronRight, Cpu, MonitorSmartphone, Shield
 type WizardStep = 0 | 1 | 2 | 3;
 type AppRole = Database["public"]["Enums"]["app_role"];
 type DeviceType = "desktop" | "laptop" | "mobile" | "tablet" | "other";
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const APP_ROLES: Array<{ label: string; value: AppRole }> = [
   { label: "Global Admin", value: "global_admin" },
@@ -197,6 +198,14 @@ export default function Signup() {
       return;
     }
     if (step === 0) {
+      if (!EMAIL_RE.test(email.trim().toLowerCase())) {
+        toast({
+          title: "Invalid email",
+          description: "Enter a valid work email address.",
+          variant: "destructive",
+        });
+        return;
+      }
       if (password.length < 8) {
         toast({
           title: "Password too short",
@@ -229,10 +238,20 @@ export default function Signup() {
 
   const handleComplete = async () => {
     if (!canGoNext()) return;
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!EMAIL_RE.test(normalizedEmail)) {
+      toast({
+        title: "Invalid email",
+        description: "Enter a valid work email address before continuing.",
+        variant: "destructive",
+      });
+      return;
+    }
     setLoading(true);
     try {
+      const nowIso = new Date().toISOString();
       const { data, error } = await supabase.auth.signUp({
-        email: email.trim(),
+        email: normalizedEmail,
         password,
         options: {
           data: {
@@ -242,6 +261,8 @@ export default function Signup() {
             plan: selectedPlan,
             default_model_id: selectedModelId,
             device_name: deviceName.trim(),
+            signup_started_at: nowIso,
+            signup_wizard_version: "v1",
             device_profile: {
               device_name: deviceName.trim(),
               device_type: deviceType,
@@ -255,7 +276,7 @@ export default function Signup() {
               platform,
               user_agent: navigator.userAgent,
               hardware_fingerprint_sha256: hardwareFingerprint,
-              captured_at: new Date().toISOString(),
+              captured_at: nowIso,
               source: "signup_wizard",
             },
           },
@@ -281,9 +302,15 @@ export default function Signup() {
       });
     } catch (error: any) {
       console.error("Onboarding error:", error);
+      const rawMessage = String(error?.message || "").toLowerCase();
+      const friendlyMessage = rawMessage.includes("already registered")
+        ? "This email is already registered. Try signing in or using password reset."
+        : rawMessage.includes("password")
+        ? "Password does not meet security requirements. Use at least 8 characters."
+        : error?.message ?? "Something went wrong while creating your tenant.";
       toast({
         title: "Onboarding failed",
-        description: error?.message ?? "Something went wrong while creating your tenant.",
+        description: friendlyMessage,
         variant: "destructive",
       });
     } finally {
