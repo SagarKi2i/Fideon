@@ -1,18 +1,58 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import json
 import hashlib
 import secrets
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import quote
 
 import httpx
+import jwt
+import structlog
 from fastapi import APIRouter, Header, HTTPException, Path, Request
 
-from app.core.config import SUPABASE_URL
-from app.core.supabase import get_device_by_token, postgrest_get, postgrest_insert, postgrest_patch, verify_user
-from app.core.supabase import service_headers
+from app.core.config import DEVICE_JWT_SECRET, LEGACY_DEVICE_TOKEN_APIS_ENABLED, SUPABASE_URL
+from app.core.limiter import limiter
+from app.core.supabase import (
+    get_device_by_token,
+    insert_audit_log,
+    postgrest_get,
+    postgrest_insert,
+    postgrest_patch,
+    service_headers,
+    verify_admin,
+    verify_user,
+)
 
+log = structlog.get_logger("device")
 router = APIRouter()
+DEVICE_TOKEN_REQUIRED_DETAIL = "Device token is required"
+
+
+def _require_legacy_device_apis_enabled() -> None:
+    """Gate legacy /api/device-* endpoints behind an explicit env toggle."""
+    if LEGACY_DEVICE_TOKEN_APIS_ENABLED:
+        return
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "Legacy token-based device APIs are disabled. "
+            "Use /api/v1/devices/register and /api/v1/devices/heartbeat."
+        ),
+    )
+
+
+def _extract_magic_link_payload(body: dict, user_email: str) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    sources = [body, body.get("properties") if isinstance(body, dict) else None]
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        action_link = source.get("action_link")
+        email_otp = source.get("email_otp")
+        if isinstance(action_link, str) and action_link:
+            return action_link, None, None, None
+        if isinstance(email_otp, str) and email_otp:
+            return None, user_email, email_otp, None
+    return None, None, None, "No action_link or email_otp returned from Supabase generate_link API"
 
 
 async def _generate_magic_login_link(
@@ -32,28 +72,77 @@ async def _generate_magic_login_link(
     if resp.status_code >= 400:
         return None, None, None, resp.text
     body = resp.json()
-    if isinstance(body, dict):
-        action_link_top = body.get("action_link")
-        email_otp_top = body.get("email_otp")
-        if isinstance(action_link_top, str) and action_link_top:
-            return action_link_top, None, None, None
-        if isinstance(email_otp_top, str) and email_otp_top:
-            return None, user_email, email_otp_top, None
-    properties = body.get("properties") if isinstance(body, dict) else None
-    if isinstance(properties, dict):
-        action_link = properties.get("action_link")
-        email_otp = properties.get("email_otp")
-        if isinstance(action_link, str) and action_link:
-            return action_link, None, None, None
-        if isinstance(email_otp, str) and email_otp:
-            return None, user_email, email_otp, None
-    return None, None, None, "No action_link or email_otp returned from Supabase generate_link API"
+    return _extract_magic_link_payload(body, user_email)
+
+
+def _parse_registration_payload(body: dict[str, Any]) -> tuple[str, str, Any, Any, dict[str, Any], datetime]:
+    raw_fingerprint = str(body.get("hardware_fingerprint") or "").strip()
+    if not raw_fingerprint:
+        raise HTTPException(status_code=400, detail="hardware_fingerprint is required")
+    fingerprint_hash = hashlib.sha256(raw_fingerprint.lower().encode("utf-8")).hexdigest()
+    device_name = str(body.get("device_name") or "").strip() or "Unknown Device"
+    os_type = body.get("os_type")
+    app_version = body.get("app_version")
+    extra_metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+    return fingerprint_hash, device_name, os_type, app_version, extra_metadata, datetime.now(timezone.utc)
+
+
+async def _upsert_device_for_registration(
+    fingerprint_hash: str,
+    device_name: str,
+    os_type: Any,
+    app_version: Any,
+    extra_metadata: dict[str, Any],
+    now: datetime,
+) -> tuple[dict[str, Any], bool]:
+    existing = await postgrest_get(
+        "devices",
+        f"select=*&hardware_fingerprint_hash=eq.{quote(fingerprint_hash, safe='')}&limit=1",
+    )
+    if existing:
+        device = existing[0]
+        await postgrest_patch(
+            "devices",
+            f"id=eq.{quote(device['id'], safe='')}",
+            {
+                "device_name": device_name or device.get("device_name"),
+                "os_type": os_type or device.get("os_type"),
+                "app_version": app_version or device.get("app_version"),
+                "status": "online",
+                "last_seen_at": now.isoformat(),
+                "jwt_issued_after": now.isoformat(),
+            },
+        )
+        device["device_name"] = device_name or device.get("device_name")
+        return device, False
+
+    inserted = await postgrest_insert(
+        "devices",
+        {
+            "device_name": device_name,
+            "device_token": secrets.token_urlsafe(32),
+            "hardware_fingerprint_hash": fingerprint_hash,
+            "status": "online",
+            "os_type": os_type,
+            "app_version": app_version,
+            "last_seen_at": now.isoformat(),
+            "jwt_issued_after": now.isoformat(),
+            "metadata": {
+                "registered_via": "hardware_fingerprint",
+                **extra_metadata,
+            },
+        },
+    )
+    if not inserted:
+        raise HTTPException(status_code=500, detail="Failed to create device")
+    return inserted[0], True
 
 
 @router.get("/api/device-models")
 async def device_models(x_device_token: Optional[str] = Header(default=None)):
+    _require_legacy_device_apis_enabled()
     if not x_device_token:
-        raise HTTPException(status_code=400, detail="Device token is required")
+        raise HTTPException(status_code=400, detail=DEVICE_TOKEN_REQUIRED_DETAIL)
     device = await get_device_by_token(x_device_token)
     models = await postgrest_get(
         "device_models",
@@ -75,8 +164,9 @@ async def device_models(x_device_token: Optional[str] = Header(default=None)):
 
 @router.post("/api/device-checkin")
 async def device_checkin(request: Request, x_device_token: Optional[str] = Header(default=None)):
+    _require_legacy_device_apis_enabled()
     if not x_device_token:
-        raise HTTPException(status_code=400, detail="Device token is required")
+        raise HTTPException(status_code=400, detail=DEVICE_TOKEN_REQUIRED_DETAIL)
     device = await get_device_by_token(x_device_token)
     body = await request.json()
     os_type = body.get("os_type")
@@ -88,7 +178,7 @@ async def device_checkin(request: Request, x_device_token: Optional[str] = Heade
         f"id=eq.{quote(device['id'], safe='')}",
         {
             "status": "online",
-            "last_seen_at": datetime.utcnow().isoformat(),
+            "last_seen_at": datetime.now(timezone.utc).isoformat(),
             "os_type": os_type or device.get("os_type"),
             "app_version": app_version or device.get("app_version"),
         },
@@ -101,7 +191,7 @@ async def device_checkin(request: Request, x_device_token: Optional[str] = Heade
                 await postgrest_patch(
                     "device_models",
                     f"device_id=eq.{quote(device['id'], safe='')}&model_id=eq.{quote(str(model_id), safe='')}",
-                    {"is_downloaded": True, "last_synced_at": datetime.utcnow().isoformat()},
+                    {"is_downloaded": True, "last_synced_at": datetime.now(timezone.utc).isoformat()},
                 )
 
     return {"success": True, "device_id": device["id"], "status": "online", "message": "Check-in successful"}
@@ -109,10 +199,11 @@ async def device_checkin(request: Request, x_device_token: Optional[str] = Heade
 
 @router.post("/api/device-register")
 async def device_register(request: Request):
+    _require_legacy_device_apis_enabled()
     body = await request.json()
     device_token = body.get("device_token")
     if not device_token:
-        raise HTTPException(status_code=400, detail="Device token is required")
+        raise HTTPException(status_code=400, detail=DEVICE_TOKEN_REQUIRED_DETAIL)
     device = await get_device_by_token(device_token)
     await postgrest_patch(
         "devices",
@@ -122,7 +213,7 @@ async def device_register(request: Request):
             "os_type": body.get("os_type") or device.get("os_type"),
             "app_version": body.get("app_version") or device.get("app_version"),
             "status": "online",
-            "last_seen_at": datetime.utcnow().isoformat(),
+            "last_seen_at": datetime.now(timezone.utc).isoformat(),
         },
     )
     return {
@@ -131,6 +222,170 @@ async def device_register(request: Request):
         "device_name": device.get("device_name"),
         "message": "Device registered successfully",
     }
+
+
+def _verify_device_jwt(token: str) -> dict:
+    """Decode and verify a device JWT signed by DEVICE_JWT_SECRET. Raises 401 on failure."""
+    try:
+        return jwt.decode(token, DEVICE_JWT_SECRET, algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Device token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid device token")
+
+
+def _sign_device_jwt(device_id: str, device_name: str, hardware_fingerprint_hash: str) -> str:
+    """Sign a HS256 JWT that identifies a registered device."""
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": device_id,
+        "device_id": device_id,
+        "device_name": device_name,
+        "hardware_fingerprint_hash": hardware_fingerprint_hash,
+        "type": "device",
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(days=365)).timestamp()),
+    }
+    return jwt.encode(payload, DEVICE_JWT_SECRET, algorithm="HS256")
+
+
+@router.post("/api/v1/devices/register")
+@limiter.limit("10/minute")
+async def register_device_v1(request: Request):  # noqa: C901
+    """
+    Register a device by hardware fingerprint and return a signed JWT device token.
+    Idempotent: re-registering the same hardware fingerprint returns a new JWT for
+    the same device record (no duplicate device is created).
+
+    Body:
+        hardware_fingerprint (str, required): Raw hardware identifier from the device.
+        device_name (str, optional): Human-readable device label.
+        os_type (str, optional): Operating system type (e.g. "linux", "windows").
+        app_version (str, optional): Running app version string.
+        metadata (dict, optional): Additional key/value pairs stored in device metadata.
+    """
+    body = await request.json()
+    fingerprint_hash, device_name, os_type, app_version, extra_metadata, now = _parse_registration_payload(body)
+    device, is_new = await _upsert_device_for_registration(
+        fingerprint_hash=fingerprint_hash,
+        device_name=device_name,
+        os_type=os_type,
+        app_version=app_version,
+        extra_metadata=extra_metadata,
+        now=now,
+    )
+
+    signed_token = _sign_device_jwt(
+        device_id=device["id"],
+        device_name=device["device_name"],
+        hardware_fingerprint_hash=fingerprint_hash,
+    )
+
+    await insert_audit_log(
+        request=request,
+        user_id=None,
+        action="device_registered" if is_new else "device_re_registered",
+        resource_type="device",
+        resource_id=device["id"],
+        details={"device_name": device["device_name"], "os_type": os_type, "is_new": is_new},
+        previous_value=None,
+        new_value={"status": "online"},
+    )
+    log.info("device.registered", device_id=device["id"], is_new=is_new)
+
+    return {
+        "success": True,
+        "device_token": signed_token,
+        "device_id": device["id"],
+        "device_name": device["device_name"],
+        "is_new": is_new,
+    }
+
+
+@router.put("/api/v1/devices/heartbeat")
+@limiter.limit("5/minute")
+async def device_heartbeat(request: Request, authorization: Optional[str] = Header(default=None)):
+    """
+    Heartbeat endpoint. Devices call this every 60 s to stay marked online.
+    Auth: Authorization: Bearer <device_jwt>  (JWT issued by /api/v1/devices/register)
+    A device that misses 3 consecutive beats (180 s) is marked offline by the
+    background offline-detector task.
+
+    Rate limit: 5/minute per IP (a healthy device sends 1/minute; 5x headroom
+    for retries while still blocking floods).
+    """
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Device JWT required")
+    claims = _verify_device_jwt(authorization.split(" ", 1)[1])
+    device_id = claims.get("device_id")
+    if not device_id:
+        raise HTTPException(status_code=401, detail="Invalid device JWT claims")
+
+    # Verify the device still exists and is not deactivated. Also fetch
+    # jwt_issued_after to check whether this token has been revoked.
+    rows = await postgrest_get(
+        "devices",
+        f"select=id,is_active,jwt_issued_after&id=eq.{quote(device_id, safe='')}&limit=1",
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Device not found")
+    device_row = rows[0]
+    if not device_row.get("is_active", False):
+        raise HTTPException(status_code=403, detail="Device is deactivated")
+
+    # Revocation check: reject JWTs issued before jwt_issued_after.
+    jwt_issued_after_raw = device_row.get("jwt_issued_after")
+    if jwt_issued_after_raw:
+        try:
+            issued_after_ts = datetime.fromisoformat(jwt_issued_after_raw.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            issued_after_ts = 0
+        if claims.get("iat", 0) < issued_after_ts:
+            raise HTTPException(status_code=401, detail="Device token has been revoked — please re-register")
+
+    now = datetime.now(timezone.utc)
+    await postgrest_patch(
+        "devices",
+        f"id=eq.{quote(device_id, safe='')}",
+        {"status": "online", "last_seen_at": now.isoformat()},
+    )
+    log.debug("device.heartbeat", device_id=device_id)
+    return {"success": True, "device_id": device_id, "last_seen_at": now.isoformat()}
+
+
+@router.post("/api/v1/devices/{device_id}/revoke")
+async def revoke_device(
+    device_id: str = Path(...),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Admin endpoint: immediately revoke all JWTs for a device and deactivate it.
+
+    Sets jwt_issued_after = NOW() and is_active = false on the device row.
+    Any existing device JWT issued before this moment will be rejected by the
+    heartbeat endpoint, forcing the device to re-register (which requires a
+    new hardware fingerprint scan).
+
+    Auth: Supabase user JWT with admin role.
+    """
+    await verify_admin(authorization)  # raises 401/403 if not a valid admin user
+
+    now = datetime.now(timezone.utc)
+    rows = await postgrest_get("devices", f"select=id&id=eq.{quote(device_id, safe='')}&limit=1")
+    if not rows:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    await postgrest_patch(
+        "devices",
+        f"id=eq.{quote(device_id, safe='')}",
+        {
+            "is_active": False,
+            "status": "offline",
+            "jwt_issued_after": now.isoformat(),
+        },
+    )
+    log.info("device.revoked", device_id=device_id)
+    return {"success": True, "device_id": device_id, "revoked_at": now.isoformat()}
 
 
 @router.post("/api/devices/pairing/start")
@@ -277,6 +532,7 @@ async def confirm_device_pairing(request: Request):
             "os_type": os_type,
             "app_version": app_version,
             "last_seen_at": now.isoformat(),
+            "jwt_issued_after": now.isoformat(),
             "metadata": {
                 "linked_from_pairing": True,
                 "pairing_id": pairing_id,
@@ -298,6 +554,16 @@ async def confirm_device_pairing(request: Request):
             "linked_device_id": linked_device["id"],
             "confirmed_device_profile": confirmed_profile,
         },
+    )
+    await insert_audit_log(
+        request=request,
+        user_id=pairing["user_id"],
+        action="device_pairing_confirmed",
+        resource_type="device",
+        resource_id=linked_device["id"],
+        details={"pairing_id": pairing_id, "device_name": device_name},
+        previous_value=None,
+        new_value={"status": "confirmed"},
     )
 
     user_rows = await postgrest_get(
