@@ -1,4 +1,5 @@
 import { supabase } from "@/integrations/supabase/client";
+import { buildApiRequestError, notAuthenticatedError, readJsonSafe } from "@/lib/httpErrors";
 
 type Message = { role: "user" | "assistant"; content: string };
 
@@ -22,7 +23,7 @@ export async function streamChat({
   try {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) {
-      throw new Error("Not authenticated");
+      throw notAuthenticatedError();
     }
 
     const configuredApiUrl = (process.env.NEXT_PUBLIC_API_URL || "").trim();
@@ -62,8 +63,9 @@ export async function streamChat({
           break;
         }
 
-        const errorData = await candidate.json().catch(() => ({ error: "Unknown error" }));
-        lastErrorMessage = errorData.error || `Request failed with status ${candidate.status}`;
+        const payload = await readJsonSafe(candidate);
+        const error = buildApiRequestError(candidate, payload, `Request failed with status ${candidate.status}`);
+        lastErrorMessage = error.message;
       } catch (e) {
         lastErrorMessage = e instanceof Error ? e.message : "Network error";
       }

@@ -18,7 +18,6 @@ interface PendingDevice {
 
 export default function PendingDevices() {
   const [devices, setDevices] = useState<PendingDevice[]>([]);
-  const [loading, setLoading] = useState(true);
   const { toast } = useToast();
 
   useEffect(() => {
@@ -45,7 +44,7 @@ export default function PendingDevices() {
         .order('registered_at', { ascending: false });
 
       if (error) throw error;
-      setDevices(data || []);
+      setDevices(data ?? []);
     } catch (error) {
       console.error('Error fetching pending devices:', error);
       toast({
@@ -53,8 +52,6 @@ export default function PendingDevices() {
         description: 'Failed to fetch pending devices',
         variant: 'destructive',
       });
-    } finally {
-      setLoading(false);
     }
   }
 
@@ -168,7 +165,7 @@ export default function PendingDevices() {
                   <TableRow key={device.id}>
                     <TableCell className="font-medium">{device.device_name}</TableCell>
                     <TableCell>
-                      <Badge variant="outline">{device.os_type || 'Unknown'}</Badge>
+                      <Badge variant="outline">{device.os_type ?? 'Unknown'}</Badge>
                     </TableCell>
                     <TableCell>
                       {new Date(device.registered_at).toLocaleString()}

@@ -18,6 +18,7 @@ from app.routes.activity import router as activity_router
 from app.routes.admin import router as admin_router
 from app.routes.chat import router as chat_router
 from app.routes.device import router as device_router
+from app.routes.decision_reviews import router as decision_reviews_router
 from app.routes.federated_learning import router as federated_router
 from app.routes.health import router as health_router
 from app.routes.help_assistant import router as help_router
@@ -130,6 +131,7 @@ def create_app() -> FastAPI:
     app.include_router(help_router)
     app.include_router(workflow_router)
     app.include_router(device_router)
+    app.include_router(decision_reviews_router)
     app.include_router(federated_router)
     app.include_router(admin_router)
     app.include_router(pod_activation_router)

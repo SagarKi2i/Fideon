@@ -1,5 +1,6 @@
 // Device API for Electron app integration
 import { getApiBaseUrl } from "@/lib/apiBaseUrl";
+import { buildApiRequestError, readJsonSafe } from "@/lib/httpErrors";
 
 export interface DeviceModel {
   model_id: string;
@@ -70,8 +71,8 @@ export async function fetchDeviceModels(deviceToken: string): Promise<DeviceMode
   });
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || 'Failed to fetch device models');
+    const payload = await readJsonSafe(response);
+    throw buildApiRequestError(response, payload, "Failed to fetch device models");
   }
 
   return response.json();
@@ -95,8 +96,8 @@ export async function performDeviceCheckin(
   });
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || 'Failed to perform check-in');
+    const payload = await readJsonSafe(response);
+    throw buildApiRequestError(response, payload, "Failed to perform check-in");
   }
 
   return response.json();
@@ -113,8 +114,8 @@ export async function sendDeviceHeartbeat(
   });
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.detail || "Heartbeat failed");
+    const payload = await readJsonSafe(response);
+    throw buildApiRequestError(response, payload, "Heartbeat failed");
   }
 
   return response.json();
@@ -146,8 +147,8 @@ export async function startDevicePairing(
   });
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || "Failed to create pairing QR");
+    const payload = await readJsonSafe(response);
+    throw buildApiRequestError(response, payload, "Failed to create pairing QR");
   }
 
   return response.json();
@@ -165,8 +166,8 @@ export async function getDevicePairingStatus(
   });
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || "Failed to fetch pairing status");
+    const payload = await readJsonSafe(response);
+    throw buildApiRequestError(response, payload, "Failed to fetch pairing status");
   }
 
   return response.json();
@@ -190,8 +191,8 @@ export async function confirmDevicePairing(payload: {
   });
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || "Failed to confirm pairing");
+    const payload = await readJsonSafe(response);
+    throw buildApiRequestError(response, payload, "Failed to confirm pairing");
   }
 
   return response.json();

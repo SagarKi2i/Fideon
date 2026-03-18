@@ -1,4 +1,3 @@
-import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { 
@@ -23,7 +22,6 @@ import { getInsuranceCoverage, type CoverageSection } from "./insuranceCoverageD
 
 interface PolicyCoverageDetailsProps {
   insuranceType: string;
-  coverageMultiplier?: number; // To scale limits based on selected coverage
 }
 
 const ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -42,8 +40,7 @@ const ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
 };
 
 export default function PolicyCoverageDetails({ 
-  insuranceType, 
-  coverageMultiplier = 1 
+  insuranceType
 }: PolicyCoverageDetailsProps) {
   const coverageData = getInsuranceCoverage(insuranceType);
 
@@ -51,11 +48,11 @@ export default function PolicyCoverageDetails({
     return null;
   }
 
-  const renderSection = (section: CoverageSection, index: number) => {
+  const renderSection = (section: CoverageSection) => {
     const IconComponent = ICON_MAP[section.icon] || Shield;
 
     return (
-      <div key={index} className="space-y-3">
+      <div key={section.title} className="space-y-3">
         <div className="flex items-center gap-2">
           <div className="p-1.5 rounded-lg bg-primary/10">
             <IconComponent className="h-4 w-4 text-primary" />
@@ -71,8 +68,8 @@ export default function PolicyCoverageDetails({
               </tr>
             </thead>
             <tbody>
-              {section.items.map((item, idx) => (
-                <tr key={idx} className="border-t border-border/50 hover:bg-muted/30 transition-colors">
+              {section.items.map((item) => (
+                <tr key={item.name} className="border-t border-border/50 hover:bg-muted/30 transition-colors">
                   <td className="py-2.5 px-3">
                     <div>
                       <p className="font-medium text-foreground">{item.name}</p>
@@ -110,7 +107,7 @@ export default function PolicyCoverageDetails({
 
       {/* Coverage Sections */}
       <div className="grid gap-4">
-        {coverageData.sections.map((section, index) => renderSection(section, index))}
+        {coverageData.sections.map((section) => renderSection(section))}
       </div>
 
       <Separator />
@@ -128,8 +125,8 @@ export default function PolicyCoverageDetails({
             The following are NOT covered under this policy:
           </p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            {coverageData.exclusions.map((exclusion, idx) => (
-              <div key={idx} className="flex items-start gap-2 text-sm">
+            {coverageData.exclusions.map((exclusion) => (
+              <div key={exclusion} className="flex items-start gap-2 text-sm">
                 <XCircle className="h-3.5 w-3.5 text-destructive flex-shrink-0 mt-0.5" />
                 <span className="text-foreground/80">{exclusion}</span>
               </div>
@@ -148,8 +145,8 @@ export default function PolicyCoverageDetails({
         </div>
         <div className="bg-amber-500/5 rounded-lg p-4 border border-amber-500/20">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            {coverageData.conditions.map((condition, idx) => (
-              <div key={idx} className="flex items-start gap-2 text-sm">
+            {coverageData.conditions.map((condition) => (
+              <div key={condition} className="flex items-start gap-2 text-sm">
                 <CheckCircle2 className="h-3.5 w-3.5 text-amber-600 flex-shrink-0 mt-0.5" />
                 <span className="text-foreground/80">{condition}</span>
               </div>

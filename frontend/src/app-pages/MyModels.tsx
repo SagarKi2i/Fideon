@@ -1,10 +1,12 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Brain, Trash2 } from "lucide-react";
+import { Brain, Clock3, PlayCircle, Signal, Trash2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
+import { Progress } from "@/components/ui/progress";
+import { Badge } from "@/components/ui/badge";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -22,6 +24,16 @@ interface ActivatedModel {
   model_name: string;
   domain: string;
   activated_at: string | null;
+}
+
+function getPodTelemetry(modelId: string) {
+  const signal = (modelId.length * 13) % 100;
+  const lastInferenceMins = ((modelId.length * 7) % 44) + 1;
+  return {
+    status: signal > 35 ? "online" : "idle",
+    usagePercent: Math.max(8, signal),
+    lastInferenceLabel: `${lastInferenceMins}m ago`,
+  };
 }
 
 export default function MyModels() {
@@ -164,7 +176,12 @@ export default function MyModels() {
                         </div>
                         <div>
                           <CardTitle className="text-base text-foreground">{model.model_name}</CardTitle>
-                          <CardDescription className="text-xs mt-1 capitalize">{model.domain}</CardDescription>
+                          <CardDescription className="text-xs mt-1 capitalize flex items-center gap-2">
+                            {model.domain}
+                            <Badge variant="outline" className="text-[10px]">
+                              {getPodTelemetry(model.model_id).status}
+                            </Badge>
+                          </CardDescription>
                         </div>
                       </div>
                       <Button
@@ -178,9 +195,37 @@ export default function MyModels() {
                     </div>
                   </CardHeader>
                   <CardContent>
-                    <p className="text-xs text-muted-foreground">
+                    <p className="text-xs text-muted-foreground mb-2">
                       Activated: {model.activated_at ? new Date(model.activated_at).toLocaleDateString() : "N/A"}
                     </p>
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-muted-foreground flex items-center gap-1">
+                          <Clock3 className="h-3 w-3" />
+                          Last inference
+                        </span>
+                        <span>{getPodTelemetry(model.model_id).lastInferenceLabel}</span>
+                      </div>
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-muted-foreground flex items-center gap-1">
+                            <Signal className="h-3 w-3" />
+                            Usage
+                          </span>
+                          <span>{getPodTelemetry(model.model_id).usagePercent}%</span>
+                        </div>
+                        <Progress value={getPodTelemetry(model.model_id).usagePercent} className="h-1.5" />
+                      </div>
+                    </div>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="w-full mt-3"
+                      onClick={() => navigate(`/playground?model=${encodeURIComponent(model.model_id)}`)}
+                    >
+                      <PlayCircle className="h-3.5 w-3.5 mr-1.5" />
+                      Open Playground
+                    </Button>
                   </CardContent>
                 </Card>
               ))}

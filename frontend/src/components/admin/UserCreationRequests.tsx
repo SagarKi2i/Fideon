@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { UserPlus, Loader2, CheckCircle, XCircle, RefreshCw } from "lucide-react";
+import { buildApiRequestError, readJsonSafe } from "@/lib/httpErrors";
 
 interface UserCreationRequest {
   id: string;
@@ -48,8 +49,8 @@ export function UserCreationRequests({ viewerRole }: Props) {
       const res = await fetch(apiUrl("/api/user-creation-requests"), {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
+      const data = await readJsonSafe(res);
+      if (!res.ok) throw buildApiRequestError(res, data, "Failed to load requests");
       setRequests(data.requests || []);
     } catch (err: any) {
       toast({ title: "Error", description: err.message || "Failed to load requests", variant: "destructive" });
@@ -74,8 +75,8 @@ export function UserCreationRequests({ viewerRole }: Props) {
         },
         body: JSON.stringify({}),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Approval failed");
+      const data = await readJsonSafe(res);
+      if (!res.ok) throw buildApiRequestError(res, data, "Approval failed");
 
       toast({ title: "Approved", description: data.message });
       await loadRequests();
@@ -100,8 +101,8 @@ export function UserCreationRequests({ viewerRole }: Props) {
         },
         body: JSON.stringify({ reason: rejectReason }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Rejection failed");
+      const data = await readJsonSafe(res);
+      if (!res.ok) throw buildApiRequestError(res, data, "Rejection failed");
 
       toast({ title: "Rejected", description: data.message });
       setRejectingId(null);

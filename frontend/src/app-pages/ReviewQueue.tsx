@@ -1,11 +1,10 @@
-import { useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
-import { useUserRole } from "@/hooks/useUserRole";
 import { 
   CheckCircle2, XCircle, Clock, Eye, Brain, 
   AlertTriangle, ChevronDown, ChevronUp, Filter
@@ -13,6 +12,13 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Progress } from "@/components/ui/progress";
+import { useUserRole } from "@/hooks/useUserRole";
+import {
+  approveDecisionReview,
+  listAllDecisionReviews,
+  listMyDecisionReviews,
+  rejectDecisionReview,
+} from "@/lib/reviewQueueApi";
 
 interface DecisionReview {
   id: string;
@@ -43,6 +49,16 @@ const DECISION_TYPE_LABELS: Record<string, string> = {
   policy_review: "Policy Review",
   risk_assessment: "Risk Assessment",
   document_validation: "Document Validation",
+  acord_parsing_review: "ACORD Parsing Review",
+  document_extraction_review: "Document Extraction Review",
+  endorsement_recommendation: "Endorsement Recommendation",
+  underwriting_recommendation: "Underwriting Recommendation",
+  fraud_flag_review: "Fraud Flag Review",
+  settlement_recommendation: "Settlement Recommendation",
+  compliance_exception: "Compliance Exception",
+  coverage_gap_review: "Coverage Gap Review",
+  renewal_strategy_review: "Renewal Strategy Review",
+  other: "Other",
 };
 
 const STATUS_CONFIG: Record<string, { label: string; variant: "default" | "secondary" | "destructive" | "outline"; icon: typeof Clock }> = {
@@ -53,7 +69,8 @@ const STATUS_CONFIG: Record<string, { label: string; variant: "default" | "secon
 
 export default function ReviewQueue() {
   const { toast } = useToast();
-  const { isAdmin } = useUserRole();
+  const { isAdmin, loading: roleLoading } = useUserRole();
+  const [searchParams] = useSearchParams();
   const [reviews, setReviews] = useState<DecisionReview[]>([]);
   const [loading, setLoading] = useState(true);
   const [processingId, setProcessingId] = useState<string | null>(null);
@@ -61,20 +78,23 @@ export default function ReviewQueue() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [domainFilter, setDomainFilter] = useState<string>("all");
   const [typeFilter, setTypeFilter] = useState<string>("all");
+  const requestedTab = searchParams.get("tab") === "completed" ? "completed" : "pending";
+  const requestedReviewId = searchParams.get("reviewId");
+  const [activeTab, setActiveTab] = useState<"pending" | "completed">(requestedTab);
 
   useEffect(() => {
+    if (roleLoading) return;
     loadReviews();
-  }, []);
+  }, [roleLoading, isAdmin]);
+
+  useEffect(() => {
+    setActiveTab(requestedTab);
+  }, [requestedTab]);
 
   const loadReviews = async () => {
     try {
-      const { data, error } = await supabase
-        .from("decision_reviews")
-        .select("*")
-        .order("created_at", { ascending: false });
-
-      if (error) throw error;
-      setReviews((data as DecisionReview[]) || []);
+      const rows = isAdmin ? await listAllDecisionReviews() : await listMyDecisionReviews();
+      setReviews((rows as DecisionReview[]) ?? []);
     } catch (error) {
       console.error("Error loading reviews:", error);
       toast({ title: "Error", description: "Failed to load review queue", variant: "destructive" });
@@ -86,20 +106,11 @@ export default function ReviewQueue() {
   const handleAction = async (review: DecisionReview, action: "approved" | "rejected") => {
     setProcessingId(review.id);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-
-      const { error } = await supabase
-        .from("decision_reviews")
-        .update({
-          status: action,
-          reviewer_id: user.id,
-          reviewer_notes: reviewerNotes[review.id] || null,
-          reviewed_at: new Date().toISOString(),
-        })
-        .eq("id", review.id);
-
-      if (error) throw error;
+      if (action === "approved") {
+        await approveDecisionReview(review.id, reviewerNotes[review.id] ?? "");
+      } else {
+        await rejectDecisionReview(review.id, reviewerNotes[review.id] ?? "");
+      }
 
       toast({
         title: action === "approved" ? "Decision Approved" : "Decision Rejected",
@@ -124,6 +135,13 @@ export default function ReviewQueue() {
 
   const pendingReviews = filteredReviews.filter((r) => r.status === "pending");
   const completedReviews = filteredReviews.filter((r) => r.status !== "pending");
+  const reviewIds = useMemo(() => new Set(reviews.map((r) => r.id)), [reviews]);
+
+  useEffect(() => {
+    if (!requestedReviewId) return;
+    if (!reviewIds.has(requestedReviewId)) return;
+    setExpandedId(requestedReviewId);
+  }, [requestedReviewId, reviewIds]);
   const domains = [...new Set(reviews.map((r) => r.domain))];
   const types = [...new Set(reviews.map((r) => r.decision_type))];
 
@@ -142,7 +160,7 @@ export default function ReviewQueue() {
 
   const renderReviewCard = (review: DecisionReview, showActions: boolean) => {
     const isExpanded = expandedId === review.id;
-    const statusCfg = STATUS_CONFIG[review.status] || STATUS_CONFIG.pending;
+    const statusCfg = STATUS_CONFIG[review.status] ?? STATUS_CONFIG.pending;
     const StatusIcon = statusCfg.icon;
 
     return (
@@ -163,7 +181,7 @@ export default function ReviewQueue() {
                 <p className="font-medium text-sm truncate">{review.title}</p>
                 <Badge variant="outline" className="text-[10px] capitalize">{review.domain}</Badge>
                 <Badge variant="outline" className="text-[10px]">
-                  {DECISION_TYPE_LABELS[review.decision_type] || review.decision_type}
+                  {DECISION_TYPE_LABELS[review.decision_type] ?? review.decision_type}
                 </Badge>
               </div>
               <p className="text-xs text-muted-foreground mt-1">
@@ -211,11 +229,11 @@ export default function ReviewQueue() {
               </div>
             )}
 
-            {showActions && review.status === "pending" && (
+            {showActions && isAdmin && review.status === "pending" && (
               <div className="space-y-3 pt-2">
                 <Textarea
                   placeholder="Add reviewer notes (optional)..."
-                  value={reviewerNotes[review.id] || ""}
+                  value={reviewerNotes[review.id] ?? ""}
                   onChange={(e) =>
                     setReviewerNotes((prev) => ({ ...prev, [review.id]: e.target.value }))
                   }
@@ -295,7 +313,7 @@ export default function ReviewQueue() {
           <SelectContent>
             <SelectItem value="all">All Types</SelectItem>
             {types.map((t) => (
-              <SelectItem key={t} value={t}>{DECISION_TYPE_LABELS[t] || t}</SelectItem>
+              <SelectItem key={t} value={t}>{DECISION_TYPE_LABELS[t] ?? t}</SelectItem>
             ))}
           </SelectContent>
         </Select>
@@ -306,7 +324,7 @@ export default function ReviewQueue() {
         )}
       </div>
 
-      <Tabs defaultValue="pending">
+      <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as "pending" | "completed")}>
         <TabsList>
           <TabsTrigger value="pending" className="gap-1.5">
             <Clock className="h-3.5 w-3.5" />
@@ -329,7 +347,7 @@ export default function ReviewQueue() {
             </Card>
           ) : (
             <div className="space-y-3">
-              {pendingReviews.map((review) => renderReviewCard(review, true))}
+              {pendingReviews.map((review) => renderReviewCard(review, isAdmin))}
             </div>
           )}
         </TabsContent>

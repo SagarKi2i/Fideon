@@ -1,5 +1,6 @@
 import { supabase } from "@/integrations/supabase/client";
 import { apiUrl } from "@/lib/apiBaseUrl";
+import { buildApiRequestError, notAuthenticatedError, readJsonSafe } from "@/lib/httpErrors";
 
 interface StreamOptions {
   onDelta: (delta: string) => void;
@@ -13,7 +14,7 @@ export async function streamFromEdgeFunction(
   { onDelta, onDone, onError }: StreamOptions
 ) {
   const { data: { session } } = await supabase.auth.getSession();
-  if (!session) throw new Error("Not authenticated");
+  if (!session) throw notAuthenticatedError();
 
   const url = apiUrl(`/api/${functionName}`);
 
@@ -27,8 +28,9 @@ export async function streamFromEdgeFunction(
   });
 
   if (!resp.ok) {
-    const errorData = await resp.json().catch(() => ({ error: "Unknown error" }));
-    if (onError) onError(errorData.error || `Request failed: ${resp.status}`);
+    const payload = await readJsonSafe(resp);
+    const error = buildApiRequestError(resp, payload, `Request failed: ${resp.status}`);
+    if (onError) onError(error.message);
     onDone();
     return;
   }

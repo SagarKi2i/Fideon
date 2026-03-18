@@ -11,10 +11,8 @@ import {
   ThumbsDown,
   Star,
   CheckCircle2,
-  Brain,
 } from "lucide-react";
 import { submitFeedback } from "@/lib/trainingApi";
-import { getStoredDeviceToken } from "@/lib/deviceApi";
 
 interface OutputCorrectionProps {
   modelId: string;
@@ -52,7 +50,7 @@ export default function OutputCorrection({ modelId, prompt, output, children }: 
         prompt,
         original_response: output,
         corrected_response: correctedText !== output ? correctedText : undefined,
-        rating: rating || undefined,
+        rating: rating ?? undefined,
         feedback_type: correctedText !== output ? "correction" : "rating",
       });
       setSubmitted(true);

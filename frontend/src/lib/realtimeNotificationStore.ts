@@ -11,6 +11,7 @@ export type StoredRealtimeNotification = {
   table: NotificationRealtimeDetail["table"];
   eventType: NotificationRealtimeDetail["eventType"];
   message: string;
+  targetPath?: string;
   createdAt: string;
   read: boolean;
   fingerprint: string;
@@ -68,6 +69,7 @@ export function pushRealtimeNotification(
     table: detail.table,
     eventType: detail.eventType,
     message: detail.message,
+    targetPath: detail.targetPath,
     createdAt: new Date(now).toISOString(),
     read: false,
     fingerprint,
@@ -80,6 +82,11 @@ export function pushRealtimeNotification(
 export function markRealtimeNotificationsRead() {
   const current = readStore();
   writeStore(current.map((item) => ({ ...item, read: true })));
+}
+
+export function markRealtimeNotificationRead(id: string) {
+  const current = readStore();
+  writeStore(current.map((item) => (item.id === id ? { ...item, read: true } : item)));
 }
 
 export function clearRealtimeNotifications() {

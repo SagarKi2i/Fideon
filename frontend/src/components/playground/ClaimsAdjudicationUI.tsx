@@ -6,12 +6,11 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { 
-  Upload, Scale, Loader2, CheckCircle2, XCircle, Clock, AlertTriangle, 
-  FileText, DollarSign, Calendar, ArrowRight, ShieldAlert, TrendingUp, 
-  TrendingDown, Minus, History, User, Building2, Activity
+  Upload, Scale, Loader2, CheckCircle2, XCircle, Clock,
+  FileText, DollarSign, ArrowRight, ShieldAlert, TrendingUp,
+  TrendingDown, Minus, History, User, Activity
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
 import MarkdownRenderer from "./MarkdownRenderer";
 
 interface ClaimsAdjudicationUIProps {

@@ -19,11 +19,13 @@ CREATE POLICY "Users can view own app user record"
   USING (auth.uid() = user_id);
 
 -- Admins can view all app users (no self-referential JOIN)
+DROP POLICY IF EXISTS "Admins can view all app users"              ON public.app_users;
 CREATE POLICY "Admins can view all app users"
   ON public.app_users FOR SELECT
   USING (public.has_role(auth.uid(), 'admin'::public.app_role));
 
 -- Global admins can do everything
+DROP POLICY IF EXISTS "Global admins can manage all app users"     ON public.app_users;
 CREATE POLICY "Global admins can manage all app users"
   ON public.app_users FOR ALL
   USING (public.has_role(auth.uid(), 'global_admin'::public.app_role))
@@ -33,11 +35,13 @@ CREATE POLICY "Global admins can manage all app users"
 
 DROP POLICY IF EXISTS "Admins can manage own tenant"         ON public.tenants;
 DROP POLICY IF EXISTS "Global admins can manage all tenants" ON public.tenants;
+DROP POLICY IF EXISTS "Admins can view all tenants"          ON public.tenants;
 
 CREATE POLICY "Admins can view all tenants"
   ON public.tenants FOR SELECT
   USING (public.has_role(auth.uid(), 'admin'::public.app_role));
 
+DROP POLICY IF EXISTS "Global admins can manage all tenants" ON public.tenants;
 CREATE POLICY "Global admins can manage all tenants"
   ON public.tenants FOR ALL
   USING (public.has_role(auth.uid(), 'global_admin'::public.app_role))
@@ -58,11 +62,13 @@ CREATE POLICY "Admins can view all user roles"
   ON public.user_roles FOR SELECT
   USING (public.has_role(auth.uid(), 'admin'::public.app_role));
 
+DROP POLICY IF EXISTS "Admins can manage all user roles" ON public.user_roles;
 CREATE POLICY "Admins can manage all user roles"
   ON public.user_roles FOR ALL
   USING (public.has_role(auth.uid(), 'admin'::public.app_role))
   WITH CHECK (public.has_role(auth.uid(), 'admin'::public.app_role));
 
+DROP POLICY IF EXISTS "Global admins can manage all user roles" ON public.user_roles;
 CREATE POLICY "Global admins can manage all user roles"
   ON public.user_roles FOR ALL
   USING (public.has_role(auth.uid(), 'global_admin'::public.app_role))
@@ -75,6 +81,8 @@ DROP POLICY IF EXISTS "Admins can insert devices in own tenant"  ON public.devic
 DROP POLICY IF EXISTS "Admins can update devices in own tenant"  ON public.devices;
 DROP POLICY IF EXISTS "Admins can delete devices in own tenant"  ON public.devices;
 DROP POLICY IF EXISTS "Global admins can manage all devices"     ON public.devices;
+DROP POLICY IF EXISTS "Admins can view all devices"              ON public.devices;
+DROP POLICY IF EXISTS "Admins can manage all devices"            ON public.devices;
 
 CREATE POLICY "Admins can view all devices"
   ON public.devices FOR SELECT
@@ -85,6 +93,7 @@ CREATE POLICY "Admins can manage all devices"
   USING (public.has_role(auth.uid(), 'admin'::public.app_role))
   WITH CHECK (public.has_role(auth.uid(), 'admin'::public.app_role));
 
+DROP POLICY IF EXISTS "Global admins can manage all devices"     ON public.devices;
 CREATE POLICY "Global admins can manage all devices"
   ON public.devices FOR ALL
   USING (public.has_role(auth.uid(), 'global_admin'::public.app_role))

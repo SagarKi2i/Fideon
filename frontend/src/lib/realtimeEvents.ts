@@ -9,9 +9,10 @@ export type DeviceRealtimeDetail = {
 
 export type NotificationRealtimeDetail = {
   eventType: "INSERT" | "UPDATE" | "DELETE";
-  table: "pod_activation_requests" | "device_sync_logs";
+  table: "pod_activation_requests" | "device_sync_logs" | "decision_reviews";
   payload: unknown;
   message: string;
+  targetPath?: string;
 };
 
 export function emitDeviceRealtime(detail: DeviceRealtimeDetail) {

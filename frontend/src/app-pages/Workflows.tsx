@@ -5,7 +5,6 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Brain, Plus, Play, Loader2, CheckCircle2, Circle, ArrowRight, Sparkles, FileText, Trash2, MessageSquare, Send } from "lucide-react";
@@ -126,7 +125,7 @@ export default function Workflows() {
         .select("*")
         .order("created_at", { ascending: false });
       if (error) throw error;
-      setWorkflows((data || []).map((w: any) => ({
+      setWorkflows((data ?? []).map((w: any) => ({
         ...w,
         parsed_steps: Array.isArray(w.parsed_steps) ? w.parsed_steps : [],
       })));
@@ -187,7 +186,7 @@ export default function Workflows() {
       loadWorkflows();
     } catch (e: any) {
       console.error(e);
-      toast({ title: "Error", description: e.message || "Failed to create workflow", variant: "destructive" });
+      toast({ title: "Error", description: e.message ?? "Failed to create workflow", variant: "destructive" });
     } finally {
       setParsing(false);
     }
