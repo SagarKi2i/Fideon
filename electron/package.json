@@ -17,7 +17,8 @@
     "typescript": "^5.8.3"
   },
   "dependencies": {
-    "dotenv": "^17.3.1"
+    "dotenv": "^17.3.1",
+    "next-electron-rsc": "^0.3.0"
   },
   "build": {
     "appId": "com.fideon.os",
@@ -28,7 +29,10 @@
     },
     "files": [
       "dist/**/*",
-      "package.json"
+      "package.json",
+      "../frontend/.next/standalone/**/*",
+      "../frontend/public/**/*",
+      "../frontend/.next/static/**/*"
     ],
     "win": {
       "target": "nsis",

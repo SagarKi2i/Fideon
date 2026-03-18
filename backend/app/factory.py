@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from json import JSONDecodeError
 
 import structlog
 from fastapi import FastAPI, HTTPException, Request
@@ -138,6 +139,11 @@ def create_app() -> FastAPI:
 
     # Configure structured logging and HTTP request audit logs
     setup_logging(app)
+
+    @app.exception_handler(JSONDecodeError)
+    async def json_decode_error_handler(_: Request, exc: JSONDecodeError):
+        # Client sent invalid JSON; return a consistent 400 instead of a 500.
+        return JSONResponse(status_code=400, content={"error": f"Invalid JSON body: {exc.msg}"})
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_: Request, exc: HTTPException):
