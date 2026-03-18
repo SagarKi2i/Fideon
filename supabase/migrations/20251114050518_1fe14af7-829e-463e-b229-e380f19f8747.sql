@@ -169,7 +169,8 @@ CREATE POLICY "Users can delete their own comparisons"
 
 -- Create storage bucket for documents
 INSERT INTO storage.buckets (id, name, public)
-VALUES ('documents', 'documents', false);
+VALUES ('documents', 'documents', false)
+ON CONFLICT (id) DO NOTHING;
 
 -- Storage policies for documents bucket
 CREATE POLICY "Users can upload their own documents"

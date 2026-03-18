@@ -41,19 +41,22 @@ alter table public.auth_audit
 alter table public.auth_audit enable row level security;
 
 -- Users can insert their own audit rows
-create policy if not exists "Users can insert their own auth audit"
+drop policy if exists "Users can insert their own auth audit" on public.auth_audit;
+create policy "Users can insert their own auth audit"
 on public.auth_audit
 for insert
 with check (auth.uid() = user_id);
 
 -- Users see only their own activity
-create policy if not exists "Users see own auth audit"
+drop policy if exists "Users see own auth audit" on public.auth_audit;
+create policy "Users see own auth audit"
 on public.auth_audit
 for select
 using (user_id = auth.uid());
 
 -- Admins can see user + admin + viewer + guest activity (but not global_admin)
-create policy if not exists "Admins see user+admin auth audit"
+drop policy if exists "Admins see user+admin auth audit" on public.auth_audit;
+create policy "Admins see user+admin auth audit"
 on public.auth_audit
 for select
 using (
@@ -62,7 +65,8 @@ using (
 );
 
 -- Global admins can see all audit activity
-create policy if not exists "Global admins see all auth audit"
+drop policy if exists "Global admins see all auth audit" on public.auth_audit;
+create policy "Global admins see all auth audit"
 on public.auth_audit
 for select
 using (

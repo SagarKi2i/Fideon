@@ -107,7 +107,8 @@ CREATE POLICY "Devices can view active rounds"
   USING (true);
 
 -- Storage bucket for gradient deltas
-INSERT INTO storage.buckets (id, name, public) VALUES ('model-updates', 'model-updates', false);
+INSERT INTO storage.buckets (id, name, public) VALUES ('model-updates', 'model-updates', false)
+ON CONFLICT (id) DO NOTHING;
 
 CREATE POLICY "Devices can upload gradients"
   ON storage.objects FOR INSERT
