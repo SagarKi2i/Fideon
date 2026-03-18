@@ -7,7 +7,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import structlog
 from fastapi import FastAPI, Request
@@ -105,7 +105,7 @@ async def scrub_text(text: str) -> str:
     """
     if not _PRESIDIO_AVAILABLE or not text:
         return text
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_PRESIDIO_EXECUTOR, _presidio_scrub_sync, text)
 
 
@@ -304,3 +304,165 @@ def setup_logging(app: FastAPI) -> None:
 def get_logger(name: Optional[str] = None) -> structlog.BoundLogger:
     """Return a named structured logger instance."""
     return structlog.get_logger(name) if name else structlog.get_logger()
+
+
+# ── SHAP Reasoning ─────────────────────────────────────────────────────────────
+
+def generate_shap_reasoning(
+    shap_values: Dict[str, float],
+    prediction: Any,
+    model_id: str = "unknown",
+    top_n: int = 5,
+) -> str:
+    """Generate a human-readable explanation from SHAP feature contributions.
+
+    Sorts features by absolute SHAP value (most influential first) and
+    produces a single sentence suitable for storing in audit_logs.reasoning.
+
+    Args:
+        shap_values: Mapping of feature name → SHAP float value.
+                     Positive values push the prediction up (increasing risk /
+                     confidence); negative values push it down.
+        prediction:  The model's output (scalar, label string, or dict).
+                     Rendered as a string in the explanation.
+        model_id:    Human-readable model identifier (e.g. "fraud-v3").
+        top_n:       Maximum number of features to include in the explanation.
+
+    Returns:
+        A string like:
+        "Model 'fraud-v3' predicted 'high_risk'. "
+        "Top factors: transaction_amount (+0.42, ↑), account_age (-0.31, ↓), "
+        "hour_of_day (+0.18, ↑)."
+
+    Example::
+
+        reasoning = generate_shap_reasoning(
+            shap_values={"transaction_amount": 0.42, "account_age": -0.31},
+            prediction={"label": "high_risk", "confidence": 0.87},
+            model_id="fraud-v3",
+        )
+        await insert_audit_log(..., reasoning=reasoning, shap_values=shap_values)
+    """
+    if not shap_values:
+        return f"Model '{model_id}' produced prediction '{prediction}'. No SHAP values available."
+
+    # Sort by absolute contribution magnitude, descending.
+    ranked: List[Tuple[str, float]] = sorted(
+        shap_values.items(), key=lambda kv: abs(kv[1]), reverse=True
+    )[:top_n]
+
+    # Render prediction cleanly whether it's a scalar or a dict.
+    if isinstance(prediction, dict):
+        pred_label = prediction.get("label") or prediction.get("class") or str(prediction)
+        confidence = prediction.get("confidence") or prediction.get("score")
+        pred_str = f"'{pred_label}'"
+        if confidence is not None:
+            try:
+                pred_str += f" (confidence {float(confidence):.1%})"
+            except (TypeError, ValueError):
+                pass
+    else:
+        pred_str = f"'{prediction}'"
+
+    # Build the factor list.
+    factor_parts = []
+    for feature, value in ranked:
+        direction = "↑" if value >= 0 else "↓"
+        factor_parts.append(f"{feature} ({value:+.4f}, {direction})")
+
+    factors_str = ", ".join(factor_parts) if factor_parts else "none"
+    return (
+        f"Model '{model_id}' predicted {pred_str}. "
+        f"Top factors: {factors_str}."
+    )
+
+
+async def log_ai_decision_audit(
+    request: Any,
+    user_id: Optional[str],
+    action: str,
+    resource_type: str,
+    model_id: str,
+    shap_values: Dict[str, float],
+    prediction: Any,
+    resource_id: Optional[str] = None,
+    details: Optional[Dict[str, Any]] = None,
+    previous_value: Optional[Dict[str, Any]] = None,
+    new_value: Optional[Dict[str, Any]] = None,
+    top_n: int = 5,
+    reasoning: Optional[str] = None,
+) -> None:
+    """Convenience wrapper: generate SHAP reasoning and write an audit ledger row.
+
+    Combines generate_shap_reasoning() with insert_audit_log() so callers
+    don't have to construct the explanation manually.  If *reasoning* is
+    supplied explicitly it is used as-is; otherwise it is auto-generated
+    from *shap_values* and *prediction*.
+
+    The resulting audit row contains:
+      - standard fields  : user_id, action, resource_type, resource_id,
+                           details, previous_value, new_value, ip_address,
+                           user_agent, created_at
+      - integrity_hash   : SHA-256 over all non-PII fields including SHAP data
+      - chain_hash       : computed by DB trigger — links this row to the
+                           previous ledger entry (cryptographic audit ledger)
+      - shap_values      : raw SHAP dict for downstream analysis
+      - model_id         : model identifier
+      - prediction       : model output
+      - reasoning        : human-readable explanation
+
+    Example::
+
+        await log_ai_decision_audit(
+            request=request,
+            user_id=current_user["id"],
+            action="risk_assessment",
+            resource_type="transaction",
+            resource_id=transaction_id,
+            model_id="fraud-detector-v3",
+            shap_values={"amount": 0.42, "account_age": -0.31, "hour": 0.18},
+            prediction={"label": "high_risk", "confidence": 0.87},
+        )
+    """
+    # Defer import to avoid circular dependencies — supabase.py is in app.core.
+    from app.core.supabase import insert_audit_log  # noqa: PLC0415
+
+    if reasoning is None:
+        reasoning = generate_shap_reasoning(
+            shap_values=shap_values,
+            prediction=prediction,
+            model_id=model_id,
+            top_n=top_n,
+        )
+
+    # Normalise prediction to a dict so PostgREST stores it as JSONB.
+    prediction_payload: Optional[Dict[str, Any]]
+    if isinstance(prediction, dict):
+        prediction_payload = prediction
+    else:
+        prediction_payload = {"value": prediction}
+
+    await insert_audit_log(
+        request=request,
+        user_id=user_id,
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        details=details,
+        previous_value=previous_value,
+        new_value=new_value,
+        shap_values=shap_values,
+        model_id=model_id,
+        prediction=prediction_payload,
+        reasoning=reasoning,
+    )
+
+    # Emit a structured log line alongside the audit ledger entry.
+    structlog.get_logger("ai_decision").info(
+        "ai_decision_audited",
+        model_id=model_id,
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        reasoning=reasoning,
+    )

@@ -15,8 +15,9 @@ from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
-OUT_DIR = os.path.dirname(os.path.abspath(__file__))
-IMG_DIR = os.path.join(OUT_DIR, "_diagram_imgs")
+OUT_DIR  = os.path.dirname(os.path.abspath(__file__))
+IMG_DIR  = os.path.join(OUT_DIR, "_diagram_imgs")
+APIG_DIR = os.path.join(OUT_DIR, "_api_gw_imgs")
 DOCX_PATH = os.path.join(OUT_DIR, "Activity_Logs_Full_Documentation.docx")
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
@@ -140,6 +141,17 @@ def add_image(doc, img_prefix, caption, width=Inches(6.0)):
         doc.add_paragraph(f"[Diagram not found: {img_prefix}]")
     add_caption(doc, caption)
 
+def add_image_path(doc, path, caption, width=Inches(6.0)):
+    """Embed an image from a full file path."""
+    if os.path.exists(path):
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = p.add_run()
+        run.add_picture(path, width=width)
+    else:
+        doc.add_paragraph(f"[Image not found: {os.path.basename(path)}]")
+    add_caption(doc, caption)
+
 # ── Generic table builder ─────────────────────────────────────────────────────
 def add_table(doc, data, col_widths_cm, hdr_bg=HDR_BG, row1_bg=ROW1_BG):
     """data[0] = header row, data[1:] = body rows."""
@@ -245,7 +257,7 @@ def build_docx():
         ["admin",        "Orange", "NO",  "YES", "Manages users and pods within their scope."],
         ["user",         "Green",  "NO",  "Own only", "Standard authenticated user."],
         ["viewer",       "Blue",   "NO",  "Own only", "Read-only access to permitted resources."],
-        ["guest",        "Grey",   "NO",  "None",     "Minimal access — no audit visibility."],
+        ["guest",        "Grey",   "NO",  "Own only (DB-level)", "Most restricted. No /activity frontend page (route guard blocks). However the 'Users see own' RLS policy applies to all authenticated users — guest CAN query own auth_audit and audit_logs rows directly via the Supabase SDK. Frontend UI is the only blocked layer (intentional design: permissive at DB, restricted at UI)."],
     ]
     add_table(doc, roles_data, col_widths_cm=[3.2, 2.2, 2.8, 3.5, 5.3])
     add_image(doc, "01", "Figure 2 — Role Hierarchy with Promotion Paths")
@@ -327,8 +339,8 @@ def build_docx():
     rls_data = [
         ["Table", "Policy Name", "Operation", "Who", "Condition"],
         ["auth_audit",        "Users insert own",       "INSERT", "Any auth user",  "auth.uid() = user_id"],
-        ["auth_audit",        "Users see own",          "SELECT", "user/viewer",    "user_id = auth.uid()"],
-        ["auth_audit",        "Admins see user+admin",  "SELECT", "admin",          "role IN (admin,user,viewer,guest)"],
+        ["auth_audit",        "Users see own",                    "SELECT", "user/viewer/guest ¹", "user_id = auth.uid()"],
+        ["auth_audit",        "Admins see all except global_admin", "SELECT", "admin",              "role IN ('admin','user','viewer','guest')"],
         ["auth_audit",        "Global admins see all",  "SELECT", "global_admin",   "No restriction"],
         ["audit_logs",        "System can insert",      "INSERT", "Any",            "true"],
         ["audit_logs",        "Users see own",          "SELECT", "Any",            "auth.uid() = user_id"],
@@ -336,7 +348,14 @@ def build_docx():
         ["device_sync_logs",  "Admins only view",       "SELECT", "admin/global",   "has_role(uid,'admin') [hierarchical]"],
         ["device_usage_logs", "Admins only view",       "SELECT", "admin/global",   "has_role(uid,'admin') [hierarchical]"],
     ]
-    add_table(doc, rls_data, col_widths_cm=[3.2, 4.0, 2.2, 2.8, 5.0])
+    add_table(doc, rls_data, col_widths_cm=[3.2, 4.5, 2.2, 2.8, 4.5])
+    add_body(doc,
+        "¹ Guest & 'Users see own': The policy has no role restriction — the condition "
+        "user_id = auth.uid() applies to ALL authenticated users including guest. "
+        "Guest can therefore query their own auth_audit and audit_logs rows at the DB level. "
+        "The /activity frontend page is blocked by the route guard for UX reasons, not by RLS. "
+        "Design intent: permissive at DB, restricted at UI layer."
+    )
     doc.add_page_break()
 
     # ── SECTION 6: DATA FLOW ─────────────────────────────────────────────────
@@ -376,8 +395,10 @@ def build_docx():
     add_body(doc,
         "When any authenticated user navigates to /activity, Activity.tsx issues a SELECT "
         "query. The Supabase RLS layer automatically filters rows based on the caller's role — "
-        "global_admin sees all, admin sees most, user/viewer sees only their own rows, and "
-        "guest receives nothing."
+        "global_admin sees all, admin sees most (all except global_admin rows), user/viewer "
+        "sees only their own rows. Guest receives 0 rows through the frontend (route guard "
+        "blocks the /activity page) but CAN read own rows at the DB level via the 'Users see "
+        "own' RLS policy — the frontend is the restriction layer, not RLS."
     )
     add_image(doc, "08", "Figure 9 — View Activity Logs Sequence")
     doc.add_page_break()
@@ -429,6 +450,40 @@ def build_docx():
         "operations across the activity logs system and related features."
     )
     add_image(doc, "11", "Figure 12 — Full Access Control Matrix")
+
+    add_heading(doc, "Detailed Access Matrix", 2)
+    matrix_data = [
+        ["Data Scope",                              "global_admin", "admin",  "user",    "viewer",  "guest"],
+        ["Access /activity page (UI)",              "YES",          "YES",    "YES",     "YES",     "NO (route guard)"],
+        ["Own auth_audit rows (DB via RLS)",        "YES",          "YES",    "YES",     "YES",     "YES ¹"],
+        ["Own audit_logs rows (DB via RLS)",        "YES",          "YES",    "YES",     "YES",     "YES ¹"],
+        ["All user role rows",                      "YES",          "YES",    "NO",      "NO",      "NO"],
+        ["All admin role rows",                     "YES",          "YES ²",  "NO",      "NO",      "NO"],
+        ["All viewer role rows",                    "YES",          "YES",    "NO",      "NO",      "NO"],
+        ["All guest role rows",                     "YES",          "YES",    "NO",      "NO",      "NO"],
+        ["global_admin role rows",                  "YES",          "NO",     "NO",      "NO",      "NO"],
+        ["All audit_logs rows",                     "YES",          "YES",    "NO",      "NO",      "NO"],
+        ["device_sync_logs",                        "YES",          "YES",    "NO",      "NO",      "NO"],
+        ["device_usage_logs",                       "YES",          "YES",    "NO",      "NO",      "NO"],
+    ]
+    add_table(doc, matrix_data, col_widths_cm=[5.5, 2.2, 2.2, 2.0, 2.0, 3.3])
+    add_body(doc,
+        "¹ Guest DB-level access (intentional design): The RLS policy 'Users see own' "
+        "evaluates user_id = auth.uid() for ALL authenticated users — there is no role "
+        "restriction in the policy condition. Guest users CAN read their own auth_audit "
+        "and audit_logs rows directly via the Supabase SDK or API. The /activity frontend "
+        "page is blocked by the route guard (UX/product decision), not by RLS. "
+        "This is an intentional permissive-at-DB, restricted-at-UI design."
+    )
+    add_body(doc,
+        "² Cross-admin visibility (intentional by design): An admin can read the full "
+        "audit trail of OTHER admins within the same tenant. The RLS condition "
+        "role IN ('admin','user','viewer','guest') includes all admin rows. This is "
+        "deliberate — it ensures accountability: any admin action is visible to peer "
+        "admins and to global_admin. This is NOT a privilege escalation: admins cannot "
+        "see global_admin rows, and no UPDATE/DELETE policy exists so audit rows are "
+        "immutable to all roles."
+    )
     doc.add_page_break()
 
     # ── SECTION 11: EVENTS ───────────────────────────────────────────────────
@@ -451,20 +506,31 @@ def build_docx():
     ]
     add_table(doc, event_data, col_widths_cm=[4.2, 3.5, 2.5, 2.0, 2.2, 3.5])
 
-    add_heading(doc, "ATNA Code Reference", 2)
+    add_heading(doc, "ATNA Action Code Reference", 2)
     atna_data = [
-        ["Code Type", "Code", "Meaning"],
-        ["Action", "C", "Create"],
-        ["Action", "R", "Read"],
-        ["Action", "U", "Update"],
-        ["Action", "D", "Delete"],
-        ["Action", "E", "Execute"],
-        ["Outcome", "0",  "Success"],
-        ["Outcome", "4",  "Minor failure"],
-        ["Outcome", "8",  "Serious failure"],
-        ["Outcome", "12", "Major failure"],
+        ["Code", "Meaning", "Status", "Used By"],
+        ["C", "Create", "Planned — no events assigned yet", "Reserved for future: e.g. user creation events"],
+        ["R", "Read",   "Planned — no events assigned yet", "Reserved for future: e.g. document view events"],
+        ["U", "Update", "Active",                           "approve_pod:{model_id}, reject_pod:{model_id}"],
+        ["D", "Delete", "Planned — no events assigned yet", "Reserved for future: e.g. record deletion events"],
+        ["E", "Execute","Active",                           "login, login_failed, logout"],
     ]
-    add_table(doc, atna_data, col_widths_cm=[3.5, 2.0, 12.0])
+    add_table(doc, atna_data, col_widths_cm=[1.5, 2.5, 4.5, 8.5])
+    add_body(doc,
+        "Note: Codes C, R, and D are defined per the ATNA standard and reserved for future "
+        "use. They are marked 'Planned' to signal no current event uses them — a reader "
+        "should not expect to find live rows with these codes."
+    )
+
+    add_heading(doc, "ATNA Outcome Code Reference", 2)
+    outcome_data = [
+        ["Code", "Meaning", "Severity"],
+        ["0",  "Success",          "None — operation completed normally"],
+        ["4",  "Minor failure",    "Low — minor issue occurred"],
+        ["8",  "Serious failure",  "High — significant problem"],
+        ["12", "Major failure",    "Critical — severe error"],
+    ]
+    add_table(doc, outcome_data, col_widths_cm=[1.5, 3.5, 12.0])
     doc.add_page_break()
 
     # ── SECTION 12: BACKEND LOGGING ──────────────────────────────────────────

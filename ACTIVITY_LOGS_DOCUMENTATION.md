@@ -1,9 +1,9 @@
 # Activity Logs Feature — Full Documentation
 
-> **Project:** Neura-Box Cloud
+> **Project:** Fideon OS
 > **Feature:** Activity Logs & Audit Trail System
 > **Roles Covered:** `global_admin`, `admin`, `user`
-> **Date:** 2026-03-16
+> **Date:** 2026-03-17 *(updated — Audit Ledger + SHAP)*
 
 ---
 
@@ -29,22 +29,33 @@
 18. [Backend Logging Architecture](#18-backend-logging-architecture)
 19. [Full System Interaction Diagram](#19-full-system-interaction-diagram)
 20. [PII Detection — Presidio & Regex](#20-pii-detection--presidio--regex)
+21. [Cryptographic Audit Ledger](#21-cryptographic-audit-ledger)
+22. [SHAP AI Explainability Integration](#22-shap-ai-explainability-integration)
+23. [Backend Audit Write Architecture](#23-backend-audit-write-architecture)
+24. [Audit Ledger Verification Flow](#24-audit-ledger-verification-flow)
+25. [Migration History & Schema Evolution](#25-migration-history--schema-evolution)
 
 ---
 
 ## 1. Feature Overview
 
-The **Activity Logs** system provides a tamper-evident, role-scoped audit trail of all significant actions taken across the Neura-Box Cloud platform. It is built on **two Supabase tables** (`auth_audit` and `audit_logs`), enforced by PostgreSQL **Row-Level Security (RLS)** policies, and surfaced to users via the `/activity` frontend page.
+The **Activity Logs** system provides a tamper-evident, role-scoped audit trail of all significant actions taken across the Fideon OS platform. It is built on **two Supabase tables** (`auth_audit` and `audit_logs`), enforced by PostgreSQL **Row-Level Security (RLS)** policies, and surfaced to users via the `/activity` frontend page.
+
+As of **2026-03-17**, `audit_logs` has been upgraded to a **full cryptographic ledger** with a SHA-256 chain linking every row to its predecessor (blockchain-style), append-only enforcement via database triggers, SHAP-based AI explainability columns, and a `verify_audit_ledger()` SQL function for compliance audits.
 
 ### Core Design Principles
 
 | Principle | Implementation |
 |-----------|---------------|
-| **Tamper-Evidence** | Each `auth_audit` row stores a SHA-256 `integrity_hash` computed from non-PII fields |
-| **Privacy** | PII (email, name) is excluded from hash computation; backend logs use PII scrubbing |
+| **Tamper-Evidence** | Each `auth_audit` row stores a SHA-256 `integrity_hash`; each `audit_logs` row also carries a `chain_hash` that cryptographically links it to the previous row |
+| **Cryptographic Ledger** | `audit_logs` is a blockchain-style append-only ledger: `chain_hash_N = SHA-256(chain_hash_{N-1} ∥ integrity_hash_N)`; any insertion, deletion, or reordering breaks every subsequent hash |
+| **Append-Only Enforcement** | Database-level `BEFORE UPDATE` / `BEFORE DELETE` triggers on both `auth_audit` and `audit_logs` raise an exception if any row is modified after insertion |
+| **AI Explainability (SHAP)** | AI decision rows store `shap_values` (feature contributions), `model_id`, `prediction`, and auto-generated `reasoning` text — all included in the per-row `integrity_hash` |
+| **Privacy** | PII (email, name) is excluded from hash computation; backend logs use two-pass PII scrubbing (field-name match + Presidio NLP) |
 | **Least Privilege** | Each role sees only what they are authorized to see via RLS policies |
 | **ATNA Compliance** | Action codes (C/R/U/D/E) and outcome codes (0/4/8/12) follow ATNA audit standards |
-| **Immutability** | Audit rows have no UPDATE/DELETE RLS policies — records cannot be altered once written |
+| **Change Tracking** | `audit_logs` stores `previous_value` and `new_value` (JSONB) for full before/after state on every recorded change |
+| **Compliance** | EU AI Act Art. 12/13 (AI decision logging), SOC2 CC7.2 (audit trail integrity), NAIC AI Bulletin |
 
 ---
 
@@ -75,7 +86,7 @@ graph TD
 | `admin` | `'admin'` | Tenant/organization administrator. Can approve/reject pod activation requests, view audit records for `admin`, `user`, `viewer`, and `guest` roles. Cannot see `global_admin` audit rows. |
 | `user` | `'user'` | Standard platform user. Can use AI models, submit pod activation requests, and view only their own activity logs. |
 | `viewer` | `'viewer'` | Read-only role. Can view dashboards and their own logs but cannot trigger actions. |
-| `guest` | `'guest'` | Most restricted. No access to the Activity page. Can only view their own audit rows via direct DB access. |
+| `guest` | `'guest'` | Most restricted. No access to the `/activity` frontend page (blocked by route guard). However, the database-level RLS policy "Users see own" applies to all authenticated users including guest — so a guest **can** query their own `auth_audit` and `audit_logs` rows directly via the Supabase SDK or API. The frontend page is the only access point that is blocked. |
 
 ---
 
@@ -86,12 +97,15 @@ graph TD
 | Capability | global_admin | admin | user | viewer | guest |
 |-----------|:---:|:---:|:---:|:---:|:---:|
 | Access `/activity` page | ✅ | ✅ | ✅ | ✅ | ❌ |
-| View own audit rows | ✅ | ✅ | ✅ | ✅ | ❌ |
+| View own audit rows (UI) | ✅ | ✅ | ✅ | ✅ | ❌ (page blocked) |
+| View own audit rows (DB via RLS) | ✅ | ✅ | ✅ | ✅ | ✅ ¹ |
 | View all `user` role rows | ✅ | ✅ | ❌ | ❌ | ❌ |
 | View all `admin` role rows | ✅ | ✅ | ❌ | ❌ | ❌ |
 | View all `viewer` role rows | ✅ | ✅ | ❌ | ❌ | ❌ |
 | View all `guest` role rows | ✅ | ✅ | ❌ | ❌ | ❌ |
 | View `global_admin` role rows | ✅ | ❌ | ❌ | ❌ | ❌ |
+
+> ¹ **Guest DB-level note:** The RLS policy `"Users see own"` has no role restriction — it evaluates `user_id = auth.uid()` for all authenticated users, including guest. Guest rows are readable at the database level. The frontend `/activity` page is blocked by the route guard for UX/product reasons, not by RLS. This is an intentional design choice (permissive at DB, restricted at UI).
 
 ### Audit Events Generated
 
@@ -123,7 +137,7 @@ graph TD
 ```sql
 CREATE TABLE public.auth_audit (
     id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id         UUID        NOT NULL,
+    user_id         UUID        NOT NULL REFERENCES auth.users(id),
     email           TEXT,
     role            TEXT,
     event           TEXT,
@@ -141,28 +155,61 @@ CREATE TABLE public.auth_audit (
 
 ---
 
-### 4.2 `public.audit_logs` — Generic Audit Log Table
+### 4.2 `public.audit_logs` — Cryptographic Audit Ledger
+
+> **Updated 2026-03-17:** Upgraded from a generic log table to a full cryptographic ledger with chain hashing, append-only enforcement, SHAP AI explainability columns, and before/after change tracking.
 
 ```sql
 CREATE TABLE public.audit_logs (
+    -- Core identity
     id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id         UUID        REFERENCES auth.users(id),
+
+    -- Action fields
     action          TEXT        NOT NULL,
     resource_type   TEXT        NOT NULL,
     resource_id     TEXT,
     details         JSONB,
+
+    -- Change tracking (added 2026-03-16)
+    previous_value  JSONB,       -- state before the action (PII-scrubbed)
+    new_value       JSONB,       -- state after the action (PII-scrubbed)
+
+    -- Request context
     ip_address      TEXT,
     user_agent      TEXT,
     created_at      TIMESTAMPTZ DEFAULT now(),
-    integrity_hash  TEXT         -- SHA-256 of: user_id, action, resource_type, resource_id, created_at
+
+    -- Integrity (row-level hash, computed by application)
+    integrity_hash  TEXT,        -- SHA-256 of all non-PII fields including SHAP data
+
+    -- Cryptographic ledger (added 2026-03-17)
+    sequence_num    BIGINT GENERATED ALWAYS AS IDENTITY,  -- monotonic insert order
+    chain_hash      TEXT,        -- SHA-256(prev_chain_hash ∥ integrity_hash), set by DB trigger
+
+    -- AI Explainability / SHAP (added 2026-03-17, nullable — AI decisions only)
+    shap_values     JSONB,       -- {feature_name: shap_float, ...}
+    model_id        TEXT,        -- model identifier (e.g. "fraud-detector-v3")
+    prediction      JSONB,       -- model output / decision outcome
+    reasoning       TEXT         -- auto-generated human-readable SHAP explanation
 );
 
+-- Standard indexes
 CREATE INDEX idx_audit_logs_user_id       ON public.audit_logs (user_id);
 CREATE INDEX idx_audit_logs_resource_type ON public.audit_logs (resource_type);
 CREATE INDEX idx_audit_logs_created_at    ON public.audit_logs (created_at DESC);
+CREATE INDEX idx_audit_logs_resource_id   ON public.audit_logs USING GIN (resource_id);
+
+-- Ledger indexes (added 2026-03-17)
+CREATE INDEX idx_audit_logs_sequence_num  ON public.audit_logs (sequence_num DESC);
+CREATE INDEX idx_audit_logs_model_id      ON public.audit_logs (model_id) WHERE model_id IS NOT NULL;
 ```
 
 **Row-Level Security:** ENABLED
+
+**Append-Only Enforcement:** `BEFORE UPDATE` and `BEFORE DELETE` triggers on `audit_logs` raise an exception — rows cannot be modified or deleted after insertion. This is enforced at the database level, not just RLS.
+
+**Chain Hash Trigger:** `compute_audit_chain_hash()` fires `BEFORE INSERT`, acquires an advisory lock to serialize concurrent inserts, and sets `chain_hash = SHA-256(prev_chain_hash ∥ integrity_hash)`. The genesis block uses the seed `'GENESIS'`.
 
 ---
 
@@ -266,10 +313,18 @@ erDiagram
         text resource_type
         text resource_id
         jsonb details
+        jsonb previous_value
+        jsonb new_value
         text ip_address
         text user_agent
         timestamptz created_at
         text integrity_hash
+        bigint sequence_num
+        text chain_hash
+        jsonb shap_values
+        text model_id
+        jsonb prediction
+        text reasoning
     }
 
     DEVICES {
@@ -314,7 +369,7 @@ erDiagram
 classDiagram
     class auth_audit {
         +UUID id [PK]
-        +UUID user_id [NOT NULL]
+        +UUID user_id [FK → auth.users, NOT NULL]
         +TEXT email
         +TEXT role
         +TEXT event
@@ -333,10 +388,18 @@ classDiagram
         +TEXT resource_type [NOT NULL]
         +TEXT resource_id
         +JSONB details
+        +JSONB previous_value
+        +JSONB new_value
         +TEXT ip_address
         +TEXT user_agent
         +TIMESTAMPTZ created_at
         +TEXT integrity_hash
+        +BIGINT sequence_num [IDENTITY, monotonic]
+        +TEXT chain_hash [set by DB trigger]
+        +JSONB shap_values [AI decisions only]
+        +TEXT model_id [AI decisions only]
+        +JSONB prediction [AI decisions only]
+        +TEXT reasoning [AI decisions only]
     }
 
     class user_roles {
@@ -395,8 +458,7 @@ flowchart TD
 
     CHK -->|has role: global_admin| GA_OK[✅ See ALL rows\nfrom ALL roles]
     CHK -->|has role: admin| ADMIN_CHK{Row's role field}
-    CHK -->|has role: user/viewer| SELF[✅ See rows WHERE\nuser_id = auth.uid]
-    CHK -->|has role: guest| NO[❌ No rows returned]
+    CHK -->|has role: user/viewer/guest| SELF[✅ See own rows WHERE\nuser_id = auth.uid\nNote: guest frontend page\nis blocked by route guard]
 
     ADMIN_CHK -->|admin, user, viewer, guest| ADMIN_OK[✅ Row returned]
     ADMIN_CHK -->|global_admin| ADMIN_BLOCK[❌ Row hidden from admin]
@@ -422,7 +484,7 @@ flowchart TD
 |-------|------------|-----------|-----|-----------|
 | `auth_audit` | Users insert own | INSERT | Any authenticated | `auth.uid() = user_id` |
 | `auth_audit` | Users see own | SELECT | user/viewer/guest | `user_id = auth.uid()` |
-| `auth_audit` | Admins see user+admin | SELECT | admin | `role IN ('admin','user','viewer','guest')` |
+| `auth_audit` | Admins see all except global_admin | SELECT | admin | `role IN ('admin','user','viewer','guest')` |
 | `auth_audit` | Global admins see all | SELECT | global_admin | No restriction |
 | `audit_logs` | System can insert | INSERT | Any | `true` (system writes) |
 | `audit_logs` | Users see own | SELECT | Any | `auth.uid() = user_id` |
@@ -448,13 +510,19 @@ flowchart LR
 
     subgraph SUPA["Supabase"]
         AA[(auth_audit\ntable)]
-        AL[(audit_logs\ntable)]
+        AL[(audit_logs\nCryptographic Ledger)]
         RLS{RLS Policies}
+        TRIGGER[compute_audit_chain_hash\nBEFORE INSERT trigger\nSHA-256 chain]
+        IMMUTE[prevent_audit_modification\nBEFORE UPDATE/DELETE trigger\nAppend-only enforcement]
     end
 
     subgraph BACKEND["FastAPI Backend"]
         MW[RequestLoggingMiddleware\nStructlog JSON logs]
         LOGFILE[logs/app.log]
+        AUDIT_FN[insert_audit_log\nSHA-256 integrity_hash\nPII scrubbing]
+        SHAP_FN[generate_shap_reasoning\nTop-N SHAP features\nHuman-readable explanation]
+        AI_FN[log_ai_decision_audit\nCombines SHAP + audit write]
+        ROUTES[API Routes\nadmin, device, tenant\npod_activation]
     end
 
     AUTH -->|1. User logs in| HASH
@@ -470,14 +538,27 @@ flowchart LR
     PAR -->|3. supabase.from auth_audit .insert| RLS
 
     RLS -->|4. Policy check passed| AA
+    RLS -->|4. Policy check passed| AL
+
+    ROUTES -->|5. Action triggered| AUDIT_FN
+    AUDIT_FN -->|6. Compute SHA-256 integrity_hash| AUDIT_FN
+    AUDIT_FN -->|7. INSERT row| AL
+    AL -->|8. BEFORE INSERT trigger fires| TRIGGER
+    TRIGGER -->|9. chain_hash = SHA-256\nprev_chain_hash + integrity_hash| AL
+    IMMUTE -->|guards both tables| AA
+    IMMUTE -->|guards both tables| AL
+
+    SHAP_FN -->|SHAP explanation text| AI_FN
+    AI_FN -->|calls| AUDIT_FN
 
     MW -->|HTTP request log| LOGFILE
 
     subgraph VIEWER["Activity Page"]
-        ACT[Activity.tsx\nFetches & renders rows]
+        ACT[Activity.tsx\nAuth Events tab\nSystem Events tab\nSHAP factors inline]
     end
 
-    AA -->|5. SELECT filtered by RLS| ACT
+    AA -->|SELECT filtered by RLS| ACT
+    AL -->|GET /api/activity/system\nfiltered by role| ACT
 ```
 
 ---
@@ -562,7 +643,7 @@ sequenceDiagram
     else Caller is user / viewer
         RLS-->>ACT: Rows WHERE user_id = auth.uid()
     else Caller is guest
-        RLS-->>ACT: 0 rows (policy not matched)
+        RLS-->>ACT: Guest cannot reach this page\n(route guard redirects to / before query)\nDirect DB query would return own rows\nvia "Users see own" policy (user_id = auth.uid())
     end
 
     ACT->>ACT: setRows(data)\nRender table with badges
@@ -627,6 +708,8 @@ graph TB
 
 ## 13. Audit Integrity Hash Flow
 
+### 13.1 `auth_audit` — Frontend SHA-256 Hash (`auditHash.ts`)
+
 ```mermaid
 flowchart LR
     subgraph INPUT["Hash Input Fields (NO PII)"]
@@ -652,11 +735,58 @@ flowchart LR
     STORED --> VERIFY[Future Verification:\nRecompute hash from row\nCompare to stored value\nMismatch = tampered!]
 ```
 
-### Why Integrity Hash Matters
+### 13.2 `audit_logs` — Backend SHA-256 Hash + Cryptographic Chain (`supabase.py` + DB trigger)
 
-- Any modification to a row's `user_id`, `role`, `event`, `action_code`, `outcome_code`, `resource_type`, `resource_id`, or `created_at` will cause the recomputed hash to differ from the stored `integrity_hash`.
-- This allows auditors to detect **post-write tampering** even if the row is somehow modified directly in the database.
-- Email is excluded from the hash to protect PII in the hash itself (email is still stored in the row but not hashed).
+```mermaid
+flowchart TB
+    subgraph APP["Application Layer — insert_audit_log()"]
+        F1[user_id]
+        F2[action]
+        F3[resource_type]
+        F4[resource_id]
+        F5[ip_address]
+        F6[user_agent]
+        F7[created_at]
+        F8[shap_values]
+        F9[model_id]
+        F10[prediction]
+        F11[reasoning]
+
+        subgraph EXCL["Excluded from integrity_hash (PII)"]
+            X1[previous_value PII-scrubbed separately]
+            X2[new_value PII-scrubbed separately]
+        end
+
+        F1 & F2 & F3 & F4 & F5 & F6 & F7 & F8 & F9 & F10 & F11 --> CONCAT[JSON-serialize all fields]
+        CONCAT --> SHA256A[hashlib.sha256\nintegrity_hash]
+    end
+
+    subgraph DB["Database Layer — compute_audit_chain_hash() TRIGGER"]
+        SHA256A -->|INSERT row| LOCK[pg_advisory_xact_lock\nserialize concurrent inserts]
+        LOCK --> PREV[SELECT chain_hash\nFROM audit_logs\nORDER BY sequence_num DESC\nLIMIT 1]
+        PREV -->|first row: prev = GENESIS| CHAIN[chain_hash = SHA-256\nprev_chain_hash + integrity_hash]
+        CHAIN --> ROW[Row stored with\nsequence_num auto-assigned\nchain_hash set by trigger]
+    end
+
+    subgraph VERIFY["Ledger Verification — verify_audit_ledger()"]
+        ROW -->|walk all rows in sequence order| WALK[Re-derive each chain_hash\nfrom scratch]
+        WALK -->|stored = computed| VALID[is_valid = TRUE]
+        WALK -->|stored ≠ computed| INVALID[is_valid = FALSE\nrow was tampered]
+        WALK -->|chain_hash IS NULL| SENTINEL[is_valid = NULL\npre-migration sentinel row]
+    end
+```
+
+### Why the Two-Layer Hash Matters
+
+| Layer | Table | Computed By | Covers | Detects |
+|-------|-------|------------|--------|---------|
+| `integrity_hash` | `auth_audit`, `audit_logs` | Application (Python / JS) | All non-PII fields of **one row** | Single-row tampering |
+| `chain_hash` | `audit_logs` only | DB trigger | Links **every row** to predecessor | Row insertion, deletion, or reordering anywhere in history |
+
+- Any modification to a row's fields breaks its `integrity_hash`.
+- Any insertion, deletion, or reordering of rows breaks the `chain_hash` of every subsequent row.
+- For `auth_audit`, email is excluded from the hash to protect PII (email is stored in the row but not hashed).
+- For `audit_logs`, SHAP values (`shap_values`, `model_id`, `prediction`, `reasoning`) are **included** in `integrity_hash` — tampering with AI explainability data is detectable.
 
 ---
 
@@ -675,13 +805,13 @@ flowchart LR
 
 ### Action Codes
 
-| Code | Meaning | Used For |
-|------|---------|---------|
-| `C` | Create | Creating new resources |
-| `R` | Read | Reading/viewing records |
-| `U` | Update | Modifying existing records (pod approve/reject) |
-| `D` | Delete | Deleting records |
-| `E` | Execute | Executing operations (login, logout) |
+| Code | Meaning | Used For | Status |
+|------|---------|---------|--------|
+| `C` | Create | Creating new resources (e.g. user creation events) | **Planned** — no events assigned yet |
+| `R` | Read | Reading/viewing records (e.g. document view events) | **Planned** — no events assigned yet |
+| `U` | Update | Modifying existing records | **Active** — `approve_pod`, `reject_pod` |
+| `D` | Delete | Deleting records | **Planned** — no events assigned yet |
+| `E` | Execute | Executing operations | **Active** — `login`, `logout` |
 
 ### Outcome Codes
 
@@ -714,16 +844,20 @@ quadrantChart
 
 | Data Scope | global_admin | admin | user | viewer | guest |
 |-----------|:---:|:---:|:---:|:---:|:---:|
-| Own `auth_audit` rows | ✅ | ✅ | ✅ | ✅ | ❌ (page blocked) |
+| Own `auth_audit` rows (DB via RLS) | ✅ | ✅ | ✅ | ✅ | ✅ ¹ |
 | All `user` role rows | ✅ | ✅ | ❌ | ❌ | ❌ |
-| All `admin` role rows | ✅ | ✅ | ❌ | ❌ | ❌ |
+| All `admin` role rows | ✅ | ✅ ² | ❌ | ❌ | ❌ |
 | All `viewer` role rows | ✅ | ✅ | ❌ | ❌ | ❌ |
 | All `guest` role rows | ✅ | ✅ | ❌ | ❌ | ❌ |
 | `global_admin` role rows | ✅ | ❌ | ❌ | ❌ | ❌ |
 | All `audit_logs` rows | ✅ | ✅ | ❌ | ❌ | ❌ |
-| Own `audit_logs` rows | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Own `audit_logs` rows (DB via RLS) | ✅ | ✅ | ✅ | ✅ | ✅ ¹ |
 | `device_sync_logs` | ✅ | ✅ | ❌ | ❌ | ❌ |
 | `device_usage_logs` | ✅ | ✅ | ❌ | ❌ | ❌ |
+
+> ¹ **Guest DB access:** Guest users can read their own `auth_audit` and `audit_logs` rows at the database level via the `"Users see own"` RLS policy (`user_id = auth.uid()`). The frontend `/activity` page is blocked by the route guard — DB-level access exists but is not exposed in the UI. This is intentional: permissive at DB, restricted at UI layer.
+>
+> ² **Cross-admin visibility (intentional by design):** An `admin` can read the full audit trail of **other admins** within the same tenant (`role IN ('admin','user','viewer','guest')` includes all admin rows). This is deliberate for accountability — any admin action is visible to other admins and to `global_admin`. This is **not** a privilege escalation: admins cannot see `global_admin` rows, and cannot modify any audit row (no UPDATE/DELETE policy exists).
 
 ### API Endpoint Access Matrix
 
@@ -775,18 +909,21 @@ flowchart LR
     subgraph FASTAPI["FastAPI Application"]
         FACTORY[factory.py\napp = create_app()]
         MW[RequestLoggingMiddleware]
-        ROUTES[API Routes\nadmin.py, etc.]
+        ROUTES[API Routes\nadmin.py, device.py,\ntenants.py, pod_activation.py]
     end
 
     subgraph LOGGER["Logger Module (logger/__init__.py)"]
-        STRUCTLOG[structlog\nJSON formatter]
+        STRUCTLOG[structlog\nJSON formatter\nRotating file handler]
         PII[PII Scrubber — Pass 1\nField-name match → REDACTED\nMasks: email → u***@domain]
         PRESIDIO[Presidio — Pass 2\nContent scan: PERSON, EMAIL,\nPHONE, CREDIT_CARD, SSN,\nIBAN, LOCATION]
+        SHAP_ENGINE[SHAP Reasoning Engine\ngenerate_shap_reasoning\nTop-N feature contributions\nHuman-readable explanation]
+        AI_AUDIT[log_ai_decision_audit\nAsync convenience wrapper\nSHAP + audit ledger write]
     end
 
     subgraph OUTPUT["Log Output"]
         CONSOLE[Console\nJSON output]
-        FILE[logs/app.log\nJSON lines]
+        FILE[logs/app.log\nJSON lines\n10 MB rotate / 5 backups]
+        DB_AL[(audit_logs\nCryptographic Ledger)]
     end
 
     subgraph LOG_FIELDS["Per-Request Log Fields"]
@@ -798,6 +935,15 @@ flowchart LR
         LF6[duration_ms: float]
     end
 
+    subgraph AI_LOG_FIELDS["AI Decision Audit Fields"]
+        AF1[model_id: identifier]
+        AF2[shap_values: feature contributions]
+        AF3[prediction: model output]
+        AF4[reasoning: human-readable text]
+        AF5[integrity_hash: SHA-256]
+        AF6[chain_hash: ledger link]
+    end
+
     FACTORY --> MW
     MW --> ROUTES
     MW --> STRUCTLOG
@@ -806,21 +952,30 @@ flowchart LR
     PRESIDIO --> CONSOLE
     PRESIDIO --> FILE
 
+    ROUTES --> SHAP_ENGINE
+    SHAP_ENGINE --> AI_AUDIT
+    AI_AUDIT --> DB_AL
+    AI_AUDIT --> STRUCTLOG
+
     MW --> LOG_FIELDS
+    AI_AUDIT --> AI_LOG_FIELDS
 ```
 
 ### Backend vs Frontend Logging Comparison
 
-| Aspect | Frontend (`auth_audit` table) | Backend (`logs/app.log`) |
-|--------|------------------------------|-------------------------|
-| Storage | Supabase PostgreSQL | Local file system |
-| Format | Structured table rows | JSON lines (structlog) |
-| PII Handling — Pass 1 | Email stored, excluded from hash | Field-name keyword match → `[REDACTED]`; email → `u***@domain` |
-| PII Handling — Pass 2 | Regex content scan (SSN, card, phone, IBAN) | **Presidio** content scan (PERSON, EMAIL, PHONE, CREDIT_CARD, US_SSN, IBAN, LOCATION) |
-| Tamper Evidence | SHA-256 integrity hash | No hash (file-based) |
-| Queryable | Yes — via Supabase SQL/RLS | No — file read only |
-| Retention | Permanent (no delete policy) | File rotation (app-level) |
-| Visibility | Role-filtered via RLS | Server-side only |
+| Aspect | Frontend (`auth_audit` table) | Backend (`logs/app.log`) | Backend (`audit_logs` ledger) |
+|--------|------------------------------|-------------------------|-------------------------------|
+| Storage | Supabase PostgreSQL | Local file system | Supabase PostgreSQL |
+| Format | Structured table rows | JSON lines (structlog) | Structured rows + JSONB |
+| PII Handling — Pass 1 | Email stored, excluded from hash | Field-name keyword match → `[REDACTED]`; email → `u***@domain` | `_scrub_audit_value()` before storage |
+| PII Handling — Pass 2 | Regex content scan (SSN, card, phone, IBAN) | **Presidio** content scan (PERSON, EMAIL, PHONE, CREDIT_CARD, US_SSN, IBAN, LOCATION) | Presidio via `scrub_text()` |
+| Tamper Evidence | SHA-256 `integrity_hash` | No hash (file-based) | SHA-256 `integrity_hash` + SHA-256 `chain_hash` |
+| Append-Only | RLS (no DELETE policy) | File append-only (OS) | DB trigger raises exception on UPDATE/DELETE |
+| AI Explainability | — | — | `shap_values`, `model_id`, `prediction`, `reasoning` |
+| Queryable | Yes — via Supabase SQL/RLS | No — file read only | Yes — `GET /api/activity/system` |
+| Retention | Permanent (no delete policy) | File rotation (10 MB × 5 = 50 MB max) | Permanent (append-only, no delete policy) |
+| Visibility | Role-filtered via RLS | Server-side only | Role-filtered via FastAPI endpoint |
+| Compliance | ATNA | Operational debug | EU AI Act Art.12/13, SOC2 CC7.2 |
 
 ---
 
@@ -836,13 +991,14 @@ flowchart TB
 
     subgraph FRONTEND["Next.js / React Frontend"]
         AUTH_C[Auth.tsx]
-        ACT_C[Activity.tsx]
+        ACT_C[Activity.tsx\nAuth Events tab\nSystem Events tab\nShapFactors component]
         ADMIN_C[AdminDashboard.tsx]
         PAR_CC[PodActivationRequests.tsx]
-        HASH_L[auditHash.ts]
+        HASH_L[auditHash.ts\nSHA-256 integrity hash]
         SIDEBAR_C[AppSidebar.tsx]
         LAYOUT_CC[Layout.tsx]
         URH_H[useUserRole hook]
+        FE_LOG[frontend/logger/index.ts\nPino + PII scrubber]
     end
 
     subgraph SUPABASE["Supabase Platform"]
@@ -851,8 +1007,8 @@ flowchart TB
         end
         subgraph DB["PostgreSQL Database"]
             UR[user_roles]
-            AA_T[auth_audit]
-            AL_T[audit_logs]
+            AA_T[auth_audit\nSHA-256 integrity_hash]
+            AL_T[audit_logs\nCryptographic Ledger\nsequence_num + chain_hash\nSHAP columns\nAppend-only triggers]
             DSL[device_sync_logs]
             DUL[device_usage_logs]
         end
@@ -860,12 +1016,23 @@ flowchart TB
             RLS_AA[auth_audit policies]
             RLS_AL[audit_logs policies]
         end
+        subgraph TRIGGERS["DB Triggers"]
+            CHT[compute_audit_chain_hash\nBEFORE INSERT]
+            IMM[prevent_audit_modification\nBEFORE UPDATE/DELETE]
+        end
     end
 
     subgraph BACKEND["FastAPI Backend"]
-        ADMIN_R[admin routes]
-        LOG_MW[RequestLoggingMiddleware]
-        LOGF[logs/app.log]
+        ADMIN_R[admin.py routes\ncreate_user, set_role]
+        DEV_R[device.py routes]
+        TENANT_R[tenants.py routes]
+        POD_R[pod_activation.py routes]
+        ACT_R[activity.py\nGET /api/activity/system]
+        LOG_MW[RequestLoggingMiddleware\nstructlog JSON]
+        LOGF[logs/app.log\n10 MB rotate / 5 backups]
+        AUDIT_W[insert_audit_log\nsupabase.py\nSHA-256 + PII scrub]
+        SHAP_R[generate_shap_reasoning\nlogger/__init__.py]
+        AI_W[log_ai_decision_audit\nlogger/__init__.py]
     end
 
     GA_U -->|uses| FRONTEND
@@ -875,10 +1042,10 @@ flowchart TB
     FRONTEND -->|auth calls| AUTH_S
     FRONTEND -->|DB reads/writes via SDK| RLS_S
 
-    AUTH_C -->|on login| HASH_L
+    AUTH_C -->|on login/logout| HASH_L
     LAYOUT_CC -->|on logout| HASH_L
     PAR_CC -->|on approve/reject| HASH_L
-    HASH_L -->|SHA-256 hash| AA_T
+    HASH_L -->|integrity_hash| AA_T
 
     RLS_S -->|enforces| DB
     URH_H -->|reads| UR
@@ -887,8 +1054,23 @@ flowchart TB
     BACKEND -->|role check| SUPABASE
     LOG_MW -->|writes| LOGF
 
-    ACT_C -->|SELECT filtered| RLS_AA
+    ADMIN_R -->|calls| AUDIT_W
+    DEV_R -->|calls| AUDIT_W
+    TENANT_R -->|calls| AUDIT_W
+    POD_R -->|calls| AUDIT_W
+    SHAP_R -->|reasoning text| AI_W
+    AI_W -->|calls| AUDIT_W
+    AUDIT_W -->|INSERT| AL_T
+    AL_T -->|BEFORE INSERT| CHT
+    IMM -->|guards| AA_T
+    IMM -->|guards| AL_T
+
+    ACT_C -->|SELECT filtered by RLS| RLS_AA
     RLS_AA --> AA_T
+    ACT_C -->|GET /api/activity/system| ACT_R
+    ACT_R -->|SELECT + role filter| AL_T
+
+    FE_LOG -->|safe client logs| FRONTEND
 ```
 
 ---
@@ -975,27 +1157,350 @@ python -m spacy download en_core_web_sm
 
 ---
 
+---
+
+## 21. Cryptographic Audit Ledger
+
+> **Added:** 2026-03-17 — migrations `20260317000002_audit_ledger_shap.sql` and `20260317000003_verify_audit_ledger_fix.sql`
+
+### Overview
+
+The `audit_logs` table has been upgraded from a conventional log table to a **cryptographic append-only ledger** — analogous to a simplified blockchain. Every row is linked to its predecessor via a SHA-256 chain hash. Any attempt to insert, delete, reorder, or modify any row will invalidate every `chain_hash` from that row onward, making tampering detectable.
+
+### Chain Hash Formula
+
+```
+chain_hash[0]   = SHA-256("GENESIS" || integrity_hash[0])     -- genesis block
+chain_hash[N]   = SHA-256(chain_hash[N-1] || integrity_hash[N]) -- subsequent blocks
+```
+
+- `sequence_num`: `BIGINT GENERATED ALWAYS AS IDENTITY` — strictly monotonic, assigned by PostgreSQL, never supplied by the caller.
+- `chain_hash`: computed exclusively by the `compute_audit_chain_hash()` `BEFORE INSERT` trigger — the caller's value is always overwritten.
+- `integrity_hash`: SHA-256 over all non-PII application-layer fields including SHAP data (computed by `insert_audit_log()` in Python before the INSERT).
+
+### Ledger Trigger — `compute_audit_chain_hash()`
+
+```mermaid
+sequenceDiagram
+    participant APP as Application\n(insert_audit_log)
+    participant PG  as PostgreSQL
+    participant TRG as compute_audit_chain_hash\nBEFORE INSERT trigger
+
+    APP->>PG: INSERT INTO audit_logs (..., integrity_hash, shap_values, ...)
+    PG->>TRG: BEFORE INSERT fires
+    TRG->>TRG: pg_advisory_xact_lock\n(serialize concurrent inserts)
+    TRG->>PG: SELECT chain_hash\nFROM audit_logs\nORDER BY sequence_num DESC\nLIMIT 1
+    PG-->>TRG: prev_chain_hash\n(or GENESIS if first row)
+    TRG->>TRG: NEW.chain_hash = SHA-256\n(prev_chain_hash || integrity_hash)
+    TRG-->>PG: NEW row with chain_hash set
+    PG-->>APP: Row inserted with sequence_num auto-assigned
+```
+
+### Append-Only Enforcement — `prevent_audit_modification()`
+
+A separate trigger fires `BEFORE UPDATE` or `BEFORE DELETE` on both `auth_audit` and `audit_logs`:
+
+```sql
+-- Any UPDATE or DELETE raises an exception
+RAISE EXCEPTION 'Audit records are immutable and cannot be modified or deleted.';
+```
+
+This makes the append-only property a **hard database constraint**, not just an RLS policy gap.
+
+### Ledger Verification — `verify_audit_ledger()`
+
+Compliance auditors can verify the full ledger at any time:
+
+```sql
+-- Check for any tampered rows:
+SELECT * FROM public.verify_audit_ledger() WHERE NOT is_valid;
+
+-- Full ledger walk:
+SELECT * FROM public.verify_audit_ledger() ORDER BY sequence_num;
+```
+
+**Return columns:**
+
+| Column | Type | Meaning |
+|--------|------|---------|
+| `sequence_num` | BIGINT | Insert order |
+| `id` | UUID | Row identifier |
+| `stored_chain` | TEXT | `chain_hash` value stored in the row |
+| `computed_chain` | TEXT | Hash re-derived from scratch by the function |
+| `is_valid` | BOOLEAN | `TRUE` if match, `FALSE` if tampered, `NULL` if pre-migration sentinel |
+
+**Pre-migration rows** (inserted before the 2026-03-17 migration) have `chain_hash = NULL`. The fixed `verify_audit_ledger()` (migration `20260317000003`) returns these as sentinel rows (`is_valid = NULL`) without advancing `prev_chain`, so the post-migration chain verifies correctly from the first chained row onward.
+
+### Compliance Coverage
+
+| Standard | Article / Control | Requirement | Ledger Feature |
+|----------|------------------|-------------|----------------|
+| EU AI Act | Art. 12 — Record-keeping | AI systems must log decisions with sufficient detail | `shap_values`, `model_id`, `prediction`, `reasoning` stored per decision |
+| EU AI Act | Art. 13 — Transparency | Explainability for high-risk AI | Human-readable `reasoning` auto-generated from SHAP |
+| SOC 2 | CC7.2 — System Monitoring | Detect and respond to unauthorized activity | `verify_audit_ledger()` detects any tampered row |
+| NAIC AI Bulletin | AI model governance | Audit trail for AI-driven decisions | Full decision + SHAP trace per row |
+
+---
+
+## 22. SHAP AI Explainability Integration
+
+> **Added:** 2026-03-17 — `backend/app/logger/__init__.py` + migration `20260317000002_audit_ledger_shap.sql`
+
+### Overview
+
+When an AI model makes a decision (risk assessment, fraud detection, recommendation, etc.), the platform captures the **SHAP (SHapley Additive exPlanations)** feature contributions alongside the prediction and stores them in the `audit_logs` ledger. A human-readable explanation is auto-generated from the SHAP values and stored in the `reasoning` column.
+
+### SHAP Columns in `audit_logs`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `shap_values` | `JSONB` | `{"feature_name": shap_float, ...}` — positive values increase prediction, negative decrease |
+| `model_id` | `TEXT` | Human-readable model identifier, e.g. `"fraud-detector-v3"` |
+| `prediction` | `JSONB` | Model output — e.g. `{"label": "high_risk", "confidence": 0.87}` |
+| `reasoning` | `TEXT` | Auto-generated sentence — e.g. `"Model 'fraud-v3' predicted 'high_risk' (confidence 87.0%). Top factors: transaction_amount (+0.4200, ↑), account_age (-0.3100, ↓)."` |
+
+All four columns are **included in `integrity_hash`** — tampering with any AI explainability field is detectable.
+
+### `generate_shap_reasoning()` — Auto-explanation Generator
+
+Located in `backend/app/logger/__init__.py`.
+
+```python
+reasoning = generate_shap_reasoning(
+    shap_values={"transaction_amount": 0.42, "account_age": -0.31, "hour_of_day": 0.18},
+    prediction={"label": "high_risk", "confidence": 0.87},
+    model_id="fraud-v3",
+    top_n=5,
+)
+# → "Model 'fraud-v3' predicted 'high_risk' (confidence 87.0%). 
+#    Top factors: transaction_amount (+0.4200, ↑), account_age (-0.3100, ↓), hour_of_day (+0.1800, ↑)."
+```
+
+**Algorithm:**
+1. Sort features by absolute SHAP value (most influential first).
+2. Take top `N` features.
+3. Render `prediction` as a string — handles both scalar and dict (extracts `label`/`class` and `confidence`/`score`).
+4. Format each feature as `feature_name (±value, ↑/↓)`.
+5. Return a single sentence.
+
+### `log_ai_decision_audit()` — Convenience Wrapper
+
+Combines SHAP reasoning generation with the audit ledger write in one async call:
+
+```mermaid
+flowchart LR
+    CALL[Route handler calls\nlog_ai_decision_audit] --> SHAP{reasoning\nprovided?}
+    SHAP -->|No| GEN[generate_shap_reasoning\nTop-N features + direction]
+    SHAP -->|Yes| USE[Use supplied reasoning]
+    GEN --> NORM[Normalize prediction\nto JSONB dict]
+    USE --> NORM
+    NORM --> INSERT[insert_audit_log\nsupabase.py\ncompute integrity_hash\nINSERT to audit_logs]
+    INSERT --> TRIGGER[DB trigger sets chain_hash]
+    INSERT --> STRUCTLOG[structlog INFO line\nai_decision_audited\nmodel_id, action,\nresource_type, reasoning]
+```
+
+**Usage example:**
+
+```python
+await log_ai_decision_audit(
+    request=request,
+    user_id=current_user["id"],
+    action="risk_assessment",
+    resource_type="transaction",
+    resource_id=transaction_id,
+    model_id="fraud-detector-v3",
+    shap_values={"amount": 0.42, "account_age": -0.31, "hour": 0.18},
+    prediction={"label": "high_risk", "confidence": 0.87},
+)
+```
+
+### Frontend — `ShapFactors` Component (`Activity.tsx`)
+
+The System Events tab in `Activity.tsx` renders SHAP values inline for any row with `shap_values` populated:
+
+- Top 3 features sorted by absolute SHAP magnitude are displayed.
+- Positive values show a **green ↑** badge.
+- Negative values show a **red ↓** badge.
+- The full `reasoning` text is also displayed as an expandable AI Reasoning section.
+
+### SHAP Data Flow
+
+```mermaid
+sequenceDiagram
+    participant MODEL as AI Model / Route
+    participant LOGGER as logger/__init__.py
+    participant SUPA  as supabase.py
+    participant DB    as audit_logs table
+    participant ACT   as Activity.tsx
+    participant USER  as Admin / Global Admin
+
+    MODEL->>LOGGER: log_ai_decision_audit(shap_values, prediction, model_id)
+    LOGGER->>LOGGER: generate_shap_reasoning()\nSort by |SHAP|, take top 5\nBuild explanation sentence
+    LOGGER->>SUPA: insert_audit_log(shap_values, model_id, prediction, reasoning)
+    SUPA->>SUPA: Compute integrity_hash\n(includes all SHAP fields)
+    SUPA->>DB: INSERT row
+    DB->>DB: Trigger: chain_hash = SHA-256\n(prev_chain_hash || integrity_hash)
+    DB-->>SUPA: Row stored
+
+    USER->>ACT: Navigate to /activity → System Events tab
+    ACT->>ACT: GET /api/activity/system
+    ACT-->>USER: Table row with AI Reasoning text\nShapFactors inline badges\n(top 3 features, ↑/↓)
+```
+
+---
+
+## 23. Backend Audit Write Architecture
+
+> **Added:** `backend/app/core/supabase.py` — `insert_audit_log()` function
+
+### `insert_audit_log()` — Central Audit Write
+
+All backend routes call a single `insert_audit_log()` function to persist audit rows. This function:
+
+1. **Computes `integrity_hash`**: SHA-256 over all non-PII structured fields — `user_id`, `action`, `resource_type`, `resource_id`, `ip_address`, `user_agent`, `created_at`, `shap_values`, `model_id`, `prediction`, `reasoning`.
+2. **Scrubs PII** from `previous_value` and `new_value` using `_scrub_audit_value()` before storage.
+3. **Silently swallows exceptions** — audit failures never block the main request path.
+4. Writes to `audit_logs` via PostgREST; the DB trigger then sets `chain_hash`.
+
+### Routes That Write Audit Rows
+
+| Route | Action | Fields Captured |
+|-------|--------|----------------|
+| `POST /api/admin-create-user` | `create_user` | `new_value: {role}` |
+| `POST /api/admin-set-user-role` | `set_user_role` | `previous_value: {role}`, `new_value: {role}` |
+| `POST /api/admin-create-user` (password update) | `update_password` | No values stored |
+| `POST /api/v1/pods/approve` | `approve_pod` | Pod resource details |
+| `POST /api/v1/pods/reject` | `reject_pod` | Pod resource details |
+| Device registration / deactivation | `register_device`, `deactivate_device` | Device resource details |
+| Tenant provisioning | `create_tenant`, `provision_admin` | Tenant / user details |
+| AI model decisions (via `log_ai_decision_audit`) | Any | Full SHAP + prediction |
+
+### `GET /api/activity/system` — System Events Endpoint (`activity.py`)
+
+Returns paginated `audit_logs` rows with role-based filtering:
+
+| Caller Role | Rows Returned |
+|-------------|--------------|
+| `global_admin` | All rows |
+| `admin` | All rows |
+| `user` / `viewer` | Only own rows (`user_id = caller`) |
+| `guest` | 403 Forbidden |
+
+**Fields returned** (includes all ledger columns):
+`id`, `user_id`, `action`, `resource_type`, `resource_id`, `details`, `previous_value`, `new_value`, `ip_address`, `user_agent`, `created_at`, `integrity_hash`, `sequence_num`, `chain_hash`, `shap_values`, `model_id`, `prediction`, `reasoning`
+
+**Supported filters:** `action`, `resource_type`, `date_from`, `date_to`
+
+---
+
+## 24. Audit Ledger Verification Flow
+
+```mermaid
+flowchart TD
+    START([Compliance Audit Triggered]) --> CALL[Call verify_audit_ledger\nSELECT * FROM public.verify_audit_ledger]
+
+    CALL --> WALK[Walk all rows in\nsequence_num ASC order]
+
+    WALK --> CHK{chain_hash\nIS NULL?}
+    CHK -->|Yes| SENT[Return sentinel row\nis_valid = NULL\nPre-migration row\nDo NOT advance prev_chain]
+    CHK -->|No| COMPUTE[Compute expected_chain\n= SHA-256\nprev_chain + integrity_hash]
+
+    COMPUTE --> MATCH{stored_chain\n= expected?}
+    MATCH -->|Yes| VALID_R[Return row\nis_valid = TRUE\nAdvance prev_chain]
+    MATCH -->|No| TAMPER[Return row\nis_valid = FALSE\nTAMPERING DETECTED]
+
+    SENT --> NEXT[Next row]
+    VALID_R --> NEXT
+    TAMPER --> NEXT
+    NEXT --> WALK
+
+    subgraph RESULT["Audit Result"]
+        ALL_OK[All rows is_valid = TRUE\nor NULL\n✅ Ledger intact]
+        ANY_FALSE[Any row is_valid = FALSE\n❌ Tampering detected\nReport to security team]
+    end
+```
+
+### Interpreting Results
+
+| `is_valid` | Meaning | Action |
+|-----------|---------|--------|
+| `TRUE` | Row hash matches — not tampered | None required |
+| `FALSE` | Stored chain ≠ computed chain — row inserted, deleted, reordered, or modified | Investigate immediately |
+| `NULL` | Pre-migration row (`chain_hash = NULL`) — existed before the ledger upgrade | Document as expected, no action |
+
+---
+
+## 25. Migration History & Schema Evolution
+
+| Migration | Date | Changes |
+|-----------|------|---------|
+| `20260313091500_auth_audit_logs.sql` | 2026-03-13 | Created `auth_audit` table, ATNA codes, RLS policies, SHA-256 `integrity_hash` |
+| `20260316000000_auth_audit_user_id_fk.sql` | 2026-03-16 | Added FK `auth_audit.user_id → auth.users(id) ON DELETE CASCADE` |
+| `20260316000001_audit_immutability.sql` | 2026-03-16 | Added `prevent_audit_modification()` trigger — append-only enforcement for both tables; added `integrity_hash` to `audit_logs` |
+| `20260316000002_audit_logs_change_tracking.sql` | 2026-03-16 | Added `previous_value JSONB` and `new_value JSONB` to `audit_logs`; GIN index on `resource_id` |
+| `20260316000005_rename_auth_audit_admin_policy.sql` | 2026-03-16 | Renamed misleading RLS policy name (condition unchanged) |
+| `20260317000002_audit_ledger_shap.sql` | 2026-03-17 | **Major upgrade:** added `sequence_num`, `chain_hash`, `shap_values`, `model_id`, `prediction`, `reasoning`; `compute_audit_chain_hash()` trigger; `verify_audit_ledger()` function; `pgcrypto` extension; performance indexes |
+| `20260317000003_verify_audit_ledger_fix.sql` | 2026-03-17 | Hotfix: replaced `verify_audit_ledger()` to handle pre-migration `NULL chain_hash` rows as sentinels |
+
+### `audit_logs` Column Evolution
+
+```mermaid
+timeline
+    title audit_logs Schema Evolution
+    2026-03-13 : id, user_id, action, resource_type
+               : resource_id, details, ip_address
+               : user_agent, created_at
+    2026-03-16 : + integrity_hash (row-level SHA-256)
+               : + previous_value JSONB
+               : + new_value JSONB
+               : + Append-only trigger (immutability)
+    2026-03-17 : + sequence_num BIGINT IDENTITY
+               : + chain_hash TEXT (ledger link)
+               : + shap_values JSONB
+               : + model_id TEXT
+               : + prediction JSONB
+               : + reasoning TEXT
+               : + verify_audit_ledger() SQL function
+```
+
+---
+
 ## File Reference
 
 | File | Purpose |
 |------|---------|
-| [migrations/20260313091500_auth_audit_logs.sql](next-fastapi-conversion/supabase/migrations/20260313091500_auth_audit_logs.sql) | `auth_audit` table + RLS policies |
-| [migrations/20251116145514_...sql](next-fastapi-conversion/supabase/migrations/20251116145514_03b8c065-31f2-46c1-a062-a1f2e4363a04.sql) | `audit_logs` table + RLS policies |
+| [migrations/20260313091500_auth_audit_logs.sql](next-fastapi-conversion/supabase/migrations/20260313091500_auth_audit_logs.sql) | `auth_audit` table + RLS policies + ATNA codes |
+| [migrations/20251116145514_...sql](next-fastapi-conversion/supabase/migrations/20251116145514_03b8c065-31f2-46c1-a062-a1f2e4363a04.sql) | `audit_logs` table + RLS policies (original) |
+| [migrations/20260316000000_auth_audit_user_id_fk.sql](next-fastapi-conversion/supabase/migrations/20260316000000_auth_audit_user_id_fk.sql) | FK referential integrity for `auth_audit` |
+| [migrations/20260316000001_audit_immutability.sql](next-fastapi-conversion/supabase/migrations/20260316000001_audit_immutability.sql) | Append-only triggers + `integrity_hash` column on `audit_logs` |
+| [migrations/20260316000002_audit_logs_change_tracking.sql](next-fastapi-conversion/supabase/migrations/20260316000002_audit_logs_change_tracking.sql) | `previous_value` + `new_value` columns + GIN index |
+| [migrations/20260316000005_rename_auth_audit_admin_policy.sql](next-fastapi-conversion/supabase/migrations/20260316000005_rename_auth_audit_admin_policy.sql) | Policy name correction |
+| **[migrations/20260317000002_audit_ledger_shap.sql](next-fastapi-conversion/supabase/migrations/20260317000002_audit_ledger_shap.sql)** | **Cryptographic ledger: `sequence_num`, `chain_hash`, SHAP columns, chain trigger, `verify_audit_ledger()`** |
+| **[migrations/20260317000003_verify_audit_ledger_fix.sql](next-fastapi-conversion/supabase/migrations/20260317000003_verify_audit_ledger_fix.sql)** | **Hotfix: `verify_audit_ledger()` handles pre-migration NULL chain rows** |
 | [migrations/20260312193000_fnf9_schema_closure.sql](next-fastapi-conversion/supabase/migrations/20260312193000_fnf9_schema_closure.sql) | Role enum + `user_roles` + `roles` tables |
 | [migrations/20260312194000_fnf10_rls_hardening.sql](next-fastapi-conversion/supabase/migrations/20260312194000_fnf10_rls_hardening.sql) | RLS hardening pass |
-| [frontend/src/app-pages/Activity.tsx](next-fastapi-conversion/frontend/src/app-pages/Activity.tsx) | Activity log UI page |
-| [frontend/src/lib/auditHash.ts](next-fastapi-conversion/frontend/src/lib/auditHash.ts) | SHA-256 integrity hash utility |
+| [migrations/20260317100000_tenant_scope_rls_hardening.sql](next-fastapi-conversion/supabase/migrations/20260317100000_tenant_scope_rls_hardening.sql) | Tenant-scope RLS hardening for `app_users`, `tenants`, `user_roles`, and `devices` |
+| [frontend/src/app-pages/Activity.tsx](next-fastapi-conversion/frontend/src/app-pages/Activity.tsx) | Activity log UI page — Auth Events + System Events tabs, `ShapFactors` component |
+| [frontend/src/lib/auditHash.ts](next-fastapi-conversion/frontend/src/lib/auditHash.ts) | SHA-256 integrity hash utility (`auth_audit`) |
 | [frontend/src/app-pages/Auth.tsx](next-fastapi-conversion/frontend/src/app-pages/Auth.tsx) | Login/logout with audit writes |
 | [frontend/src/components/Layout.tsx](next-fastapi-conversion/frontend/src/components/Layout.tsx) | Logout audit event |
 | [frontend/src/components/admin/PodActivationRequests.tsx](next-fastapi-conversion/frontend/src/components/admin/PodActivationRequests.tsx) | Pod approve/reject with audit |
 | [frontend/src/components/AppSidebar.tsx](next-fastapi-conversion/frontend/src/components/AppSidebar.tsx) | Role-filtered navigation |
 | [frontend/src/hooks/useUserRole.ts](next-fastapi-conversion/frontend/src/hooks/useUserRole.ts) | Role detection hook |
-| [backend/app/routes/admin.py](next-fastapi-conversion/backend/app/routes/admin.py) | Admin API endpoints |
-| [backend/app/logger/__init__.py](next-fastapi-conversion/backend/app/logger/__init__.py) | Structured request logging — two-pass Presidio PII scrubber (field-name + NLP) |
+| [backend/app/routes/admin.py](next-fastapi-conversion/backend/app/routes/admin.py) | Admin API endpoints — writes audit rows with `previous_value`/`new_value` |
+| [backend/app/routes/activity.py](next-fastapi-conversion/backend/app/routes/activity.py) | `GET /api/activity/system` — serves `audit_logs` rows with SHAP fields |
+| [backend/app/routes/device.py](next-fastapi-conversion/backend/app/routes/device.py) | Device routes — writes audit rows |
+| [backend/app/routes/tenants.py](next-fastapi-conversion/backend/app/routes/tenants.py) | Tenant provisioning — writes audit rows |
+| [backend/app/routes/pod_activation.py](next-fastapi-conversion/backend/app/routes/pod_activation.py) | Pod approve/reject — writes audit rows |
+| [backend/tests/test_tenants_production.py](next-fastapi-conversion/backend/tests/test_tenants_production.py) | Tenant provisioning reliability, rollback, and idempotency tests |
+| [backend/tests/test_tenant_provisioning_sla.py](next-fastapi-conversion/backend/tests/test_tenant_provisioning_sla.py) | SLA evidence tests: warm-path `<3s` and onboarding metadata contract checks |
+| **[backend/app/core/supabase.py](next-fastapi-conversion/backend/app/core/supabase.py)** | **`insert_audit_log()` — central audit write: SHA-256, PII scrub, SHAP fields** |
+| **[backend/app/logger/__init__.py](next-fastapi-conversion/backend/app/logger/__init__.py)** | **`generate_shap_reasoning()`, `log_ai_decision_audit()` + structured request logging + two-pass Presidio PII scrubber** |
 | [backend/requirements.txt](next-fastapi-conversion/backend/requirements.txt) | presidio-analyzer, presidio-anonymizer, spacy, en-core-web-sm |
 | [frontend/src/logger/index.ts](next-fastapi-conversion/frontend/src/logger/index.ts) | Pino logger — two-pass PII scrubber (field-name + regex content scan) |
 
 ---
 
-*Documentation generated for Neura-Box Cloud — Activity Logs Feature*
+*Documentation generated for Fideon OS — Activity Logs Feature*
+*Updated 2026-03-17: Added Cryptographic Audit Ledger (sections 21–24), SHAP AI Explainability (section 22), Backend Audit Write Architecture (section 23), Migration History (section 25), tenant-scope RLS hardening, and provisioning SLA evidence tests.*
 *All diagrams use [Mermaid](https://mermaid.js.org/) syntax and render in GitHub, GitLab, and most Markdown viewers.*

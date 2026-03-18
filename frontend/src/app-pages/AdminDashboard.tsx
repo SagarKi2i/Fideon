@@ -7,7 +7,9 @@ import { ModelAllocationSection } from '@/components/admin/ModelAllocationSectio
 import { PodActivationRequests } from '@/components/admin/PodActivationRequests';
 import { useUserRole } from '@/hooks/useUserRole';
 import { GlobalAdminRoleManager } from '@/components/admin/GlobalAdminRoleManager';
+import { UserCreationRequests } from '@/components/admin/UserCreationRequests';
 import { Badge } from '@/components/ui/badge';
+import { REALTIME_DEVICE_EVENT } from '@/lib/realtimeEvents';
 
 interface DashboardStats {
   totalDevices: number;
@@ -96,7 +98,7 @@ const STAT_CARDS_TEMPLATE: Record<string, {
 };
 
 export default function AdminDashboard() {
-  const { isGlobalAdmin } = useUserRole();
+  const { isGlobalAdmin, isAdmin, role } = useUserRole();
   const [stats, setStats] = useState<DashboardStats>({
     totalDevices: 0,
     onlineDevices: 0,
@@ -225,17 +227,21 @@ export default function AdminDashboard() {
     fetchDashboardStats();
     fetchPairingInsights();
 
+    const handleDeviceRealtime = () => {
+      fetchDashboardStats();
+      fetchPairingInsights();
+    };
+    window.addEventListener(REALTIME_DEVICE_EVENT, handleDeviceRealtime);
+
     const pairingChannel = supabase
       .channel('admin-device-pairings-live')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'device_pairings' }, () => {
         fetchPairingInsights();
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'devices' }, () => {
-        fetchPairingInsights();
-      })
       .subscribe();
 
     return () => {
+      window.removeEventListener(REALTIME_DEVICE_EVENT, handleDeviceRealtime);
       supabase.removeChannel(pairingChannel);
     };
   }, [fetchDashboardStats, fetchPairingInsights]);
@@ -465,10 +471,19 @@ export default function AdminDashboard() {
         <ModelAllocationSection />
       </div>
 
-      {/* Global Admin extras */}
-      {isGlobalAdmin && (
+      {/* User creation requests inbox — visible to admin and global_admin */}
+      {isAdmin && (
         <div className="mt-6 animate-fade-in">
-          <GlobalAdminRoleManager />
+          <UserCreationRequests viewerRole={isGlobalAdmin ? "global_admin" : "admin"} />
+        </div>
+      )}
+
+      {/* Role / User management — visible to admin and global_admin */}
+      {isAdmin && (
+        <div className="mt-6 animate-fade-in">
+          <GlobalAdminRoleManager
+            currentUserRole={isGlobalAdmin ? "global_admin" : "admin"}
+          />
         </div>
       )}
     </div>

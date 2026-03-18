@@ -28,6 +28,9 @@ from app.core.config import (
 )
 
 logger = logging.getLogger(__name__)
+CONTENT_TYPE_JSON = "application/json"
+CONTENT_TYPE_SSE = "text/event-stream"
+DEFAULT_USER_PROMPT = "Please help the user."
 
 # LLMFallbackService (from llm_fallback folder — ported from LLM Fallback 3)
 # Handles: HuggingFace → Gemini → OpenAI → Claude via litellm after Groq/RunPod fail
@@ -77,6 +80,14 @@ async def _single_sse_stream(text: str, model_name: str) -> AsyncGenerator[bytes
     yield b"data: [DONE]\n\n"
 
 
+def _sse_response_headers(provider: str, model: str) -> dict[str, str]:
+    return {
+        "Content-Type": CONTENT_TYPE_SSE,
+        "x-llm-provider": provider,
+        "x-llm-model": model,
+    }
+
+
 async def _openai_compatible_stream(
     endpoint: str,
     api_key: str,
@@ -85,7 +96,7 @@ async def _openai_compatible_stream(
 ) -> tuple[int, dict[str, str], AsyncGenerator[bytes, None]]:
     headers = {
         "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
+        "Content-Type": CONTENT_TYPE_JSON,
     }
     if extra_headers:
         headers.update(extra_headers)
@@ -112,7 +123,7 @@ async def _openai_compatible_stream(
             await resp.aclose()
             await client.aclose()
 
-    return 200, {"Content-Type": "text/event-stream"}, iterator()
+    return 200, {"Content-Type": CONTENT_TYPE_SSE}, iterator()
 
 
 def _clean_bearer_token(raw_token: str) -> str:
@@ -130,36 +141,42 @@ def _runpod_auth_headers(runpod_token: str) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {runpod_token}",
         "x-api-key": runpod_token,
-        "Content-Type": "application/json",
+        "Content-Type": CONTENT_TYPE_JSON,
     }
 
 
-def _extract_runpod_text(data: dict[str, Any]) -> str:
-    # Handle common response payload shapes from /generate style endpoints.
-    direct_keys = ["response", "generated_text", "text", "output"]
-    for key in direct_keys:
+def _first_non_empty_text(data: dict[str, Any], keys: list[str]) -> str:
+    for key in keys:
         value = data.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
+    return ""
 
+
+def _text_from_choices(data: dict[str, Any]) -> str:
     choices = data.get("choices")
-    if isinstance(choices, list) and choices:
-        first = choices[0] if isinstance(choices[0], dict) else {}
-        message = first.get("message", {}) if isinstance(first, dict) else {}
-        content = message.get("content") if isinstance(message, dict) else None
-        if isinstance(content, str) and content.strip():
-            return content.strip()
-        text = first.get("text") if isinstance(first, dict) else None
-        if isinstance(text, str) and text.strip():
-            return text.strip()
+    if not (isinstance(choices, list) and choices):
+        return ""
+    first = choices[0] if isinstance(choices[0], dict) else {}
+    message = first.get("message", {}) if isinstance(first, dict) else {}
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    text = first.get("text") if isinstance(first, dict) else None
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    return ""
 
-    data_value = data.get("data")
-    if isinstance(data_value, dict):
-        for key in direct_keys:
-            value = data_value.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
 
+def _extract_runpod_text(data: dict[str, Any]) -> str:
+    direct_keys = ["response", "generated_text", "text", "output"]
+    for candidate in (
+        _first_non_empty_text(data, direct_keys),
+        _text_from_choices(data),
+        _first_non_empty_text(data.get("data", {}) if isinstance(data.get("data"), dict) else {}, direct_keys),
+    ):
+        if candidate:
+            return candidate
     raise RuntimeError("RunPod returned empty content")
 
 
@@ -172,7 +189,7 @@ async def _runpod_generate_text(payload: dict[str, Any], model_name: str) -> str
 
     prompt = _collect_text_from_messages(payload.get("messages", []))
     if not prompt:
-        prompt = "Please help the user."
+        prompt = DEFAULT_USER_PROMPT
 
     # RunPod /generate endpoints vary between deployments (query params vs JSON body).
     # Try common request shapes in order for better local/VM compatibility.
@@ -199,7 +216,7 @@ async def _runpod_generate_text(payload: dict[str, Any], model_name: str) -> str
                 errors.append(f"{resp.status_code}: {resp.text[:300]}")
                 continue
             content_type = (resp.headers.get("content-type") or "").lower()
-            if "application/json" in content_type:
+            if CONTENT_TYPE_JSON in content_type:
                 data = resp.json()
                 return _extract_runpod_text(data)
             text = resp.text.strip()
@@ -214,13 +231,13 @@ async def _offline_fallback_stream(payload: dict[str, Any]) -> tuple[int, dict[s
     if not prompt:
         prompt = _collect_text_from_messages(payload.get("messages", []))
     if not prompt:
-        prompt = "Please help the user."
+        prompt = DEFAULT_USER_PROMPT
     if not RUNPOD_GENERATE_URL:
         raise RuntimeError("RUNPOD_GENERATE_URL is not configured")
     runpod_token = _clean_bearer_token(FIDEON_SECRET_KEY or RUNPOD_API_KEY)
 
     async with httpx.AsyncClient(timeout=60) as client:
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": CONTENT_TYPE_JSON}
         if runpod_token:
             headers = _runpod_auth_headers(runpod_token)
         offline_resp = await client.post(
@@ -232,7 +249,7 @@ async def _offline_fallback_stream(payload: dict[str, Any]) -> tuple[int, dict[s
             raise RuntimeError(f"{offline_resp.status_code}: {offline_resp.text}")
 
         content_type = (offline_resp.headers.get("content-type") or "").lower()
-        if "application/json" in content_type:
+        if CONTENT_TYPE_JSON in content_type:
             data = offline_resp.json()
             offline_text = _extract_runpod_text(data)
         else:
@@ -240,21 +257,21 @@ async def _offline_fallback_stream(payload: dict[str, Any]) -> tuple[int, dict[s
 
     if not offline_text:
         raise RuntimeError("offline-llm returned empty response")
-    return 200, {"Content-Type": "text/event-stream"}, _single_sse_stream(offline_text, "offline-llm")
+    return 200, {"Content-Type": CONTENT_TYPE_SSE}, _single_sse_stream(offline_text, "offline-llm")
 
 
 async def _gemini_text(payload: dict[str, Any]) -> str:
     messages = payload.get("messages", [])
     merged = _collect_text_from_messages(messages)
     if not merged:
-        merged = "Please help the user."
+        merged = DEFAULT_USER_PROMPT
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     body = {"contents": [{"role": "user", "parts": [{"text": merged}]}]}
     params = {"key": GEMINI_API_KEY}
 
     async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(url, params=params, json=body, headers={"Content-Type": "application/json"})
+        resp = await client.post(url, params=params, json=body, headers={"Content-Type": CONTENT_TYPE_JSON})
         if resp.status_code >= 400:
             raise RuntimeError(f"{resp.status_code}: {resp.text}")
         data = resp.json()
@@ -277,7 +294,7 @@ async def _openai_text(payload: dict[str, Any]) -> str:
             json=body,
             headers={
                 "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
+                "Content-Type": CONTENT_TYPE_JSON,
             },
         )
         if resp.status_code >= 400:
@@ -303,7 +320,7 @@ async def _claude_text(payload: dict[str, Any]) -> str:
         claude_messages.append({"role": mapped_role, "content": str(content)})
 
     if not claude_messages:
-        claude_messages = [{"role": "user", "content": "Please help the user."}]
+        claude_messages = [{"role": "user", "content": DEFAULT_USER_PROMPT}]
 
     body: dict[str, Any] = {
         "model": CLAUDE_MODEL,
@@ -320,7 +337,7 @@ async def _claude_text(payload: dict[str, Any]) -> str:
             headers={
                 "x-api-key": ANTHROPIC_API_KEY,
                 "anthropic-version": "2023-06-01",
-                "Content-Type": "application/json",
+                "Content-Type": CONTENT_TYPE_JSON,
             },
         )
         if resp.status_code >= 400:
@@ -334,168 +351,153 @@ async def _claude_text(payload: dict[str, Any]) -> str:
     return text
 
 
+async def _try_groq_stream(stream_payload: dict[str, Any], model_name: str) -> tuple[int, dict[str, str], AsyncGenerator[bytes, None]]:
+    groq_payload = {**stream_payload, "model": model_name or stream_payload.get("model")}
+    status, headers, stream = await _openai_compatible_stream(GROQ_OPENAI_COMPAT_URL, GROQ_API_KEY, groq_payload)
+    logger.info(f"LLM success provider=groq model={groq_payload.get('model')}")
+    return status, {**headers, **_sse_response_headers("groq", str(groq_payload.get("model") or ""))}, stream
+
+
+async def _try_runpod_generate_stream(payload: dict[str, Any], model_name: str) -> tuple[int, dict[str, str], AsyncGenerator[bytes, None]]:
+    text = await _runpod_generate_text(payload, model_name)
+    logger.info(f"LLM success provider=runpod_generate model={model_name}")
+    return 200, _sse_response_headers("runpod_generate", model_name), _single_sse_stream(text, model_name)
+
+
+async def _try_runpod_openai_compat_stream(
+    stream_payload: dict[str, Any],
+    runpod_token: str,
+    model_name: str,
+) -> tuple[int, dict[str, str], AsyncGenerator[bytes, None]]:
+    runpod_payload = {**stream_payload, "model": model_name}
+    status, headers, stream = await _openai_compatible_stream(
+        RUNPOD_OPENAI_COMPAT_URL,
+        runpod_token,
+        runpod_payload,
+        extra_headers={"x-api-key": runpod_token},
+    )
+    logger.info(f"LLM success provider=runpod_openai_compat model={model_name}")
+    return status, {**headers, **_sse_response_headers("runpod_openai_compat", model_name)}, stream
+
+
+async def _try_offline_stream(payload: dict[str, Any]) -> tuple[int, dict[str, str], AsyncGenerator[bytes, None]]:
+    status, headers, stream = await _offline_fallback_stream(payload)
+    logger.info("LLM success provider=offline-llm model=offline-llm")
+    return status, {**headers, **_sse_response_headers("offline-llm", "offline-llm")}, stream
+
+
+async def _try_litellm_fallback_stream(payload: dict[str, Any]) -> tuple[int, dict[str, str], AsyncGenerator[bytes, None]] | None:
+    if not (_FALLBACK_SERVICE_AVAILABLE and _fallback_service is not None):
+        return None
+    fb_chain = build_default_fallback_chain()
+    if not fb_chain:
+        return None
+    fb_result = await _fallback_service.execute(messages=payload.get("messages", []), models=fb_chain)
+    if not (fb_result.success and fb_result.content):
+        if fb_result.errors:
+            raise RuntimeError(" | ".join(fb_result.errors))
+        return None
+    logger.info(f"LLMFallbackService succeeded via {fb_result.model} (fallbacks={fb_result.fallback_count})")
+    return 200, _sse_response_headers("litellm-fallback", str(fb_result.model or "")), _single_sse_stream(
+        fb_result.content, fb_result.model
+    )
+
+
+async def _try_direct_provider_stream(payload: dict[str, Any], provider: str) -> tuple[int, dict[str, str], AsyncGenerator[bytes, None]]:
+    if provider == "gemini":
+        text = await _gemini_text(payload)
+        logger.info(f"LLM success provider=gemini model={GEMINI_MODEL}")
+        return 200, _sse_response_headers("gemini", GEMINI_MODEL), _single_sse_stream(text, GEMINI_MODEL)
+    if provider == "openai":
+        text = await _openai_text(payload)
+        logger.info(f"LLM success provider=openai model={OPENAI_MODEL}")
+        return 200, _sse_response_headers("openai", OPENAI_MODEL), _single_sse_stream(text, OPENAI_MODEL)
+    text = await _claude_text(payload)
+    logger.info(f"LLM success provider=claude model={CLAUDE_MODEL}")
+    return 200, _sse_response_headers("claude", CLAUDE_MODEL), _single_sse_stream(text, CLAUDE_MODEL)
+
+
+async def _recorded_attempt(label: str, errors: list[str], func):
+    try:
+        return await func()
+    except Exception as exc:
+        errors.append(f"{label}: {exc}")
+        return None
+
+
+async def _attempt_primary_chain(
+    payload: dict[str, Any],
+    stream_payload: dict[str, Any],
+    model_name: str,
+    runpod_token: str,
+    errors: list[str],
+) -> tuple[int, dict[str, str], AsyncGenerator[bytes, None]] | None:
+    if GROQ_API_KEY:
+        result = await _recorded_attempt("groq", errors, lambda: _try_groq_stream(stream_payload, model_name))
+        if result:
+            return result
+
+    if runpod_token and RUNPOD_GENERATE_URL:
+        for model, label in ((RUNPOD_MODEL_LLAMA, "runpod-generate-llama"), (RUNPOD_MODEL_MISTRAL, "runpod-generate-mistral")):
+            result = await _recorded_attempt(label, errors, lambda m=model: _try_runpod_generate_stream(payload, m))
+            if result:
+                return result
+
+    if runpod_token and RUNPOD_OPENAI_COMPAT_URL:
+        for model, label in ((RUNPOD_MODEL_LLAMA, "runpod-llama"), (RUNPOD_MODEL_MISTRAL, "runpod-mistral")):
+            result = await _recorded_attempt(
+                label,
+                errors,
+                lambda m=model: _try_runpod_openai_compat_stream(stream_payload, runpod_token, m),
+            )
+            if result:
+                return result
+
+    if str(OFFLINE_LLM_FALLBACK_ENABLED).strip().lower() in {"1", "true", "yes", "on"}:
+        result = await _recorded_attempt("offline-llm", errors, lambda: _try_offline_stream(payload))
+        if result:
+            return result
+    return None
+
+
+async def _attempt_direct_http_chain(
+    payload: dict[str, Any],
+    errors: list[str],
+) -> tuple[int, dict[str, str], AsyncGenerator[bytes, None]] | None:
+    if GEMINI_API_KEY:
+        result = await _recorded_attempt("gemini", errors, lambda: _try_direct_provider_stream(payload, "gemini"))
+        if result:
+            return result
+    if OPENAI_API_KEY:
+        result = await _recorded_attempt("openai", errors, lambda: _try_direct_provider_stream(payload, "openai"))
+        if result:
+            return result
+    if ANTHROPIC_API_KEY:
+        result = await _recorded_attempt("claude", errors, lambda: _try_direct_provider_stream(payload, "claude"))
+        if result:
+            return result
+    return None
+
+
 async def llm_stream(payload: dict[str, Any]) -> tuple[int, dict[str, str], AsyncGenerator[bytes, None]]:
     model_name = str(payload.get("model") or "")
     stream_payload = {**payload, "stream": True}
     errors: list[str] = []
 
-    # Priority requested by user: Groq -> RunPod llama -> RunPod mistral -> Gemini -> OpenAI -> Claude
-    if GROQ_API_KEY:
-        try:
-            groq_payload = {**stream_payload, "model": model_name or stream_payload.get("model")}
-            status, headers, stream = await _openai_compatible_stream(GROQ_OPENAI_COMPAT_URL, GROQ_API_KEY, groq_payload)
-            headers = {
-                **headers,
-                "x-llm-provider": "groq",
-                "x-llm-model": str(groq_payload.get("model") or ""),
-            }
-            logger.info(f"LLM success provider=groq model={groq_payload.get('model')}")
-            return status, headers, stream
-        except Exception as exc:
-            errors.append(f"groq: {exc}")
-
     runpod_token = _clean_bearer_token(FIDEON_SECRET_KEY or RUNPOD_API_KEY)
-    if runpod_token and RUNPOD_GENERATE_URL:
-        try:
-            text = await _runpod_generate_text(payload, RUNPOD_MODEL_LLAMA)
-            logger.info(f"LLM success provider=runpod_generate model={RUNPOD_MODEL_LLAMA}")
-            return 200, {
-                "Content-Type": "text/event-stream",
-                "x-llm-provider": "runpod_generate",
-                "x-llm-model": RUNPOD_MODEL_LLAMA,
-            }, _single_sse_stream(text, RUNPOD_MODEL_LLAMA)
-        except Exception as exc:
-            errors.append(f"runpod-generate-llama: {exc}")
+    primary_result = await _attempt_primary_chain(payload, stream_payload, model_name, runpod_token, errors)
+    if primary_result:
+        return primary_result
 
-        try:
-            text = await _runpod_generate_text(payload, RUNPOD_MODEL_MISTRAL)
-            logger.info(f"LLM success provider=runpod_generate model={RUNPOD_MODEL_MISTRAL}")
-            return 200, {
-                "Content-Type": "text/event-stream",
-                "x-llm-provider": "runpod_generate",
-                "x-llm-model": RUNPOD_MODEL_MISTRAL,
-            }, _single_sse_stream(text, RUNPOD_MODEL_MISTRAL)
-        except Exception as exc:
-            errors.append(f"runpod-generate-mistral: {exc}")
+    fallback_result = await _recorded_attempt("litellm-fallback", errors, lambda: _try_litellm_fallback_stream(payload))
+    if fallback_result:
+        return fallback_result
 
-    if runpod_token and RUNPOD_OPENAI_COMPAT_URL:
-        try:
-            runpod_llama_payload = {**stream_payload, "model": RUNPOD_MODEL_LLAMA}
-            status, headers, stream = await _openai_compatible_stream(
-                RUNPOD_OPENAI_COMPAT_URL,
-                runpod_token,
-                runpod_llama_payload,
-                extra_headers={"x-api-key": runpod_token},
-            )
-            headers = {
-                **headers,
-                "x-llm-provider": "runpod_openai_compat",
-                "x-llm-model": RUNPOD_MODEL_LLAMA,
-            }
-            logger.info(f"LLM success provider=runpod_openai_compat model={RUNPOD_MODEL_LLAMA}")
-            return status, headers, stream
-        except Exception as exc:
-            errors.append(f"runpod-llama: {exc}")
+    if not (_FALLBACK_SERVICE_AVAILABLE and _fallback_service is not None):
+        direct_result = await _attempt_direct_http_chain(payload, errors)
+        if direct_result:
+            return direct_result
 
-        try:
-            runpod_mistral_payload = {**stream_payload, "model": RUNPOD_MODEL_MISTRAL}
-            status, headers, stream = await _openai_compatible_stream(
-                RUNPOD_OPENAI_COMPAT_URL,
-                runpod_token,
-                runpod_mistral_payload,
-                extra_headers={"x-api-key": runpod_token},
-            )
-            headers = {
-                **headers,
-                "x-llm-provider": "runpod_openai_compat",
-                "x-llm-model": RUNPOD_MODEL_MISTRAL,
-            }
-            logger.info(f"LLM success provider=runpod_openai_compat model={RUNPOD_MODEL_MISTRAL}")
-            return status, headers, stream
-        except Exception as exc:
-            errors.append(f"runpod-mistral: {exc}")
-
-    if str(OFFLINE_LLM_FALLBACK_ENABLED).strip().lower() in {"1", "true", "yes", "on"}:
-        try:
-            status, headers, stream = await _offline_fallback_stream(payload)
-            headers = {
-                **headers,
-                "x-llm-provider": "offline-llm",
-                "x-llm-model": "offline-llm",
-            }
-            logger.info("LLM success provider=offline-llm model=offline-llm")
-            return status, headers, stream
-        except Exception as offline_exc:
-            errors.append(f"offline-llm: {offline_exc}")
-
-    # ── LLMFallbackService chain (ported from LLM Fallback 3) ─────────────
-    # Handles: HuggingFace → Gemini → OpenAI → Claude via litellm
-    # Falls back to individual httpx calls if litellm is not installed.
-    if _FALLBACK_SERVICE_AVAILABLE and _fallback_service is not None:
-        try:
-            fb_chain = build_default_fallback_chain()
-            if fb_chain:
-                fb_result = await _fallback_service.execute(
-                    messages=payload.get("messages", []),
-                    models=fb_chain,
-                )
-                if fb_result.success and fb_result.content:
-                    logger.info(f"LLMFallbackService succeeded via {fb_result.model} "
-                                f"(fallbacks={fb_result.fallback_count})")
-                    return (
-                        200,
-                        {
-                            "Content-Type": "text/event-stream",
-                            "x-llm-provider": "litellm-fallback",
-                            "x-llm-model": str(fb_result.model or ""),
-                        },
-                        _single_sse_stream(fb_result.content, fb_result.model),
-                    )
-                if fb_result.errors:
-                    for e in fb_result.errors:
-                        errors.append(f"litellm-fallback/{e}")
-        except Exception as fb_exc:
-            errors.append(f"litellm-fallback: {fb_exc}")
-            logger.warning(f"LLMFallbackService chain error: {fb_exc}")
-    else:
-        # litellm not available — use direct httpx calls as before
-        if GEMINI_API_KEY:
-            try:
-                text = await _gemini_text(payload)
-                logger.info(f"LLM success provider=gemini model={GEMINI_MODEL}")
-                return 200, {
-                    "Content-Type": "text/event-stream",
-                    "x-llm-provider": "gemini",
-                    "x-llm-model": GEMINI_MODEL,
-                }, _single_sse_stream(text, GEMINI_MODEL)
-            except Exception as exc:
-                errors.append(f"gemini: {exc}")
-
-        if OPENAI_API_KEY:
-            try:
-                text = await _openai_text(payload)
-                logger.info(f"LLM success provider=openai model={OPENAI_MODEL}")
-                return 200, {
-                    "Content-Type": "text/event-stream",
-                    "x-llm-provider": "openai",
-                    "x-llm-model": OPENAI_MODEL,
-                }, _single_sse_stream(text, OPENAI_MODEL)
-            except Exception as exc:
-                errors.append(f"openai: {exc}")
-
-        if ANTHROPIC_API_KEY:
-            try:
-                text = await _claude_text(payload)
-                logger.info(f"LLM success provider=claude model={CLAUDE_MODEL}")
-                return 200, {
-                    "Content-Type": "text/event-stream",
-                    "x-llm-provider": "claude",
-                    "x-llm-model": CLAUDE_MODEL,
-                }, _single_sse_stream(text, CLAUDE_MODEL)
-            except Exception as exc:
-                errors.append(f"claude: {exc}")
-
-    # Preserve common UX status codes where possible.
     combined = " | ".join(errors) if errors else "No provider available"
     if any("429" in e for e in errors):
         raise HTTPException(status_code=429, detail=f"Rate limit exceeded across providers: {combined}")
