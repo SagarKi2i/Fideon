@@ -78,6 +78,16 @@ async def create_activation_request(request: Request, authorization: Optional[st
             raise HTTPException(status_code=409, detail="Request already pending")
         raise
 
+    await insert_audit_log(
+        request=request,
+        user_id=requester["id"],
+        action="request_pod_activation",
+        resource_type="pod_activation_request",
+        resource_id=created[0].get("id") if created else None,
+        details={"model_id": model_id, "model_name": model_name, "domain": domain},
+        previous_value=None,
+        new_value={"status": "pending"},
+    )
     return {"success": True, "request": created[0] if created else None}
 
 

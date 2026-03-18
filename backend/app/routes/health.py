@@ -21,6 +21,7 @@ from app.core.config import (
 from app.services.llm import llm_stream
 
 router = APIRouter()
+CONTENT_TYPE_JSON = "application/json"
 
 
 @router.get("/health")
@@ -48,6 +49,29 @@ def _extract_first_sse_chunk(raw_chunk: bytes) -> dict[str, Any] | None:
         if isinstance(obj, dict):
             return obj
     return None
+
+
+async def _provider_probe(
+    client: httpx.AsyncClient,
+    *,
+    configured: bool,
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    ok_on_2xx_only: bool,
+) -> dict[str, Any]:
+    if not configured:
+        return {"configured": False, "ok": False, "error": "not_configured"}
+    result: dict[str, Any] = {"configured": True, "ok": False}
+    try:
+        resp = await client.post(url, headers=headers, json=payload)
+        result["status_code"] = resp.status_code
+        result["ok"] = resp.status_code == 200 if ok_on_2xx_only else resp.status_code < 400
+        if not result["ok"]:
+            result["error"] = resp.text[:200]
+    except Exception as exc:
+        result["error"] = str(exc)
+    return result
 
 
 @router.get("/api/llm-health")
@@ -124,90 +148,54 @@ async def llm_health_providers():
     This helps verify fallback readiness without leaking any secrets.
     """
     runpod_token = _clean_token(FIDEON_SECRET_KEY or RUNPOD_API_KEY)
-    checks: dict[str, Any] = {
-        "groq": {"configured": bool(GROQ_API_KEY), "ok": False},
-        "runpod_generate": {
-            "configured": bool(runpod_token and RUNPOD_GENERATE_URL),
-            "ok": False,
-        },
-        "runpod_openai_compat": {
-            "configured": bool(runpod_token and RUNPOD_OPENAI_COMPAT_URL),
-            "ok": False,
-        },
-    }
+    checks: dict[str, Any] = {}
 
     async with httpx.AsyncClient(timeout=15) as client:
-        # Groq direct check
-        if checks["groq"]["configured"]:
-            try:
-                groq_resp = await client.post(
-                    GROQ_OPENAI_COMPAT_URL,
-                    headers={
-                        "Authorization": f"Bearer {GROQ_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": GROQ_MODEL_HELP,
-                        "messages": [{"role": "user", "content": "Reply with OK"}],
-                        "stream": False,
-                        "temperature": 0,
-                    },
-                )
-                checks["groq"]["status_code"] = groq_resp.status_code
-                checks["groq"]["ok"] = groq_resp.status_code == 200
-                if groq_resp.status_code != 200:
-                    checks["groq"]["error"] = groq_resp.text[:200]
-            except Exception as exc:
-                checks["groq"]["error"] = str(exc)
-        else:
-            checks["groq"]["error"] = "not_configured"
-
-        # RunPod /generate check
-        if checks["runpod_generate"]["configured"]:
-            try:
-                runpod_resp = await client.post(
-                    RUNPOD_GENERATE_URL,
-                    headers={
-                        "Authorization": f"Bearer {runpod_token}",
-                        "x-api-key": runpod_token,
-                        "Content-Type": "application/json",
-                    },
-                    json={"prompt": "health check", "model": RUNPOD_MODEL_LLAMA},
-                )
-                checks["runpod_generate"]["status_code"] = runpod_resp.status_code
-                checks["runpod_generate"]["ok"] = runpod_resp.status_code < 400
-                if runpod_resp.status_code >= 400:
-                    checks["runpod_generate"]["error"] = runpod_resp.text[:200]
-            except Exception as exc:
-                checks["runpod_generate"]["error"] = str(exc)
-        else:
-            checks["runpod_generate"]["error"] = "not_configured"
-
-        # RunPod OpenAI-compatible check
-        if checks["runpod_openai_compat"]["configured"]:
-            try:
-                runpod_compat_resp = await client.post(
-                    RUNPOD_OPENAI_COMPAT_URL,
-                    headers={
-                        "Authorization": f"Bearer {runpod_token}",
-                        "x-api-key": runpod_token,
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": RUNPOD_MODEL_LLAMA,
-                        "messages": [{"role": "user", "content": "Reply with OK"}],
-                        "stream": False,
-                        "temperature": 0,
-                    },
-                )
-                checks["runpod_openai_compat"]["status_code"] = runpod_compat_resp.status_code
-                checks["runpod_openai_compat"]["ok"] = runpod_compat_resp.status_code < 400
-                if runpod_compat_resp.status_code >= 400:
-                    checks["runpod_openai_compat"]["error"] = runpod_compat_resp.text[:200]
-            except Exception as exc:
-                checks["runpod_openai_compat"]["error"] = str(exc)
-        else:
-            checks["runpod_openai_compat"]["error"] = "not_configured"
+        checks["groq"] = await _provider_probe(
+            client,
+            configured=bool(GROQ_API_KEY),
+            url=GROQ_OPENAI_COMPAT_URL,
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": CONTENT_TYPE_JSON,
+            },
+            payload={
+                "model": GROQ_MODEL_HELP,
+                "messages": [{"role": "user", "content": "Reply with OK"}],
+                "stream": False,
+                "temperature": 0,
+            },
+            ok_on_2xx_only=True,
+        )
+        checks["runpod_generate"] = await _provider_probe(
+            client,
+            configured=bool(runpod_token and RUNPOD_GENERATE_URL),
+            url=RUNPOD_GENERATE_URL,
+            headers={
+                "Authorization": f"Bearer {runpod_token}",
+                "x-api-key": runpod_token,
+                "Content-Type": CONTENT_TYPE_JSON,
+            },
+            payload={"prompt": "health check", "model": RUNPOD_MODEL_LLAMA},
+            ok_on_2xx_only=False,
+        )
+        checks["runpod_openai_compat"] = await _provider_probe(
+            client,
+            configured=bool(runpod_token and RUNPOD_OPENAI_COMPAT_URL),
+            url=RUNPOD_OPENAI_COMPAT_URL,
+            headers={
+                "Authorization": f"Bearer {runpod_token}",
+                "x-api-key": runpod_token,
+                "Content-Type": CONTENT_TYPE_JSON,
+            },
+            payload={
+                "model": RUNPOD_MODEL_LLAMA,
+                "messages": [{"role": "user", "content": "Reply with OK"}],
+                "stream": False,
+                "temperature": 0,
+            },
+            ok_on_2xx_only=False,
+        )
 
     overall_ok = all(
         item.get("ok")

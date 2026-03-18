@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,11 +34,25 @@ import {
   Scale,
   Download,
   Code2,
-  Monitor
+  Monitor,
+  User,
+  Copy,
+  Trash2
 } from "lucide-react";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { useToast } from "@/hooks/use-toast";
 import { useWorkflowSettings } from "@/hooks/useWorkflowSettings";
+import { useUserRole } from "@/hooks/useUserRole";
+import { InviteUserPanel } from "@/components/user/InviteUserPanel";
+import {
+  createPersonalApiKey,
+  fetchPersonalApiKeys,
+  fetchSettingsProfile,
+  revokePersonalApiKey,
+  updateSettingsProfile,
+  type PersonalApiKeyRow,
+  type SettingsPreferences,
+} from "@/lib/settingsApi";
 
 // Import AMS logos
 import appliedEpicLogo from "@/assets/logos/applied-epic-logo.png";
@@ -128,6 +142,7 @@ const amsSystemsList: AMSSystem[] = [
 
 export default function Settings() {
   const { toast } = useToast();
+  const { role } = useUserRole();
   const { settings: workflowSettings, updateSettings: updateWorkflowSettings, resetToDefaults, DEFAULT_SETTINGS } = useWorkflowSettings();
   const [carrierCredentials, setCarrierCredentials] = useState(carriers);
   const [amsSystems, setAmsSystems] = useState(amsSystemsList);
@@ -151,6 +166,45 @@ export default function Settings() {
   const [amsUIForm, setAmsUIForm] = useState({ username: "", password: "", enterpriseId: "" });
   const [showAMSPassword, setShowAMSPassword] = useState(false);
   const [showAMSKey, setShowAMSKey] = useState(false);
+
+  // Account settings state
+  const [profileEmail, setProfileEmail] = useState("");
+  const [profileRole, setProfileRole] = useState("");
+  const [profileFullName, setProfileFullName] = useState("");
+  const [preferences, setPreferences] = useState<SettingsPreferences>({
+    email_notifications: true,
+    product_updates: true,
+  });
+  const [isProfileSaving, setIsProfileSaving] = useState(false);
+  const [apiKeys, setApiKeys] = useState<PersonalApiKeyRow[]>([]);
+  const [newApiKeyName, setNewApiKeyName] = useState("");
+  const [revealedApiKey, setRevealedApiKey] = useState<string | null>(null);
+  const [isApiKeyLoading, setIsApiKeyLoading] = useState(false);
+
+  const loadAccountSettings = useCallback(async () => {
+    try {
+      const [profile, keys] = await Promise.all([
+        fetchSettingsProfile(),
+        fetchPersonalApiKeys(),
+      ]);
+      setProfileEmail(profile.email || "");
+      setProfileRole(profile.role || "user");
+      setProfileFullName(profile.full_name || "");
+      setPreferences(profile.preferences);
+      setApiKeys(keys);
+    } catch (error) {
+      console.error("Failed to load account settings:", error);
+      toast({
+        title: "Unable to load account settings",
+        description: "Please refresh and try again.",
+        variant: "destructive",
+      });
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    void loadAccountSettings();
+  }, [loadAccountSettings]);
 
   const openCredentialModal = (carrier: CarrierCredential, editing: boolean = false) => {
     setSelectedCarrier(carrier);
@@ -283,6 +337,97 @@ export default function Settings() {
 
     setIsAMSConfigOpen(false);
     setSelectedAMS(null);
+  };
+
+  const handleProfileSave = async () => {
+    setIsProfileSaving(true);
+    try {
+      await updateSettingsProfile(profileFullName, preferences);
+      toast({
+        title: "Profile updated",
+        description: "Your profile and preferences were saved.",
+      });
+    } catch (error) {
+      console.error("Failed to update profile:", error);
+      toast({
+        title: "Update failed",
+        description: "Could not save profile settings.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsProfileSaving(false);
+    }
+  };
+
+  const handleCreateApiKey = async () => {
+    const safeName = newApiKeyName.trim();
+    if (!safeName) {
+      toast({
+        title: "Name required",
+        description: "Give the API key a name before creating it.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setIsApiKeyLoading(true);
+    try {
+      const created = await createPersonalApiKey(safeName);
+      setRevealedApiKey(created.api_key);
+      setNewApiKeyName("");
+      await loadAccountSettings();
+      toast({
+        title: "API key created",
+        description: "Copy it now - it will not be shown again.",
+      });
+    } catch (error) {
+      console.error("Failed to create API key:", error);
+      toast({
+        title: "Creation failed",
+        description: "Could not create API key.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsApiKeyLoading(false);
+    }
+  };
+
+  const handleRevokeApiKey = async (keyId: string) => {
+    setIsApiKeyLoading(true);
+    try {
+      await revokePersonalApiKey(keyId);
+      await loadAccountSettings();
+      toast({
+        title: "API key revoked",
+        description: "The key can no longer be used.",
+      });
+    } catch (error) {
+      console.error("Failed to revoke API key:", error);
+      toast({
+        title: "Revoke failed",
+        description: "Could not revoke API key.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsApiKeyLoading(false);
+    }
+  };
+
+  const copyRevealedApiKey = async () => {
+    if (!revealedApiKey) return;
+    try {
+      await navigator.clipboard.writeText(revealedApiKey);
+      toast({
+        title: "Copied",
+        description: "API key copied to clipboard.",
+      });
+    } catch {
+      toast({
+        title: "Copy failed",
+        description: "Please copy the key manually.",
+        variant: "destructive",
+      });
+    }
   };
 
   const connectedCarriers = carrierCredentials.filter(c => c.connected).length;
@@ -711,6 +856,137 @@ export default function Settings() {
         <TabsContent value="general" className="space-y-4">
           <Card className="bg-card border-border shadow-card">
             <CardHeader>
+              <CardTitle className="text-card-foreground flex items-center gap-2">
+                <User className="h-5 w-5 text-primary" />
+                Profile
+              </CardTitle>
+              <CardDescription>Update your account profile and notification preferences</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="profile-email">Email</Label>
+                  <Input id="profile-email" value={profileEmail} disabled />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="profile-role">Role</Label>
+                  <Input id="profile-role" value={profileRole} disabled />
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="profile-full-name">Full Name</Label>
+                <Input
+                  id="profile-full-name"
+                  placeholder="Your full name"
+                  value={profileFullName}
+                  onChange={(e) => setProfileFullName(e.target.value)}
+                />
+              </div>
+              <div className="space-y-3">
+                <div className="flex items-center justify-between p-4 rounded-lg border border-border">
+                  <div>
+                    <p className="font-medium">Email Notifications</p>
+                    <p className="text-sm text-muted-foreground">Receive important activity and security emails</p>
+                  </div>
+                  <Switch
+                    checked={preferences.email_notifications}
+                    onCheckedChange={(checked) =>
+                      setPreferences((prev) => ({ ...prev, email_notifications: checked }))
+                    }
+                  />
+                </div>
+                <div className="flex items-center justify-between p-4 rounded-lg border border-border">
+                  <div>
+                    <p className="font-medium">Product Updates</p>
+                    <p className="text-sm text-muted-foreground">Get periodic feature and release update emails</p>
+                  </div>
+                  <Switch
+                    checked={preferences.product_updates}
+                    onCheckedChange={(checked) =>
+                      setPreferences((prev) => ({ ...prev, product_updates: checked }))
+                    }
+                  />
+                </div>
+              </div>
+              <Button onClick={handleProfileSave} disabled={isProfileSaving}>
+                {isProfileSaving ? "Saving..." : "Save Profile"}
+              </Button>
+            </CardContent>
+          </Card>
+
+          <Card className="bg-card border-border shadow-card">
+            <CardHeader>
+              <CardTitle className="text-card-foreground flex items-center gap-2">
+                <Key className="h-5 w-5 text-primary" />
+                Personal API Keys
+              </CardTitle>
+              <CardDescription>
+                Create and revoke personal API keys. We show only a SHA-256 prefix after creation.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex flex-col md:flex-row gap-2">
+                <Input
+                  placeholder="Key name (e.g. CI integration)"
+                  value={newApiKeyName}
+                  onChange={(e) => setNewApiKeyName(e.target.value)}
+                />
+                <Button onClick={handleCreateApiKey} disabled={isApiKeyLoading}>
+                  Generate Key
+                </Button>
+              </div>
+
+              {revealedApiKey && (
+                <div className="p-3 rounded-lg border border-amber-300 bg-amber-50 space-y-2">
+                  <p className="text-sm font-medium text-amber-900">Copy this key now (shown once)</p>
+                  <div className="flex flex-col md:flex-row gap-2">
+                    <Input value={revealedApiKey} readOnly className="font-mono text-xs" />
+                    <Button variant="secondary" onClick={copyRevealedApiKey}>
+                      <Copy className="h-4 w-4 mr-2" />
+                      Copy
+                    </Button>
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-2">
+                {apiKeys.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No personal API keys created yet.</p>
+                ) : (
+                  apiKeys.map((key) => (
+                    <div
+                      key={key.id}
+                      className="flex flex-col md:flex-row md:items-center justify-between gap-3 p-3 border border-border rounded-lg"
+                    >
+                      <div className="space-y-1">
+                        <p className="font-medium">{key.name}</p>
+                        <p className="text-xs text-muted-foreground font-mono">
+                          Prefix: {key.key_prefix} | SHA-256 Prefix: {key.key_prefix_sha256}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Created: {new Date(key.created_at).toLocaleString()}
+                          {key.last_used_at ? ` | Last used: ${new Date(key.last_used_at).toLocaleString()}` : ""}
+                          {key.revoked_at ? ` | Revoked: ${new Date(key.revoked_at).toLocaleString()}` : ""}
+                        </p>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleRevokeApiKey(key.id)}
+                        disabled={!!key.revoked_at || isApiKeyLoading}
+                      >
+                        <Trash2 className="h-4 w-4 mr-2" />
+                        {key.revoked_at ? "Revoked" : "Revoke"}
+                      </Button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="bg-card border-border shadow-card">
+            <CardHeader>
               <CardTitle className="text-card-foreground">Workspace Settings</CardTitle>
               <CardDescription>Manage your workspace preferences</CardDescription>
             </CardHeader>
@@ -726,6 +1002,9 @@ export default function Settings() {
               <Button>Save Changes</Button>
             </CardContent>
           </Card>
+
+          {/* Invite User — visible only to users with role 'user' */}
+          {role === "user" && <InviteUserPanel />}
         </TabsContent>
 
         {/* Workflow Intelligence Tab */}

@@ -220,6 +220,94 @@ class LLMFallbackService:
             pass
         return 0.80
 
+    def _user_text(self, messages: List[Dict[str, Any]]) -> str:
+        return " ".join(m.get("content", "") for m in messages if m.get("role") == "user")
+
+    def _semantic_cache_response(self, messages: List[Dict[str, Any]]) -> Optional[LLMResponse]:
+        if not self._semantic:
+            return None
+        try:
+            emb = self._semantic.get_embedding(self._user_text(messages))
+            match = self._semantic.find_similar(emb)
+            if not match:
+                return None
+            score, sim_key = match
+            cached = self._cache.get(sim_key)
+            if not cached:
+                return None
+            logger.info(f"Semantic cache hit ({score:.2%})")
+            return LLMResponse(
+                content=cached.content,
+                tokens=cached.tokens,
+                model=cached.model_used or "",
+                cached=True,
+                success=True,
+                confidence_score=cached.confidence_score,
+                cache_method="semantic",
+            )
+        except Exception as exc:
+            logger.warning(f"Semantic cache lookup failed: {exc}")
+            return None
+
+    def _exact_cache_method(self, cache_key: str) -> str:
+        if hasattr(self._cache, "permanent_cache") and cache_key in getattr(self._cache, "permanent_cache", {}):
+            return "permanent"
+        return "exact"
+
+    def _exact_cache_response(self, cache_key: str) -> Optional[LLMResponse]:
+        cached = self._cache.get(cache_key)
+        if not cached:
+            return None
+        logger.info("Exact cache hit")
+        return LLMResponse(
+            content=cached.content,
+            tokens=cached.tokens,
+            model=cached.model_used or "",
+            cached=True,
+            success=True,
+            confidence_score=cached.confidence_score,
+            cache_method=self._exact_cache_method(cache_key),
+        )
+
+    def _cache_success(
+        self,
+        cache_key: str,
+        messages: List[Dict[str, Any]],
+        model: LLMModel,
+        result: Dict[str, Any],
+        cache_permanent: bool,
+    ) -> None:
+        entry = CacheEntry(
+            content=result["content"],
+            tokens=result["tokens"],
+            timestamp=time.time(),
+            confidence_score=result["confidence_score"],
+            model_used=model.name,
+        )
+        if self._semantic:
+            try:
+                emb = self._semantic.get_embedding(self._user_text(messages))
+                entry.embedding = emb
+                self._semantic.add_to_index(emb, cache_key)
+            except Exception as exc:
+                logger.warning(f"Semantic index add failed: {exc}")
+
+        if cache_permanent:
+            self._cache.set_permanent(cache_key, entry)
+        else:
+            self._cache.set(cache_key, entry)
+
+    def _success_response(self, model: LLMModel, result: Dict[str, Any], fallback_count: int) -> LLMResponse:
+        return LLMResponse(
+            content=result["content"],
+            tokens=result["tokens"],
+            model=model.name,
+            success=True,
+            fallback_count=fallback_count,
+            confidence_score=result["confidence_score"],
+            cache_method="none",
+        )
+
     async def _call_model(
         self,
         model: LLMModel,
@@ -302,44 +390,13 @@ class LLMFallbackService:
         models = self._sort_by_free_tier(models)
         cache_key = self._generate_cache_key(messages, models[0].name)
 
-        # ── Semantic cache ────────────────────────────────────────────
-        if self._semantic:
-            user_text = " ".join(
-                m.get("content", "") for m in messages if m.get("role") == "user"
-            )
-            try:
-                emb = self._semantic.get_embedding(user_text)
-                match = self._semantic.find_similar(emb)
-                if match:
-                    score, sim_key = match
-                    cached = self._cache.get(sim_key)
-                    if cached:
-                        logger.info(f"Semantic cache hit ({score:.2%})")
-                        return LLMResponse(
-                            content=cached.content,
-                            tokens=cached.tokens,
-                            model=cached.model_used or "",
-                            cached=True,
-                            success=True,
-                            confidence_score=cached.confidence_score,
-                            cache_method="semantic",
-                        )
-            except Exception as exc:
-                logger.warning(f"Semantic cache lookup failed: {exc}")
+        semantic_cached = self._semantic_cache_response(messages)
+        if semantic_cached:
+            return semantic_cached
 
-        # ── Exact cache ───────────────────────────────────────────────
-        cached = self._cache.get(cache_key)
-        if cached:
-            logger.info("Exact cache hit")
-            return LLMResponse(
-                content=cached.content,
-                tokens=cached.tokens,
-                model=cached.model_used or "",
-                cached=True,
-                success=True,
-                confidence_score=cached.confidence_score,
-                cache_method="permanent" if hasattr(self._cache, "permanent_cache") and cache_key in getattr(self._cache, "permanent_cache", {}) else "exact",
-            )
+        exact_cached = self._exact_cache_response(cache_key)
+        if exact_cached:
+            return exact_cached
 
         # ── Provider loop ─────────────────────────────────────────────
         errors: List[str] = []
@@ -358,40 +415,8 @@ class LLMFallbackService:
                     max_tokens=max_tokens,
                 )
                 if result and result.get("content") is not None:
-                    entry = CacheEntry(
-                        content=result["content"],
-                        tokens=result["tokens"],
-                        timestamp=time.time(),
-                        confidence_score=result["confidence_score"],
-                        model_used=model.name,
-                    )
-
-                    # Add to semantic index
-                    if self._semantic:
-                        user_text = " ".join(
-                            m.get("content", "") for m in messages if m.get("role") == "user"
-                        )
-                        try:
-                            emb = self._semantic.get_embedding(user_text)
-                            entry.embedding = emb
-                            self._semantic.add_to_index(emb, cache_key)
-                        except Exception as exc:
-                            logger.warning(f"Semantic index add failed: {exc}")
-
-                    if cache_permanent:
-                        self._cache.set_permanent(cache_key, entry)
-                    else:
-                        self._cache.set(cache_key, entry)
-
-                    return LLMResponse(
-                        content=result["content"],
-                        tokens=result["tokens"],
-                        model=model.name,
-                        success=True,
-                        fallback_count=fallback_count,
-                        confidence_score=result["confidence_score"],
-                        cache_method="none",
-                    )
+                    self._cache_success(cache_key, messages, model, result, cache_permanent)
+                    return self._success_response(model, result, fallback_count)
 
             except Exception as exc:
                 err = f"{model.provider}/{model.name}: {exc}"
