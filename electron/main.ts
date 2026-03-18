@@ -3,7 +3,8 @@
 // the local Ollama backend helpers.
 import "dotenv/config";
 
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } from "electron";
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, protocol, session } from "electron";
+import fs from "node:fs";
 import path from "path";
 import {
   runOllamaCheckStatus,
@@ -12,10 +13,59 @@ import {
   runGenerate,
   runDeleteModel,
 } from "./ollama-backend";
+import { createHandler } from "next-electron-rsc";
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
+
+// Only treat *packaged* builds as production.
+// Local `npm start` should always behave as dev even if NODE_ENV is set.
+const isProd = app.isPackaged;
+const isDev = !app.isPackaged;
+
+function ensureRequiredServerFilesJson(nextProjectDir: string) {
+  // next-electron-rsc requires `.next/required-server-files.json` to exist.
+  const nextDir = path.join(nextProjectDir, ".next");
+  const required = path.join(nextDir, "required-server-files.json");
+  try {
+    if (fs.existsSync(required)) return;
+    fs.mkdirSync(nextDir, { recursive: true });
+    fs.writeFileSync(
+      required,
+      JSON.stringify(
+        {
+          version: 1,
+          config: { distDir: ".next", output: "standalone" },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+  } catch (err) {
+    // Best-effort: missing file will surface as a clearer runtime error.
+    console.error("[main] Failed to ensure required-server-files.json:", err);
+  }
+}
+
+// Initialize next-electron-rsc only for production/packaged runs.
+// In dev, we load the real Next.js dev server, and do not intercept.
+let nextRsc: ReturnType<typeof createHandler> | null = null;
+if (isProd) {
+  // next-electron-rsc calls protocol.registerSchemesAsPrivileged which must run
+  // before app is ready, so it must be initialized at module load time.
+  // In packaged builds, Next's standalone output is bundled into the app root.
+  const nextDirForProd = app.getAppPath();
+  ensureRequiredServerFilesJson(nextDirForProd);
+  nextRsc = createHandler({
+    protocol,
+    dir: nextDirForProd,
+    dev: false,
+    hostname: "localhost",
+    port: 3000,
+  });
+}
 
 // Ensure a single running instance; focus existing window on second launch.
 const gotLock = app.requestSingleInstanceLock();
@@ -110,7 +160,8 @@ async function createWindow() {
     }
   });
 
-  // In dev, point to Next.js dev server; in prod, load the built app.
+  // In dev, point to Next.js dev server; in prod, load the same URL
+  // which is intercepted by next-electron-rsc (no open port).
   const startUrl =
     process.env.ELECTRON_START_URL ?? "http://localhost:3000/electron-playground";
 
@@ -118,7 +169,14 @@ async function createWindow() {
   createTray();
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(async () => {
+  if (isProd && nextRsc) {
+    // Production: intercept localhostUrl and serve Next internally (no open port).
+    await nextRsc.createInterceptor({ session: session.defaultSession });
+  }
+
+  await createWindow();
+});
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {

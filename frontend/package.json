@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "postbuild": "node scripts/generate-required-server-files.mjs",
     "start": "next start",
     "lint": "eslint .",
     "test": "vitest",
