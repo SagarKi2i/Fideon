@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
@@ -16,6 +15,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { createDecisionReview } from "@/lib/reviewQueueApi";
 
 interface SendToReviewProps {
   podModelId: string;
@@ -32,6 +32,16 @@ const DECISION_TYPES = [
   { value: "policy_review", label: "Policy Review" },
   { value: "risk_assessment", label: "Risk Assessment" },
   { value: "document_validation", label: "Document Validation" },
+  { value: "acord_parsing_review", label: "ACORD Parsing Review" },
+  { value: "document_extraction_review", label: "Document Extraction Review" },
+  { value: "endorsement_recommendation", label: "Endorsement Recommendation" },
+  { value: "underwriting_recommendation", label: "Underwriting Recommendation" },
+  { value: "fraud_flag_review", label: "Fraud Flag Review" },
+  { value: "settlement_recommendation", label: "Settlement Recommendation" },
+  { value: "compliance_exception", label: "Compliance Exception" },
+  { value: "coverage_gap_review", label: "Coverage Gap Review" },
+  { value: "renewal_strategy_review", label: "Renewal Strategy Review" },
+  { value: "other", label: "Other" },
 ];
 
 export function SendToReviewButton({ podModelId, podModelName, domain, result, inputData = {} }: SendToReviewProps) {
@@ -51,11 +61,7 @@ export function SendToReviewButton({ podModelId, podModelName, domain, result, i
 
     setSending(true);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-
-      const { error } = await supabase.from("decision_reviews").insert({
-        user_id: user.id,
+      await createDecisionReview({
         pod_model_id: podModelId,
         pod_model_name: podModelName,
         domain,
@@ -68,8 +74,6 @@ export function SendToReviewButton({ podModelId, podModelName, domain, result, i
         input_data: inputData,
         output_data: { full_result: result.substring(0, 5000) },
       });
-
-      if (error) throw error;
 
       toast({ title: "Sent to Review Queue", description: "Your decision has been submitted for human review" });
       setSent(true);

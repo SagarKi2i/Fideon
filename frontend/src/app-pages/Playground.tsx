@@ -7,7 +7,7 @@ import { Switch } from "@/components/ui/switch";
 import { Loader2, ShoppingCart, Cloud, HardDrive, Brain } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { streamChat } from "@/lib/aiChat";
 import { getMockInsuranceResponse } from "@/lib/insuranceMocks";
 import PolicyComparisonUI from "@/components/playground/PolicyComparisonUI";
@@ -39,6 +39,7 @@ interface ActivatedModel {
 export default function Playground() {
   const { toast } = useToast();
   const navigate = useNavigate();
+  const location = useLocation();
   const [models, setModels] = useState<ActivatedModel[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>("");
   const [loading, setLoading] = useState(true);
@@ -61,6 +62,16 @@ export default function Playground() {
     
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (models.length === 0) return;
+    const modelFromUrl = new URLSearchParams(location.search).get("model");
+    if (!modelFromUrl) return;
+    const requestedModel = decodeURIComponent(modelFromUrl);
+    if (models.some((model) => model.model_id === requestedModel)) {
+      setSelectedModel(requestedModel);
+    }
+  }, [location.search, models]);
 
   const checkElectronAndOllama = async () => {
     const electron = await isElectron();
@@ -120,7 +131,12 @@ export default function Playground() {
       if (error) throw error;
       setModels(data || []);
       if (data && data.length > 0) {
-        setSelectedModel(data[0].model_id);
+        const modelFromUrl = new URLSearchParams(location.search).get("model");
+        const requestedModel = modelFromUrl ? decodeURIComponent(modelFromUrl) : null;
+        const match = requestedModel
+          ? data.find((item) => item.model_id === requestedModel)
+          : null;
+        setSelectedModel(match?.model_id ?? data[0].model_id);
       }
     } catch (error) {
       console.error("Error loading models:", error);

@@ -9,16 +9,13 @@ import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { useToast } from "@/hooks/use-toast";
 import { 
-  Play, 
   Loader2, 
   Globe, 
   FileText, 
   RefreshCw, 
   Scale, 
-  Send, 
   CheckCircle2,
   Clock,
-  Building2,
   DollarSign,
   AlertCircle,
   ArrowRight,
@@ -36,7 +33,6 @@ import {
   Download,
   Eye
 } from "lucide-react";
-import MarkdownRenderer from "./MarkdownRenderer";
 import QuoteComparisonAnalysis from "./QuoteComparisonAnalysis";
 import EmailPreviewDialog from "./EmailPreviewDialog";
 import PolicyCoverageDetails from "./PolicyCoverageDetails";
@@ -93,7 +89,7 @@ const INSURANCE_TYPES = [
 
 export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGenerationUIProps) {
   const { toast } = useToast();
-  const proposalRef = useRef<HTMLDivElement>(null);
+  void result;
   const [step, setStep] = useState<"input" | "fetching" | "compare" | "proposal">("input");
   const [insuranceType, setInsuranceType] = useState("");
   const [selectedCarriers, setSelectedCarriers] = useState<string[]>([]);
@@ -122,7 +118,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
     setShowEmailPreview(false);
     toast({
       title: "✅ Proposal Sent Successfully!",
-      description: `The insurance proposal has been sent to ${applicantInfo.email || applicantInfo.name || 'the insured'}.`,
+        description: `The insurance proposal has been sent to ${applicantInfo.email ?? applicantInfo.name ?? 'the insured'}.`,
     });
   };
 
@@ -687,7 +683,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
       </Card>
 
       {/* Visual Analysis - always show when quotes are complete */}
-      <QuoteComparisonAnalysis quotes={quotes} insuranceType={insuranceType} />
+          <QuoteComparisonAnalysis quotes={quotes} insuranceType={insuranceType} />
 
       {/* Detailed Coverage Schedule */}
       <Card className="bg-card border-border">

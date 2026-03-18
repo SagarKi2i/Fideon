@@ -13,8 +13,6 @@ import {
   Mail,
   ShieldCheck,
   User,
-  Sparkles,
-  ChevronDown,
   X,
   Search,
 } from "lucide-react";
@@ -159,7 +157,7 @@ export default function Devices() {
     const fallbackUsers: UserAccount[] = (appUsers || []).map(u => ({
       id: u.user_id,
       email: u.email,
-      role: roleMap.get(u.user_id) || "user",
+      role: roleMap.get(u.user_id) ?? "user",
       created_at: u.created_at,
     }));
     setUsers(fallbackUsers);
