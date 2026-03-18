@@ -3,15 +3,6 @@ project_id = "udxmxxwupccloefcrwrw"
 [functions.chat]
 verify_jwt = true
 
-[functions.device-register]
-verify_jwt = false
-
-[functions.device-checkin]
-verify_jwt = false
-
-[functions.device-models]
-verify_jwt = false
-
 [functions.federated-learning]
 verify_jwt = false
 

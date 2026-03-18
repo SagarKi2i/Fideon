@@ -48,6 +48,8 @@ on:
         required: false
       GROQ_API_KEY:
         required: false
+      DEVICE_JWT_SECRET:
+        required: false
 
 jobs:
   deploy:
@@ -163,6 +165,7 @@ jobs:
                 -e SUPABASE_JWT_SECRET="${{ secrets.SUPABASE_JWT_SECRET }}" \
                 -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
                 -e GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" \
+                -e DEVICE_JWT_SECRET="${{ secrets.DEVICE_JWT_SECRET }}" \
                 neurapodacr.azurecr.io/${{ inputs.component }}:${{ inputs.image_sha }}
             fi
 
@@ -219,6 +222,7 @@ jobs:
                     -e SUPABASE_JWT_SECRET="${{ secrets.SUPABASE_JWT_SECRET }}" \
                     -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
                     -e GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" \
+                    -e DEVICE_JWT_SECRET="${{ secrets.DEVICE_JWT_SECRET }}" \
                     "$PREV_IMAGE"
                 fi
                 echo "Rollback complete — previous container restored"

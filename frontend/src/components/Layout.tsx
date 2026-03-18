@@ -10,6 +10,8 @@ import type { User as SupabaseUser } from "@supabase/supabase-js";
 import { useUserRole } from "@/hooks/useUserRole";
 import { safeLog } from "@/logger";
 import { computeAuditIntegrityHash } from "@/lib/auditHash";
+import { useGlobalRealtimeSubscriptions } from "@/hooks/useGlobalRealtimeSubscriptions";
+import { RealtimeNotificationBell } from "@/components/RealtimeNotificationBell";
 
 interface LayoutProps {
   children: ReactNode;
@@ -28,6 +30,8 @@ export function Layout({ children }: LayoutProps) {
     viewer: "Viewer",
     guest: "Guest",
   };
+
+  useGlobalRealtimeSubscriptions();
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
@@ -122,6 +126,7 @@ export function Layout({ children }: LayoutProps) {
                   </span>
                 )}
               </div>
+              <RealtimeNotificationBell />
               {/* Mobile: icon only, Desktop: icon + text */}
               <Button
                 variant="ghost"

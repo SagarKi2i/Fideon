@@ -37,6 +37,55 @@ async def verify_user(authorization: Optional[str]) -> Dict[str, Any]:
     return resp.json()
 
 
+async def verify_admin(authorization: Optional[str]) -> Dict[str, Any]:
+    """Verify the caller is an authenticated admin or global_admin.
+
+    Raises 401 if the token is invalid, 403 if the user lacks admin privileges.
+    Returns the Supabase user dict on success.
+    """
+    user = await verify_user(authorization)
+    user_id = user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    rows = await postgrest_get(
+        "user_roles",
+        f"select=role&user_id=eq.{quote(user_id, safe='')}&role=in.(admin,global_admin)&limit=1",
+    )
+    if not rows:
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+    return user
+
+
+async def get_user_context(authorization: Optional[str]) -> Dict[str, Any]:
+    """Return authenticated user context (id, role, tenant_id).
+
+    This helper centralizes tenant-aware authorization checks for route handlers.
+    """
+    user = await verify_user(authorization)
+    user_id = user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    role_rows = await postgrest_get(
+        "user_roles",
+        f"select=role&user_id=eq.{quote(user_id, safe='')}&limit=1",
+    )
+    role = role_rows[0].get("role") if role_rows else None
+
+    profile_rows = await postgrest_get(
+        "app_users",
+        f"select=tenant_id&user_id=eq.{quote(user_id, safe='')}&limit=1",
+    )
+    tenant_id = profile_rows[0].get("tenant_id") if profile_rows else None
+
+    return {
+        "user": user,
+        "user_id": user_id,
+        "role": role,
+        "tenant_id": tenant_id,
+    }
+
+
 async def postgrest_get(table: str, query: str) -> list[dict[str, Any]]:
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
@@ -128,6 +177,11 @@ async def insert_audit_log(
     details: Optional[Dict[str, Any]] = None,
     previous_value: Optional[Dict[str, Any]] = None,
     new_value: Optional[Dict[str, Any]] = None,
+    # ── AI / SHAP explainability fields (optional) ────────────
+    shap_values: Optional[Dict[str, float]] = None,
+    model_id: Optional[str] = None,
+    prediction: Optional[Dict[str, Any]] = None,
+    reasoning: Optional[str] = None,
 ) -> None:
     """Insert an immutable audit row into audit_logs.
 
@@ -140,6 +194,19 @@ async def insert_audit_log(
     Both are PII-scrubbed before storage and included in the integrity hash so
     any post-write tampering is detectable.
 
+    AI decisions can be recorded with full SHAP explainability:
+      shap_values — dict mapping feature names to their SHAP float values.
+      model_id    — identifier of the model that produced the decision.
+      prediction  — model output / decision outcome as a dict.
+      reasoning   — human-readable explanation (auto-generated via
+                    generate_shap_reasoning() in logger/__init__.py if not
+                    supplied directly).
+
+    All SHAP / AI fields are included in the integrity_hash so any
+    post-write tampering with the explanation is detectable.
+    The database trigger (compute_audit_chain_hash) appends a chain_hash
+    linking this row cryptographically to the previous ledger entry.
+
     Failures are silently swallowed so auditing never blocks the main request.
     """
     try:
@@ -151,9 +218,10 @@ async def insert_audit_log(
         safe_previous = _scrub_audit_value(previous_value)
         safe_new = _scrub_audit_value(new_value)
 
-        # SHA-256 integrity hash covers all non-PII structured fields.
-        # Including previous_value and new_value means tampering with the
-        # change record invalidates the hash.
+        # SHA-256 integrity hash covers all non-PII structured fields,
+        # including SHAP/AI decision data so tampering with the explanation
+        # invalidates the hash.  chain_hash (ledger linkage) is computed by
+        # the DB trigger after insert and is therefore NOT included here.
         hash_payload = json.dumps({
             "user_id": user_id or "",
             "action": action,
@@ -161,6 +229,10 @@ async def insert_audit_log(
             "resource_id": resource_id or "",
             "previous_value": json.dumps(safe_previous, sort_keys=True) if safe_previous else "",
             "new_value": json.dumps(safe_new, sort_keys=True) if safe_new else "",
+            "model_id": model_id or "",
+            "prediction": json.dumps(prediction, sort_keys=True) if prediction else "",
+            "shap_values": json.dumps(shap_values, sort_keys=True) if shap_values else "",
+            "reasoning": reasoning or "",
             "created_at": created_at,
         }, sort_keys=True)
         integrity_hash = hashlib.sha256(hash_payload.encode()).hexdigest()
@@ -177,6 +249,11 @@ async def insert_audit_log(
             "user_agent": user_agent,
             "created_at": created_at,
             "integrity_hash": integrity_hash,
+            # AI / SHAP fields — None values are omitted by PostgREST
+            "shap_values": shap_values,
+            "model_id": model_id,
+            "prediction": prediction,
+            "reasoning": reasoning,
         })
     except Exception:
         pass  # Audit failure must never block the main request path

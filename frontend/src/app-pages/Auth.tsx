@@ -13,8 +13,60 @@ import { FideonLogo } from "@/components/FideonLogo";
 import { safeLog } from "@/logger";
 import privateTenantBg from "@/assets/private-ai-tenant-bg.jpg";
 import { computeAuditIntegrityHash } from "@/lib/auditHash";
+import { apiUrl } from "@/lib/apiBaseUrl";
 
 type AuthView = "signin" | "forgot" | "reset";
+type AppRole = "global_admin" | "admin" | "user" | "viewer" | "guest";
+
+const VALID_APP_ROLES: AppRole[] = ["global_admin", "admin", "user", "viewer", "guest"];
+
+function isAppRole(value: unknown): value is AppRole {
+  return typeof value === "string" && VALID_APP_ROLES.includes(value as AppRole);
+}
+
+async function resolveEffectiveRole(userId: string): Promise<AppRole> {
+  const { data: roleData, error: roleError } = await supabase
+    .from("user_roles")
+    .select("role")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (!roleError && isAppRole(roleData?.role)) {
+    return roleData.role;
+  }
+
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const token = sessionData.session?.access_token;
+    if (token) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      try {
+        const res = await fetch(apiUrl("/api/settings/profile"), {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
+        });
+        clearTimeout(timeout);
+        if (res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          const backendRole = payload?.profile?.role;
+          if (isAppRole(backendRole)) {
+            return backendRole;
+          }
+        }
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+  } catch (backendError) {
+    safeLog.error("auth_role_backend_fallback_error", {
+      user_id: userId,
+      error: backendError instanceof Error ? backendError.message : String(backendError),
+    });
+  }
+
+  return "user";
+}
 
 export default function Auth() {
   const navigate = useNavigate();
@@ -96,13 +148,7 @@ export default function Auth() {
       if (error) throw error;
 
       if (signInData.user) {
-        const { data: roleData } = await supabase
-          .from("user_roles")
-          .select("role")
-          .eq("user_id", signInData.user.id)
-          .maybeSingle();
-
-        const effectiveRole = roleData?.role ?? "user";
+        const effectiveRole = await resolveEffectiveRole(signInData.user.id);
 
         safeLog.info("auth_signin_success", {
           user_id: signInData.user.id,
@@ -165,9 +211,21 @@ export default function Auth() {
         resource_id: null,
         error: error.message,
       });
+      const rawMsg: string = error.message ?? "";
+      let friendlyMsg = rawMsg;
+      if (/invalid login credentials/i.test(rawMsg)) {
+        const { count } = await supabase
+          .from("app_users")
+          .select("user_id", { count: "exact", head: true })
+          .eq("email", email.trim().toLowerCase());
+        friendlyMsg =
+          count === 0
+            ? "No account found for this email."
+            : "Password is incorrect. Please check your details or contact your admin.";
+      }
       toast({
-        title: "Error",
-        description: error.message,
+        title: "Sign in failed",
+        description: friendlyMsg,
         variant: "destructive",
       });
     } finally {
@@ -401,9 +459,13 @@ export default function Auth() {
       >
         {loading ? "Signing in..." : "Sign In"}
       </Button>
-      <Button type="button" variant="ghost" className="w-full" onClick={() => setView("forgot")}>
+      <button
+        type="button"
+        onClick={() => setView("forgot")}
+        className="w-full text-sm text-primary underline-offset-4 hover:underline bg-transparent border-none cursor-pointer py-1"
+      >
         Forgot password?
-      </Button>
+      </button>
       <Button type="button" variant="outline" className="w-full" onClick={() => navigate("/signup")}>
         Create new account
       </Button>
@@ -427,9 +489,13 @@ export default function Auth() {
       <Button type="submit" className="w-full" disabled={loading}>
         {loading ? "Sending..." : "Send reset link"}
       </Button>
-      <Button type="button" variant="ghost" className="w-full" onClick={() => setView("signin")}>
+      <button
+        type="button"
+        onClick={() => setView("signin")}
+        className="w-full text-sm text-primary underline-offset-4 hover:underline bg-transparent border-none cursor-pointer py-1"
+      >
         Back to sign in
-      </Button>
+      </button>
     </form>
   );
 
@@ -462,9 +528,13 @@ export default function Auth() {
       <Button type="submit" className="w-full" disabled={loading}>
         {loading ? "Updating..." : "Update password"}
       </Button>
-      <Button type="button" variant="ghost" className="w-full" onClick={() => setView("signin")}>
+      <button
+        type="button"
+        onClick={() => setView("signin")}
+        className="w-full text-sm text-primary underline-offset-4 hover:underline bg-transparent border-none cursor-pointer py-1"
+      >
         Back to sign in
-      </Button>
+      </button>
     </form>
   );
 

@@ -18,9 +18,11 @@ The runner cannot open an SSH connection to your Azure VM. Fix in this order:
 ### 2. Network Security Group (NSG) allows port 22
 
 - GitHub Actions run on Microsoft-hosted runners; their IPs change.
-- **Option A (recommended):** Allow SSH from **Azure Cloud** or a broad range (e.g. `0.0.0.0/0` for port 22) on the VM’s NSG. Restrict later with a firewall or private networking if needed.
+- **Option A (recommended):** Allow SSH from **Any** (`0.0.0.0/0`) for port **22 TCP** on the VM’s NSG. Restrict later with a firewall or private networking if needed.
 - **Option B:** Use [GitHub’s IP allow list](https://api.github.com/meta) and update your NSG with the `actions` IP ranges (more maintenance).
-- In Azure: VM → **Networking** (or the VM’s subnet NSG) → **Inbound port rules** → ensure **SSH (22)** is allowed from the appropriate source.
+- In Azure: VM → **Networking** → **Network settings** → **Inbound port rules** → ensure a rule allows **Port 22**, **TCP**, **Source: Any**, **Action: Allow**. If you have multiple rules for port 22, ensure none of them **Deny** and that a higher-priority rule doesn’t block traffic.
+- **Application security groups:** If the VM’s NIC is in an **Application security group**, check that group’s rules too; a deny rule there can block SSH even if the NSG allows it.
+- **VM public IP:** Ensure the VM has a **public IP** and that it is **static** (or update **AZURE_VM_HOST** in GitHub whenever the IP changes). In Azure: VM → **Overview** → **Public IP address**; use that exact value for **AZURE_VM_HOST**.
 
 ### 3. Correct secrets for the right environment
 
