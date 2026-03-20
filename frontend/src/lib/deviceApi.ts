@@ -101,6 +101,22 @@ export async function registerDeviceV1(payload: {
 
   if (!response.ok) {
     const payload = await readJsonSafe(response);
+    throw buildApiRequestError(response, payload, "Failed to register device");
+  }
+
+  return response.json();
+}
+
+export async function fetchDeviceModels(deviceJwt: string): Promise<DeviceModelsResponse> {
+  const response = await fetch(`${getApiBaseUrl()}/api/v1/devices/models`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${deviceJwt}`,
+    },
+  });
+
+  if (!response.ok) {
+    const payload = await readJsonSafe(response);
     throw buildApiRequestError(response, payload, "Failed to fetch device models");
   }
 
@@ -108,25 +124,21 @@ export async function registerDeviceV1(payload: {
 }
 
 export async function performDeviceCheckin(
-  deviceToken: string,
+  deviceJwt: string,
   localModels: { model_id: string; is_downloaded: boolean }[]
-): Promise<{ success: boolean; message: string }> {
-  const response = await fetch(`${getApiBaseUrl()}/api/device-checkin`, {
-    method: 'POST',
+): Promise<{ success: boolean; device_id: string; last_seen_at: string }> {
+  const response = await fetch(`${getApiBaseUrl()}/api/v1/devices/heartbeat`, {
+    method: "PUT",
     headers: {
-      'Content-Type': 'application/json',
-      'x-device-token': deviceToken,
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${deviceJwt}`,
     },
-    body: JSON.stringify({
-      os_type: (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform ?? navigator.userAgent,
-      app_version: '1.0.0',
-      local_models: localModels,
-    }),
+    body: JSON.stringify({ local_models: localModels }),
   });
 
   if (!response.ok) {
     const payload = await readJsonSafe(response);
-    throw buildApiRequestError(response, payload, "Failed to perform check-in");
+    throw buildApiRequestError(response, payload, "Heartbeat failed");
   }
 
   return response.json();
