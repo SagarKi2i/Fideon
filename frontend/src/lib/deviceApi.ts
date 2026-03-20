@@ -18,6 +18,14 @@ export interface DeviceModelsResponse {
   total_models: number;
 }
 
+export interface DeviceRegisterV1Response {
+  success: boolean;
+  device_token: string; // device JWT
+  device_id: string;
+  device_name: string;
+  is_new: boolean;
+}
+
 export interface DevicePairingStartRequest {
   frontend_base_url?: string;
   expires_in_seconds?: number;
@@ -62,12 +70,33 @@ export interface DevicePairingConfirmResponse {
   };
 }
 
-export async function fetchDeviceModels(deviceToken: string): Promise<DeviceModelsResponse> {
-  const response = await fetch(`${getApiBaseUrl()}/api/device-models`, {
-    method: 'GET',
-    headers: {
-      'x-device-token': deviceToken,
-    },
+async function readErrorMessage(response: Response): Promise<string> {
+  const contentType = response.headers.get("content-type") || "";
+  try {
+    if (contentType.includes("application/json")) {
+      const data = await response.json();
+      return data?.detail || data?.error || JSON.stringify(data);
+    }
+    const text = await response.text();
+    // Some backends return plain text "Internal Server Error"
+    return text || `Request failed (${response.status})`;
+  } catch {
+    return `Request failed (${response.status})`;
+  }
+}
+
+export async function registerDeviceV1(payload: {
+  hardware_fingerprint?: string;
+  device_token?: string;
+  device_name?: string;
+  os_type?: string;
+  app_version?: string;
+  metadata?: Record<string, unknown>;
+}): Promise<DeviceRegisterV1Response> {
+  const response = await fetch(`${getApiBaseUrl()}/api/v1/devices/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
   });
 
   if (!response.ok) {
@@ -131,6 +160,18 @@ export function setStoredDeviceToken(token: string): void {
 
 export function clearStoredDeviceToken(): void {
   localStorage.removeItem('device_token');
+}
+
+export function getStoredDeviceJwt(): string | null {
+  return localStorage.getItem("device_jwt");
+}
+
+export function setStoredDeviceJwt(jwt: string): void {
+  localStorage.setItem("device_jwt", jwt);
+}
+
+export function clearStoredDeviceJwt(): void {
+  localStorage.removeItem("device_jwt");
 }
 
 export async function startDevicePairing(

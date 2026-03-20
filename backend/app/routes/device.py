@@ -75,16 +75,27 @@ async def _generate_magic_login_link(
     return _extract_magic_link_payload(body, user_email)
 
 
-def _parse_registration_payload(body: dict[str, Any]) -> tuple[str, str, Any, Any, dict[str, Any], datetime]:
+def _parse_registration_payload(body: dict[str, Any]) -> tuple[str, str, Any, Any, dict[str, Any], datetime, Optional[str]]:
     raw_fingerprint = str(body.get("hardware_fingerprint") or "").strip()
-    if not raw_fingerprint:
-        raise HTTPException(status_code=400, detail="hardware_fingerprint is required")
-    fingerprint_hash = hashlib.sha256(raw_fingerprint.lower().encode("utf-8")).hexdigest()
+    legacy_device_token = str(body.get("device_token") or "").strip() or None
+
+    if raw_fingerprint:
+        fingerprint_hash = hashlib.sha256(raw_fingerprint.lower().encode("utf-8")).hexdigest()
+        registered_via = "hardware_fingerprint"
+    elif legacy_device_token:
+        # Allow migrating legacy device_token-based enrollment to v1 without requiring
+        # a hardware fingerprint implementation immediately.
+        fingerprint_hash = hashlib.sha256(f"legacy:{legacy_device_token}".encode("utf-8")).hexdigest()
+        registered_via = "legacy_device_token"
+    else:
+        raise HTTPException(status_code=400, detail="hardware_fingerprint or device_token is required")
+
     device_name = str(body.get("device_name") or "").strip() or "Unknown Device"
     os_type = body.get("os_type")
     app_version = body.get("app_version")
     extra_metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
-    return fingerprint_hash, device_name, os_type, app_version, extra_metadata, datetime.now(timezone.utc)
+    extra_metadata.setdefault("registered_via", registered_via)
+    return fingerprint_hash, device_name, os_type, app_version, extra_metadata, datetime.now(timezone.utc), legacy_device_token
 
 
 async def _upsert_device_for_registration(
@@ -94,7 +105,28 @@ async def _upsert_device_for_registration(
     app_version: Any,
     extra_metadata: dict[str, Any],
     now: datetime,
+    legacy_device_token: Optional[str] = None,
 ) -> tuple[dict[str, Any], bool]:
+    if legacy_device_token:
+        device = await get_device_by_token(legacy_device_token)
+        await postgrest_patch(
+            "devices",
+            f"id=eq.{quote(device['id'], safe='')}",
+            {
+                "device_name": device_name or device.get("device_name"),
+                "os_type": os_type or device.get("os_type"),
+                "app_version": app_version or device.get("app_version"),
+                "hardware_fingerprint_hash": fingerprint_hash,
+                "status": "online",
+                "last_seen_at": now.isoformat(),
+                "jwt_issued_after": now.isoformat(),
+                "metadata": {**(device.get("metadata") or {}), **extra_metadata},
+            },
+        )
+        device["device_name"] = device_name or device.get("device_name")
+        device["hardware_fingerprint_hash"] = fingerprint_hash
+        return device, False
+
     existing = await postgrest_get(
         "devices",
         f"select=*&hardware_fingerprint_hash=eq.{quote(fingerprint_hash, safe='')}&limit=1",
@@ -128,7 +160,6 @@ async def _upsert_device_for_registration(
             "last_seen_at": now.isoformat(),
             "jwt_issued_after": now.isoformat(),
             "metadata": {
-                "registered_via": "hardware_fingerprint",
                 **extra_metadata,
             },
         },
@@ -264,8 +295,11 @@ async def register_device_v1(request: Request):  # noqa: C901
         app_version (str, optional): Running app version string.
         metadata (dict, optional): Additional key/value pairs stored in device metadata.
     """
-    body = await request.json()
-    fingerprint_hash, device_name, os_type, app_version, extra_metadata, now = _parse_registration_payload(body)
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON body: {exc}")
+    fingerprint_hash, device_name, os_type, app_version, extra_metadata, now, legacy_device_token = _parse_registration_payload(body)
     device, is_new = await _upsert_device_for_registration(
         fingerprint_hash=fingerprint_hash,
         device_name=device_name,
@@ -273,6 +307,7 @@ async def register_device_v1(request: Request):  # noqa: C901
         app_version=app_version,
         extra_metadata=extra_metadata,
         now=now,
+        legacy_device_token=legacy_device_token,
     )
 
     signed_token = _sign_device_jwt(
@@ -300,6 +335,34 @@ async def register_device_v1(request: Request):  # noqa: C901
         "device_name": device["device_name"],
         "is_new": is_new,
     }
+
+
+@router.get("/api/v1/devices/models")
+async def device_models_v1(authorization: Optional[str] = Header(default=None)):
+    """Return allocated models for a device using Bearer device JWT."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Device JWT required")
+    claims = _verify_device_jwt(authorization.split(" ", 1)[1])
+    device_id = claims.get("device_id")
+    if not device_id:
+        raise HTTPException(status_code=401, detail="Invalid device JWT claims")
+
+    models = await postgrest_get(
+        "device_models",
+        f"select=*&device_id=eq.{quote(device_id, safe='')}&order=allocated_at.desc",
+    )
+    mapped = [
+        {
+            "model_id": m.get("model_id"),
+            "model_name": m.get("model_name"),
+            "domain": m.get("domain"),
+            "ollama_model_name": m.get("ollama_model_name") or "llama3.2:latest",
+            "is_downloaded": m.get("is_downloaded"),
+            "allocated_at": m.get("allocated_at"),
+        }
+        for m in models
+    ]
+    return {"success": True, "device_id": device_id, "models": mapped, "total_models": len(mapped)}
 
 
 @router.put("/api/v1/devices/heartbeat")
@@ -343,12 +406,34 @@ async def device_heartbeat(request: Request, authorization: Optional[str] = Head
         if claims.get("iat", 0) < issued_after_ts:
             raise HTTPException(status_code=401, detail="Device token has been revoked — please re-register")
 
+    body: dict[str, Any] = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    local_models = body.get("local_models", [])
     now = datetime.now(timezone.utc)
+
     await postgrest_patch(
         "devices",
         f"id=eq.{quote(device_id, safe='')}",
         {"status": "online", "last_seen_at": now.isoformat()},
     )
+
+    if isinstance(local_models, list):
+        for local_model in local_models:
+            if not isinstance(local_model, dict):
+                continue
+            model_id = str(local_model.get("model_id") or "").strip()
+            is_downloaded = bool(local_model.get("is_downloaded"))
+            if not model_id:
+                continue
+            await postgrest_patch(
+                "device_models",
+                f"device_id=eq.{quote(device_id, safe='')}&model_id=eq.{quote(model_id, safe='')}",
+                {"is_downloaded": is_downloaded, "last_synced_at": now.isoformat()},
+            )
     log.debug("device.heartbeat", device_id=device_id)
     return {"success": True, "device_id": device_id, "last_seen_at": now.isoformat()}
 

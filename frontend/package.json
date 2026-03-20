@@ -5,10 +5,15 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "postbuild": "node scripts/generate-required-server-files.mjs",
     "start": "next start",
     "lint": "eslint .",
     "test": "vitest",
-    "test:run": "vitest run"
+    "test:run": "vitest run",
+    "backend:dev": "cd ../backend && python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload",
+    "electron:build": "cd ../electron && npm run build",
+    "electron:start": "cd ../electron && npm run build && npm start",
+    "electron:dev": "concurrently \"npm run dev\" \"npm run backend:dev\" \"wait-on http://localhost:3000 && npm run electron:start\""
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
@@ -91,6 +96,8 @@
     "tailwindcss": "^3.4.17",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.38.0",
-    "vitest": "^4.0.18"
+    "vitest": "^4.0.18",
+    "concurrently": "^9.1.0",
+    "wait-on": "^8.0.1"
   }
 }
