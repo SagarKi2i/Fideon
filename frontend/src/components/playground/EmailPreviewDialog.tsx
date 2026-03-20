@@ -7,12 +7,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { 
   Send, 
   Mail, 
-  User, 
   Shield,
   DollarSign,
   Calendar,
@@ -74,7 +72,7 @@ export default function EmailPreviewDialog({
         <div className="bg-muted/30 rounded-lg p-4 space-y-2 text-sm">
           <div className="flex items-center gap-2">
             <span className="text-muted-foreground w-16">To:</span>
-            <span className="font-medium">{recipientName} &lt;{recipientEmail || 'email@example.com'}&gt;</span>
+            <span className="font-medium">{recipientName} &lt;{recipientEmail ?? 'email@example.com'}&gt;</span>
           </div>
           <div className="flex items-center gap-2">
             <span className="text-muted-foreground w-16">From:</span>

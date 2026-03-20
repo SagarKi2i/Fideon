@@ -1,5 +1,6 @@
 // Device API for Electron app integration
 import { getApiBaseUrl } from "@/lib/apiBaseUrl";
+import { buildApiRequestError, readJsonSafe } from "@/lib/httpErrors";
 
 export interface DeviceModel {
   model_id: string;
@@ -99,42 +100,51 @@ export async function registerDeviceV1(payload: {
   });
 
   if (!response.ok) {
-    throw new Error(await readErrorMessage(response));
-  }
-
-  return response.json();
-}
-
-export async function fetchDeviceModels(deviceJwt: string): Promise<DeviceModelsResponse> {
-  const response = await fetch(`${getApiBaseUrl()}/api/v1/devices/models`, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${deviceJwt}`,
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(await readErrorMessage(response));
+    const payload = await readJsonSafe(response);
+    throw buildApiRequestError(response, payload, "Failed to fetch device models");
   }
 
   return response.json();
 }
 
 export async function performDeviceCheckin(
-  deviceJwt: string,
+  deviceToken: string,
   localModels: { model_id: string; is_downloaded: boolean }[]
+): Promise<{ success: boolean; message: string }> {
+  const response = await fetch(`${getApiBaseUrl()}/api/device-checkin`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-device-token': deviceToken,
+    },
+    body: JSON.stringify({
+      os_type: (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform ?? navigator.userAgent,
+      app_version: '1.0.0',
+      local_models: localModels,
+    }),
+  });
+
+  if (!response.ok) {
+    const payload = await readJsonSafe(response);
+    throw buildApiRequestError(response, payload, "Failed to perform check-in");
+  }
+
+  return response.json();
+}
+
+export async function sendDeviceHeartbeat(
+  deviceJwt: string
 ): Promise<{ success: boolean; device_id: string; last_seen_at: string }> {
   const response = await fetch(`${getApiBaseUrl()}/api/v1/devices/heartbeat`, {
     method: "PUT",
     headers: {
-      "Content-Type": "application/json",
       Authorization: `Bearer ${deviceJwt}`,
     },
-    body: JSON.stringify({ local_models: localModels }),
   });
 
   if (!response.ok) {
-    throw new Error(await readErrorMessage(response));
+    const payload = await readJsonSafe(response);
+    throw buildApiRequestError(response, payload, "Heartbeat failed");
   }
 
   return response.json();
@@ -178,7 +188,8 @@ export async function startDevicePairing(
   });
 
   if (!response.ok) {
-    throw new Error(await readErrorMessage(response));
+    const payload = await readJsonSafe(response);
+    throw buildApiRequestError(response, payload, "Failed to create pairing QR");
   }
 
   return response.json();
@@ -196,7 +207,8 @@ export async function getDevicePairingStatus(
   });
 
   if (!response.ok) {
-    throw new Error(await readErrorMessage(response));
+    const payload = await readJsonSafe(response);
+    throw buildApiRequestError(response, payload, "Failed to fetch pairing status");
   }
 
   return response.json();
@@ -220,7 +232,8 @@ export async function confirmDevicePairing(payload: {
   });
 
   if (!response.ok) {
-    throw new Error(await readErrorMessage(response));
+    const payload = await readJsonSafe(response);
+    throw buildApiRequestError(response, payload, "Failed to confirm pairing");
   }
 
   return response.json();

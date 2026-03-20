@@ -22,7 +22,6 @@ import {
   Mail,
   Flag,
   Calculator,
-  Package,
   Sparkles,
   Bot,
   Inbox,
@@ -34,26 +33,43 @@ import {
   Repeat,
   Download,
   Briefcase,
-  Building
+  Building,
+  SendHorizontal,
+  Clock as ClockIcon
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { apiUrl } from "@/lib/apiBaseUrl";
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { SendHorizontal, Clock as ClockIcon } from "lucide-react";
 import { brokerModels, mgaModels, carrierModels, InsuranceModel } from "@/lib/insuranceMocks";
 import { useUserRole } from "@/hooks/useUserRole";
+import { buildApiRequestError, readJsonSafe } from "@/lib/httpErrors";
+import { Skeleton } from "@/components/ui/skeleton";
 
 interface ModelCard {
   id: string;
   name: string;
   domain: string;
+  version: string;
   description: string;
   capabilities: string[];
   icon: any;
   segment?: string;
   category?: string;
+}
+
+function getModelVersion(modelId: string): string {
+  const versionMap: Record<string, string> = {
+    "quote-generation": "v2.1",
+    "policy-comparison": "v2.0",
+    "document-retrieval": "v2.3",
+    "claims-fnol": "v1.9",
+    "acord-parser": "v2.2",
+    "carrier-submission-intake": "v1.7",
+    "carrier-claims-adjudication": "v1.8",
+  };
+  return versionMap[modelId] ?? "v1.0";
 }
 
 const iconMap: Record<string, any> = {
@@ -95,6 +111,7 @@ const convertInsuranceModels = (models: InsuranceModel[]): ModelCard[] =>
     id: model.id,
     name: model.name,
     domain: model.domain,
+    version: getModelVersion(model.id),
     description: model.description,
     capabilities: [model.category],
     icon: iconMap[model.icon] || Shield,
@@ -112,6 +129,7 @@ const otherDomainModels: ModelCard[] = [
     id: "healthcare-basic",
     name: "Healthcare Assistant",
     domain: "healthcare",
+    version: "v1.0",
     description: "Basic medical assistance and pre-authorization support",
     capabilities: ["Pre-Auth Support", "Basic Medical Q&A", "Document Review"],
     icon: Heart,
@@ -120,6 +138,7 @@ const otherDomainModels: ModelCard[] = [
     id: "healthcare-clinical",
     name: "Clinical Intelligence Pro",
     domain: "healthcare",
+    version: "v1.3",
     description: "Advanced clinical summaries and diagnosis support",
     capabilities: ["Clinical Summary", "Diagnosis Support", "Advanced Medical Q&A", "Treatment Plans"],
     icon: Heart,
@@ -128,6 +147,7 @@ const otherDomainModels: ModelCard[] = [
     id: "banking-basic",
     name: "Banking Compliance Assistant",
     domain: "banking",
+    version: "v1.0",
     description: "Basic KYC and compliance checking for financial institutions",
     capabilities: ["KYC Analysis", "Basic Compliance", "Document Verification"],
     icon: Building2,
@@ -136,6 +156,7 @@ const otherDomainModels: ModelCard[] = [
     id: "banking-advanced",
     name: "Financial Intelligence Pro",
     domain: "banking",
+    version: "v1.2",
     description: "Advanced risk assessment and fraud detection",
     capabilities: ["Advanced Risk Assessment", "Fraud Detection", "Compliance Monitoring", "AML Screening"],
     icon: Building2,
@@ -144,6 +165,7 @@ const otherDomainModels: ModelCard[] = [
     id: "legal-basic",
     name: "Legal Document Analyzer",
     domain: "legal",
+    version: "v1.0",
     description: "Basic contract review and clause identification",
     capabilities: ["Contract Review", "Clause Finder", "Basic Legal Q&A"],
     icon: Scale,
@@ -152,6 +174,7 @@ const otherDomainModels: ModelCard[] = [
     id: "legal-advanced",
     name: "Legal Intelligence Pro",
     domain: "legal",
+    version: "v1.1",
     description: "Advanced risk identification and compliance checking",
     capabilities: ["Risk Identification", "Compliance Review", "Advanced Analysis", "Legal Research"],
     icon: Scale,
@@ -160,6 +183,7 @@ const otherDomainModels: ModelCard[] = [
     id: "travel-basic",
     name: "Travel Assistant",
     domain: "travel",
+    version: "v1.0",
     description: "Basic travel information and recommendations",
     capabilities: ["Destination Info", "Travel Q&A", "Basic Planning"],
     icon: Plane,
@@ -168,6 +192,7 @@ const otherDomainModels: ModelCard[] = [
     id: "travel-advanced",
     name: "Travel Intelligence Pro",
     domain: "travel",
+    version: "v1.1",
     description: "Advanced itinerary planning and personalized recommendations",
     capabilities: ["Smart Itinerary", "Personalized Recommendations", "Advanced Planning", "Real-time Updates"],
     icon: Plane,
@@ -215,11 +240,9 @@ export default function Marketplace() {
           "Content-Type": "application/json",
         },
       });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload?.error || "Failed to load activated models");
-      }
-      setActivatedModelIds(new Set(payload.model_ids || []));
+      const payload = await readJsonSafe(response);
+      if (!response.ok) throw buildApiRequestError(response, payload, "Failed to load activated models");
+      setActivatedModelIds(new Set(payload.model_ids ?? []));
     } catch (error) {
       console.error("Error loading activated models:", error);
     } finally {
@@ -238,11 +261,9 @@ export default function Marketplace() {
           "Content-Type": "application/json",
         },
       });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload?.error || "Failed to load pending requests");
-      }
-      setPendingRequestIds(new Set((payload.requests || []).map((r: any) => r.model_id)));
+      const payload = await readJsonSafe(response);
+      if (!response.ok) throw buildApiRequestError(response, payload, "Failed to load pending requests");
+      setPendingRequestIds(new Set((payload.requests ?? []).map((r: any) => r.model_id)));
     } catch (error) {
       console.error("Error loading pending requests:", error);
     }
@@ -285,7 +306,7 @@ export default function Marketplace() {
           domain: model.domain,
         }),
       });
-      const payload = await response.json().catch(() => ({}));
+      const payload = await readJsonSafe(response);
       if (!response.ok) {
         if (response.status === 409) {
           toast({
@@ -294,9 +315,10 @@ export default function Marketplace() {
             variant: "destructive",
           });
         } else {
+          const apiError = buildApiRequestError(response, payload, "Failed to send request");
           toast({
             title: "Request Error",
-            description: payload?.error || "Failed to send request",
+            description: apiError.message,
             variant: "destructive",
           });
         }
@@ -370,7 +392,7 @@ export default function Marketplace() {
       const segment = key.replace("insurance-", "");
       return insuranceSegments[segment]?.label || segment;
     }
-    return domainLabels[key] || key;
+      return domainLabels[key] ?? key;
   };
 
   const getGroupIcon = (key: string) => {
@@ -433,6 +455,11 @@ export default function Marketplace() {
           <CardTitle className="text-sm md:text-base font-semibold line-clamp-2 text-center leading-snug mb-1.5 md:mb-2 tracking-tight">
             {model.name}
           </CardTitle>
+          <div className="flex justify-center mb-1.5">
+            <Badge variant="outline" className="text-[10px] md:text-xs">
+              {model.version}
+            </Badge>
+          </div>
           <CardDescription className="text-xs md:text-sm line-clamp-3 text-center leading-relaxed font-normal">
             {model.description}
           </CardDescription>
@@ -442,7 +469,7 @@ export default function Marketplace() {
         <div className="px-4 md:px-5 pb-2 md:pb-3">
           <div className="flex justify-center">
             <Badge variant="secondary" className="text-[10px] md:text-xs font-medium">
-              {model.category || model.capabilities[0]}
+              {model.category ?? model.capabilities[0]}
             </Badge>
           </div>
         </div>
@@ -508,10 +535,11 @@ export default function Marketplace() {
         {/* Domain Filter Tabs */}
         <div className="mb-4 md:mb-8 sticky top-0 z-20 bg-background/95 backdrop-blur-xl py-2 md:py-4 -mx-2 px-2 md:-mx-4 md:px-4 border-b border-border/50 shadow-sm animate-scale-in">
           <Tabs value={selectedDomain} onValueChange={(v) => { setSelectedDomain(v); setSelectedInsuranceSegment("all"); }} className="w-full">
-            <TabsList className="inline-flex h-10 md:h-12 items-center justify-start rounded-lg md:rounded-xl bg-muted/50 backdrop-blur-sm p-1 w-full overflow-x-auto scrollbar-hide">
+            <div className="w-full overflow-x-auto scrollbar-hide">
+            <TabsList className="inline-flex h-10 md:h-12 w-max min-w-full flex-nowrap items-center justify-start rounded-lg md:rounded-xl bg-muted/50 backdrop-blur-sm p-1 gap-1">
               <TabsTrigger 
                 value="all" 
-                className="rounded-md md:rounded-lg px-3 md:px-6 text-xs md:text-sm data-[state=active]:bg-card data-[state=active]:shadow-card transition-all whitespace-nowrap touch-manipulation"
+                className="shrink-0 rounded-md md:rounded-lg px-3 md:px-4 text-xs md:text-sm data-[state=active]:bg-card data-[state=active]:shadow-card transition-all whitespace-nowrap touch-manipulation"
               >
                 <Sparkles className="h-3.5 w-3.5 md:h-4 md:w-4 mr-1.5 md:mr-2" />
                 <span className="hidden sm:inline">All Models</span>
@@ -520,12 +548,12 @@ export default function Marketplace() {
               </TabsTrigger>
               {Object.entries(domainLabels).map(([domain, label]) => {
                 const Icon = domainIcons[domain];
-                const count = domainCounts[domain as keyof typeof domainCounts] || 0;
+                const count = domainCounts[domain as keyof typeof domainCounts] ?? 0;
                 return (
                   <TabsTrigger 
                     key={domain} 
                     value={domain}
-                    className="rounded-md md:rounded-lg px-3 md:px-6 text-xs md:text-sm data-[state=active]:bg-card data-[state=active]:shadow-card transition-all whitespace-nowrap touch-manipulation"
+                    className="shrink-0 rounded-md md:rounded-lg px-3 md:px-4 text-xs md:text-sm data-[state=active]:bg-card data-[state=active]:shadow-card transition-all whitespace-nowrap touch-manipulation"
                   >
                     <Icon className="h-3.5 w-3.5 md:h-4 md:w-4 mr-1.5 md:mr-2" />
                     <span className="hidden md:inline">{label}</span>
@@ -535,16 +563,18 @@ export default function Marketplace() {
                 );
               })}
             </TabsList>
+            </div>
           </Tabs>
 
           {/* Insurance Sub-Segment Tabs */}
           {selectedDomain === "insurance" && (
             <div className="mt-3">
               <Tabs value={selectedInsuranceSegment} onValueChange={setSelectedInsuranceSegment} className="w-full">
-                <TabsList className="inline-flex h-9 items-center justify-start rounded-lg bg-primary/5 backdrop-blur-sm p-1 overflow-x-auto scrollbar-hide">
+                <div className="w-full overflow-x-auto scrollbar-hide">
+                <TabsList className="inline-flex h-9 w-max min-w-full flex-nowrap items-center justify-start rounded-lg bg-primary/5 backdrop-blur-sm p-1 gap-1">
                   <TabsTrigger 
                     value="all" 
-                    className="rounded-md px-4 text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground transition-all whitespace-nowrap"
+                    className="shrink-0 rounded-md px-4 text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground transition-all whitespace-nowrap"
                   >
                     All Insurance
                     <Badge variant="secondary" className="ml-2 text-[10px] bg-background/50">{allInsuranceModels.length}</Badge>
@@ -557,7 +587,7 @@ export default function Marketplace() {
                       <TabsTrigger 
                         key={segment} 
                         value={segment}
-                        className="rounded-md px-4 text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground transition-all whitespace-nowrap"
+                        className="shrink-0 rounded-md px-4 text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground transition-all whitespace-nowrap"
                       >
                         <SegmentIcon className="h-3.5 w-3.5 mr-1.5" />
                         {label}
@@ -566,13 +596,20 @@ export default function Marketplace() {
                     );
                   })}
                 </TabsList>
+                </div>
               </Tabs>
             </div>
           )}
         </div>
 
         <div className="space-y-6 md:space-y-12">
-          {Object.entries(groupedModels).map(([key, models]) => (
+          {loading ? (
+            <div className="grid gap-3 md:gap-5 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {Array.from({ length: 8 }).map((_, i) => (
+                <Skeleton key={i} className="h-[280px] md:h-[340px] w-full rounded-xl" />
+              ))}
+            </div>
+          ) : Object.entries(groupedModels).map(([key, models]) => (
             <div key={key} className="animate-fade-in">
               <div className="flex items-center gap-2 md:gap-3 mb-3 md:mb-6 p-3 md:p-4 rounded-lg md:rounded-xl bg-gradient-hero border border-border/50 backdrop-blur-sm">
                 {(() => {
@@ -599,7 +636,7 @@ export default function Marketplace() {
             </div>
           ))}
           
-          {filteredModels.length === 0 && (
+          {!loading && filteredModels.length === 0 && (
             <div className="text-center py-12 md:py-20">
               <div className="inline-flex items-center justify-center w-12 h-12 md:w-16 md:h-16 rounded-full bg-muted mb-3 md:mb-4">
                 <Search className="h-6 w-6 md:h-8 md:w-8 text-muted-foreground" />

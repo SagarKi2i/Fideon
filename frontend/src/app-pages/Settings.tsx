@@ -44,6 +44,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useWorkflowSettings } from "@/hooks/useWorkflowSettings";
 import { useUserRole } from "@/hooks/useUserRole";
 import { InviteUserPanel } from "@/components/user/InviteUserPanel";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   createPersonalApiKey,
   fetchPersonalApiKeys,
@@ -180,9 +181,11 @@ export default function Settings() {
   const [newApiKeyName, setNewApiKeyName] = useState("");
   const [revealedApiKey, setRevealedApiKey] = useState<string | null>(null);
   const [isApiKeyLoading, setIsApiKeyLoading] = useState(false);
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
 
   const loadAccountSettings = useCallback(async () => {
     try {
+      setIsInitialLoading(true);
       const [profile, keys] = await Promise.all([
         fetchSettingsProfile(),
         fetchPersonalApiKeys(),
@@ -199,6 +202,9 @@ export default function Settings() {
         description: "Please refresh and try again.",
         variant: "destructive",
       });
+    }
+    finally {
+      setIsInitialLoading(false);
     }
   }, [toast]);
 
@@ -432,6 +438,17 @@ export default function Settings() {
 
   const connectedCarriers = carrierCredentials.filter(c => c.connected).length;
   const connectedAMS = amsSystems.filter(a => a.connected).length;
+
+  if (isInitialLoading) {
+    return (
+      <div className="space-y-4">
+        <Skeleton className="h-9 w-40" />
+        <Skeleton className="h-5 w-96" />
+        <Skeleton className="h-10 w-full" />
+        <Skeleton className="h-64 w-full" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">

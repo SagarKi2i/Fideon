@@ -1,4 +1,5 @@
 import { Bell } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -16,7 +17,15 @@ function toRelativeTime(iso: string): string {
 }
 
 export function RealtimeNotificationBell() {
-  const { items, unreadCount, markAllRead, clearAll } = useRealtimeNotificationInbox();
+  const navigate = useNavigate();
+  const { items, unreadCount, markAllRead, markRead, clearAll } = useRealtimeNotificationInbox();
+
+  const handleNotificationClick = (item: (typeof items)[number]) => {
+    markRead(item.id);
+    if (item.targetPath) {
+      navigate(item.targetPath);
+    }
+  };
 
   return (
     <Popover>
@@ -52,7 +61,19 @@ export function RealtimeNotificationBell() {
               {items.map((item) => (
                 <div
                   key={item.id}
-                  className={`rounded-md border p-2 ${item.read ? "opacity-70" : "bg-muted/40"}`}
+                  role={item.targetPath ? "button" : undefined}
+                  tabIndex={item.targetPath ? 0 : -1}
+                  onClick={() => handleNotificationClick(item)}
+                  onKeyDown={(e) => {
+                    if (!item.targetPath) return;
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      handleNotificationClick(item);
+                    }
+                  }}
+                  className={`rounded-md border p-2 transition-colors ${
+                    item.read ? "opacity-70" : "bg-muted/40"
+                  } ${item.targetPath ? "cursor-pointer hover:bg-muted/60" : ""}`}
                 >
                   <div className="text-sm">{item.message}</div>
                   <div className="mt-1 text-[11px] text-muted-foreground">

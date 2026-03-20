@@ -9,6 +9,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { useToast } from '@/hooks/use-toast';
 import { Package, UserCheck, Trash2, Plus, Loader2 } from 'lucide-react';
 import { brokerModels, mgaModels, carrierModels } from '@/lib/insuranceMocks';
+import { buildApiRequestError, readJsonSafe } from '@/lib/httpErrors';
 
 interface UserInfo {
   id: string;
@@ -123,8 +124,8 @@ export function ModelAllocationSection() {
           'Content-Type': 'application/json',
         },
       });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload?.error || 'Failed to fetch allocations');
+      const payload = await readJsonSafe(response);
+      if (!response.ok) throw buildApiRequestError(response, payload, "Failed to fetch allocations");
       setAllocatedModels(payload.allocations || []);
     } catch (error) {
       console.error('Error fetching allocated models:', error);
@@ -157,12 +158,12 @@ export function ModelAllocationSection() {
           domain: model.domain,
         }),
       });
-      const payload = await response.json().catch(() => ({}));
+      const payload = await readJsonSafe(response);
       if (!response.ok) {
         if (response.status === 409) {
           toast({ title: 'Already Allocated', description: 'This model is already allocated to this user', variant: 'destructive' });
         } else {
-          throw new Error(payload?.error || 'Failed to allocate model');
+          throw buildApiRequestError(response, payload, "Failed to allocate model");
         }
         return;
       }
@@ -172,7 +173,11 @@ export function ModelAllocationSection() {
       fetchAllocatedModels(selectedUserId);
     } catch (error) {
       console.error('Error allocating model:', error);
-      toast({ title: 'Error', description: 'Failed to allocate model', variant: 'destructive' });
+      toast({
+        title: 'Error',
+        description: error instanceof Error ? error.message : 'Failed to allocate model',
+        variant: 'destructive'
+      });
     } finally {
       setAllocating(false);
     }
@@ -189,14 +194,18 @@ export function ModelAllocationSection() {
           'Content-Type': 'application/json',
         },
       });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload?.error || 'Failed to remove allocation');
+      const payload = await readJsonSafe(response);
+      if (!response.ok) throw buildApiRequestError(response, payload, "Failed to remove allocation");
 
       toast({ title: 'Model Removed', description: `${modelName} deallocated successfully` });
       fetchAllocatedModels(selectedUserId);
     } catch (error) {
       console.error('Error deallocating model:', error);
-      toast({ title: 'Error', description: 'Failed to remove model', variant: 'destructive' });
+      toast({
+        title: 'Error',
+        description: error instanceof Error ? error.message : 'Failed to remove model',
+        variant: 'destructive'
+      });
     }
   }
 

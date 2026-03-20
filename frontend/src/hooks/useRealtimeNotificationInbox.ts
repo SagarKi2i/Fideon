@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   clearRealtimeNotifications,
   getRealtimeNotifications,
+  markRealtimeNotificationRead,
   markRealtimeNotificationsRead,
   REALTIME_NOTIFICATION_STORE_UPDATED_EVENT,
   type StoredRealtimeNotification,
@@ -35,10 +36,16 @@ export function useRealtimeNotificationInbox() {
     refresh();
   }, [refresh]);
 
+  const markRead = useCallback((id: string) => {
+    markRealtimeNotificationRead(id);
+    refresh();
+  }, [refresh]);
+
   return {
     items,
     unreadCount,
     markAllRead,
+    markRead,
     clearAll,
   };
 }
