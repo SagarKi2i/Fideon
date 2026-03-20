@@ -176,12 +176,12 @@ export default function MyModels() {
                         </div>
                         <div>
                           <CardTitle className="text-base text-foreground">{model.model_name}</CardTitle>
-                          <CardDescription className="text-xs mt-1 capitalize flex items-center gap-2">
-                            {model.domain}
+                          <div className="text-xs mt-1 capitalize flex items-center gap-2 text-muted-foreground">
+                            <span>{model.domain}</span>
                             <Badge variant="outline" className="text-[10px]">
                               {getPodTelemetry(model.model_id).status}
                             </Badge>
-                          </CardDescription>
+                          </div>
                         </div>
                       </div>
                       <Button

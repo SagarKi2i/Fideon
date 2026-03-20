@@ -93,6 +93,18 @@
     --sidebar-accent-foreground: 240 8% 96%;
     --sidebar-border: 240 7% 22%;
     --sidebar-ring: 245 70% 65%;
+
+    /* Dark-mode gradients and shadows */
+    --gradient-primary: linear-gradient(135deg, hsl(245 70% 65%), hsl(245 75% 72%));
+    --gradient-card: linear-gradient(145deg, hsl(240 10% 13%), hsl(240 10% 10%));
+    --gradient-accent: linear-gradient(120deg, hsl(245 70% 65%), hsl(245 52% 62%));
+    --gradient-subtle: linear-gradient(180deg, hsl(240 10% 14%), hsl(240 10% 10%));
+    --gradient-hero: linear-gradient(135deg, hsl(245 70% 65% / 0.16), hsl(245 52% 62% / 0.10));
+    --gradient-premium: linear-gradient(135deg, hsl(245 70% 65%), hsl(245 52% 62%));
+    --shadow-card: 0 2px 12px -2px hsl(240 40% 2% / 0.45);
+    --shadow-elevated: 0 8px 32px -4px hsl(240 40% 2% / 0.6);
+    --shadow-glow: 0 0 40px hsl(245 75% 72% / 0.18);
+    --shadow-premium: 0 20px 60px -15px hsl(240 40% 2% / 0.7);
   }
 }
 
