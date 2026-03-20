@@ -256,7 +256,7 @@ export function Layout({ children }: LayoutProps) {
               <RealtimeNotificationBell />
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" className="h-9 px-2 gap-2">
+                  <Button variant="ghost" className="h-9 px-2 gap-2 hover:bg-muted/60 hover:text-foreground">
                     <Avatar className="h-7 w-7">
                       <AvatarFallback className="text-xs">{initials || "U"}</AvatarFallback>
                     </Avatar>

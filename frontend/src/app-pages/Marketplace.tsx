@@ -535,10 +535,11 @@ export default function Marketplace() {
         {/* Domain Filter Tabs */}
         <div className="mb-4 md:mb-8 sticky top-0 z-20 bg-background/95 backdrop-blur-xl py-2 md:py-4 -mx-2 px-2 md:-mx-4 md:px-4 border-b border-border/50 shadow-sm animate-scale-in">
           <Tabs value={selectedDomain} onValueChange={(v) => { setSelectedDomain(v); setSelectedInsuranceSegment("all"); }} className="w-full">
-            <TabsList className="inline-flex h-10 md:h-12 items-center justify-start rounded-lg md:rounded-xl bg-muted/50 backdrop-blur-sm p-1 w-full overflow-x-auto scrollbar-hide">
+            <div className="w-full overflow-x-auto scrollbar-hide">
+            <TabsList className="inline-flex h-10 md:h-12 w-max min-w-full flex-nowrap items-center justify-start rounded-lg md:rounded-xl bg-muted/50 backdrop-blur-sm p-1 gap-1">
               <TabsTrigger 
                 value="all" 
-                className="rounded-md md:rounded-lg px-3 md:px-6 text-xs md:text-sm data-[state=active]:bg-card data-[state=active]:shadow-card transition-all whitespace-nowrap touch-manipulation"
+                className="shrink-0 rounded-md md:rounded-lg px-3 md:px-4 text-xs md:text-sm data-[state=active]:bg-card data-[state=active]:shadow-card transition-all whitespace-nowrap touch-manipulation"
               >
                 <Sparkles className="h-3.5 w-3.5 md:h-4 md:w-4 mr-1.5 md:mr-2" />
                 <span className="hidden sm:inline">All Models</span>
@@ -552,7 +553,7 @@ export default function Marketplace() {
                   <TabsTrigger 
                     key={domain} 
                     value={domain}
-                    className="rounded-md md:rounded-lg px-3 md:px-6 text-xs md:text-sm data-[state=active]:bg-card data-[state=active]:shadow-card transition-all whitespace-nowrap touch-manipulation"
+                    className="shrink-0 rounded-md md:rounded-lg px-3 md:px-4 text-xs md:text-sm data-[state=active]:bg-card data-[state=active]:shadow-card transition-all whitespace-nowrap touch-manipulation"
                   >
                     <Icon className="h-3.5 w-3.5 md:h-4 md:w-4 mr-1.5 md:mr-2" />
                     <span className="hidden md:inline">{label}</span>
@@ -562,16 +563,18 @@ export default function Marketplace() {
                 );
               })}
             </TabsList>
+            </div>
           </Tabs>
 
           {/* Insurance Sub-Segment Tabs */}
           {selectedDomain === "insurance" && (
             <div className="mt-3">
               <Tabs value={selectedInsuranceSegment} onValueChange={setSelectedInsuranceSegment} className="w-full">
-                <TabsList className="inline-flex h-9 items-center justify-start rounded-lg bg-primary/5 backdrop-blur-sm p-1 overflow-x-auto scrollbar-hide">
+                <div className="w-full overflow-x-auto scrollbar-hide">
+                <TabsList className="inline-flex h-9 w-max min-w-full flex-nowrap items-center justify-start rounded-lg bg-primary/5 backdrop-blur-sm p-1 gap-1">
                   <TabsTrigger 
                     value="all" 
-                    className="rounded-md px-4 text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground transition-all whitespace-nowrap"
+                    className="shrink-0 rounded-md px-4 text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground transition-all whitespace-nowrap"
                   >
                     All Insurance
                     <Badge variant="secondary" className="ml-2 text-[10px] bg-background/50">{allInsuranceModels.length}</Badge>
@@ -584,7 +587,7 @@ export default function Marketplace() {
                       <TabsTrigger 
                         key={segment} 
                         value={segment}
-                        className="rounded-md px-4 text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground transition-all whitespace-nowrap"
+                        className="shrink-0 rounded-md px-4 text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground transition-all whitespace-nowrap"
                       >
                         <SegmentIcon className="h-3.5 w-3.5 mr-1.5" />
                         {label}
@@ -593,6 +596,7 @@ export default function Marketplace() {
                     );
                   })}
                 </TabsList>
+                </div>
               </Tabs>
             </div>
           )}

@@ -125,7 +125,7 @@ export default function PendingDevices() {
       <div className="fixed top-20 right-20 w-96 h-96 bg-primary/5 rounded-full blur-3xl animate-float -z-10" />
 
       <div className="mb-8 animate-fade-in">
-        <h1 className="text-4xl font-bold bg-gradient-hero bg-clip-text text-transparent mb-2">
+        <h1 className="text-3xl md:text-4xl font-bold tracking-tight bg-gradient-to-r from-primary via-primary to-accent bg-clip-text text-transparent mb-2">
           Pending Device Approvals
         </h1>
         <p className="text-muted-foreground">
