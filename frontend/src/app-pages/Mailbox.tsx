@@ -14,7 +14,6 @@ import {
   StarOff,
   ArrowLeft,
   Download,
-  Shield,
   Building2,
 } from "lucide-react";
 
@@ -242,14 +241,14 @@ export default function Mailbox() {
 
   const unreadCount = emails.filter((e) => !e.read).length;
 
-  const filteredEmails =
-    filter === "all"
-      ? emails
-      : filter === "unread"
-        ? emails.filter((e) => !e.read)
-        : filter === "starred"
-          ? emails.filter((e) => e.starred)
-          : emails.filter((e) => e.attachments.length > 0);
+  let filteredEmails = emails;
+  if (filter === "unread") {
+    filteredEmails = emails.filter((e) => !e.read);
+  } else if (filter === "starred") {
+    filteredEmails = emails.filter((e) => e.starred);
+  } else if (filter === "attachments") {
+    filteredEmails = emails.filter((e) => e.attachments.length > 0);
+  }
 
   const openEmail = (email: Email) => {
     setEmails((prev) =>
@@ -268,7 +267,7 @@ export default function Mailbox() {
     }
   };
 
-  const getFileIcon = (type: string) => {
+  const getFileIcon = (_type: string) => {
     return <FileText className="h-4 w-4 text-red-500" />;
   };
 
@@ -442,9 +441,9 @@ export default function Mailbox() {
                       Attachments ({selectedEmail.attachments.length})
                     </p>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      {selectedEmail.attachments.map((att, idx) => (
+                      {selectedEmail.attachments.map((att) => (
                         <div
-                          key={idx}
+                          key={`${att.name}-${att.size}`}
                           className="flex items-center gap-3 p-3 rounded-lg border border-border bg-muted/30 hover:bg-muted/60 transition-colors group"
                         >
                           {getFileIcon(att.type)}

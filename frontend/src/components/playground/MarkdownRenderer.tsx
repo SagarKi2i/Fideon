@@ -1,5 +1,4 @@
 import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
 import { 
   CheckCircle2, 
   AlertTriangle, 
@@ -29,7 +28,7 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
         elements.push(
           <div key={`list-${elements.length}`} className="space-y-2 my-4">
             {currentList.map((item, idx) => (
-              <div key={idx} className="flex items-start gap-3 pl-2">
+              <div key={`${item}-${idx}`} className="flex items-start gap-3 pl-2">
                 {listType === 'numbered' ? (
                   <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary/10 text-primary text-xs flex items-center justify-center font-semibold">
                     {idx + 1}
@@ -48,27 +47,23 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
     };
 
     const parseInlineFormatting = (text: string): JSX.Element => {
-      // Parse inline elements like **bold**, checkmarks, warnings, etc.
-      const parts: (string | JSX.Element)[] = [];
-      let remaining = text;
-      let keyCounter = 0;
-
       // Status indicators
       const statusPatterns = [
-        { pattern: /✓\s*([^✓⚠️🚩❌\n]+)/g, icon: CheckCircle2, color: 'text-green-600', bg: 'bg-green-500/10' },
-        { pattern: /⚠️?\s*([^✓⚠️🚩❌\n]+)/g, icon: AlertTriangle, color: 'text-amber-600', bg: 'bg-amber-500/10' },
-        { pattern: /🚩\s*([^✓⚠️🚩❌\n]+)/g, icon: AlertTriangle, color: 'text-red-600', bg: 'bg-red-500/10' },
-        { pattern: /❌\s*([^✓⚠️🚩❌\n]+)/g, icon: XCircle, color: 'text-red-600', bg: 'bg-red-500/10' },
+        { pattern: /^✓\s*(.+)$/u, icon: CheckCircle2, color: 'text-green-600', bg: 'bg-green-500/10' },
+        { pattern: /^⚠(?:️)?\s*(.+)$/u, icon: AlertTriangle, color: 'text-amber-600', bg: 'bg-amber-500/10' },
+        { pattern: /^🚩\s*(.+)$/u, icon: AlertTriangle, color: 'text-red-600', bg: 'bg-red-500/10' },
+        { pattern: /^❌\s*(.+)$/u, icon: XCircle, color: 'text-red-600', bg: 'bg-red-500/10' },
       ];
 
       // Check for status indicators first
       for (const { pattern, icon: Icon, color, bg } of statusPatterns) {
-        const match = text.match(pattern);
+        const match = pattern.exec(text);
         if (match) {
+          const matchedText = match[1] ?? text;
           return (
             <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg ${bg}`}>
               <Icon className={`h-4 w-4 ${color} flex-shrink-0`} />
-              <span className={color}>{parseInlineText(match[1] || text.replace(pattern, ''))}</span>
+              <span className={color}>{parseInlineText(matchedText)}</span>
             </span>
           );
         }
@@ -202,12 +197,12 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
       }
 
       // Numbered list
-      if (trimmedLine.match(/^\d+[\.\)]\s/)) {
+      if (/^\d+[.)]\s/.test(trimmedLine)) {
         if (listType !== 'numbered') {
           flushList();
           listType = 'numbered';
         }
-        currentList.push(trimmedLine.replace(/^\d+[\.\)]\s*/, ''));
+        currentList.push(trimmedLine.replace(/^\d+[.)]\s*/, ''));
         return;
       }
 

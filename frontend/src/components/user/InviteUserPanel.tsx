@@ -11,6 +11,7 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { apiUrl } from "@/lib/apiBaseUrl";
+import { buildApiRequestError, readJsonSafe } from "@/lib/httpErrors";
 import {
   Card,
   CardContent,
@@ -19,7 +20,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { UserPlus, Loader2, Clock, CheckCircle, XCircle, RefreshCw } from "lucide-react";
 
@@ -61,10 +61,9 @@ export function InviteUserPanel() {
       const res = await fetch(apiUrl("/api/my-user-creation-requests"), {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
-      if (res.ok) {
-        const data = await res.json();
-        setRequests(data.requests || []);
-      }
+      const data = await readJsonSafe(res);
+      if (!res.ok) throw buildApiRequestError(res, data, "Failed to load user-creation requests");
+      setRequests(data.requests ?? []);
     } catch (err) {
       console.error("Failed to load my user-creation requests:", err);
     } finally {
@@ -98,12 +97,12 @@ export function InviteUserPanel() {
         }),
       });
 
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.detail || data.error || "Request failed");
+      const data = await readJsonSafe(res);
+      if (!res.ok) throw buildApiRequestError(res, data, "Request failed");
 
       toast({
         title: "Request submitted",
-        description: data.message || "Your request has been sent for admin approval.",
+        description: data.message ?? "Your request has been sent for admin approval.",
       });
 
       setName("");

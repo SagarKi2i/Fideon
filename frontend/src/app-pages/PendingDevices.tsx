@@ -18,7 +18,6 @@ interface PendingDevice {
 
 export default function PendingDevices() {
   const [devices, setDevices] = useState<PendingDevice[]>([]);
-  const [loading, setLoading] = useState(true);
   const { toast } = useToast();
 
   useEffect(() => {
@@ -45,7 +44,7 @@ export default function PendingDevices() {
         .order('registered_at', { ascending: false });
 
       if (error) throw error;
-      setDevices(data || []);
+      setDevices(data ?? []);
     } catch (error) {
       console.error('Error fetching pending devices:', error);
       toast({
@@ -53,8 +52,6 @@ export default function PendingDevices() {
         description: 'Failed to fetch pending devices',
         variant: 'destructive',
       });
-    } finally {
-      setLoading(false);
     }
   }
 
@@ -128,7 +125,7 @@ export default function PendingDevices() {
       <div className="fixed top-20 right-20 w-96 h-96 bg-primary/5 rounded-full blur-3xl animate-float -z-10" />
 
       <div className="mb-8 animate-fade-in">
-        <h1 className="text-4xl font-bold bg-gradient-hero bg-clip-text text-transparent mb-2">
+        <h1 className="text-3xl md:text-4xl font-bold tracking-tight bg-gradient-to-r from-primary via-primary to-accent bg-clip-text text-transparent mb-2">
           Pending Device Approvals
         </h1>
         <p className="text-muted-foreground">
@@ -168,7 +165,7 @@ export default function PendingDevices() {
                   <TableRow key={device.id}>
                     <TableCell className="font-medium">{device.device_name}</TableCell>
                     <TableCell>
-                      <Badge variant="outline">{device.os_type || 'Unknown'}</Badge>
+                      <Badge variant="outline">{device.os_type ?? 'Unknown'}</Badge>
                     </TableCell>
                     <TableCell>
                       {new Date(device.registered_at).toLocaleString()}

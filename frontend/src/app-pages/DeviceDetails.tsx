@@ -23,7 +23,6 @@ import {
 } from "@/components/ui/table";
 import {
   ArrowLeft,
-  Monitor,
   Circle,
   Loader2,
   RefreshCw,
@@ -223,8 +222,8 @@ export default function DeviceDetails() {
         return {
           device_id: id,
           model_id: modelId,
-          model_name: model?.model_name || modelId,
-          domain: model?.domain || "unknown",
+          model_name: model?.model_name ?? modelId,
+          domain: model?.domain ?? "unknown",
           allocated_by: user.id,
         };
       });

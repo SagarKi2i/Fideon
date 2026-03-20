@@ -13,8 +13,6 @@ import {
   Mail,
   ShieldCheck,
   User,
-  Sparkles,
-  ChevronDown,
   X,
   Search,
 } from "lucide-react";
@@ -159,7 +157,7 @@ export default function Devices() {
     const fallbackUsers: UserAccount[] = (appUsers || []).map(u => ({
       id: u.user_id,
       email: u.email,
-      role: roleMap.get(u.user_id) || "user",
+      role: roleMap.get(u.user_id) ?? "user",
       created_at: u.created_at,
     }));
     setUsers(fallbackUsers);
@@ -321,9 +319,9 @@ export default function Devices() {
                   className="group relative overflow-hidden bg-card/90 backdrop-blur-sm border-border/50 shadow-card hover:shadow-premium hover:border-primary/30 transition-all duration-300 animate-scale-in"
                   style={{ animationDelay: `${index * 50}ms` }}
                 >
-                  <div className="absolute inset-0 bg-gradient-primary opacity-0 group-hover:opacity-5 transition-opacity duration-300" />
+                  <div className="absolute inset-0 pointer-events-none bg-gradient-primary opacity-0 group-hover:opacity-5 transition-opacity duration-300" />
 
-                  <CardHeader className="pb-4">
+                  <CardHeader className="relative z-10 pb-4">
                     <div className="flex items-start justify-between mb-3">
                       <div className="p-3 rounded-xl bg-gradient-hero group-hover:scale-110 transition-transform duration-300">
                         {isAdmin ? (
@@ -345,7 +343,7 @@ export default function Devices() {
                     </div>
                   </CardHeader>
 
-                  <CardContent className="space-y-4">
+                  <CardContent className="relative z-10 space-y-4">
                     {/* Allocated Models */}
                     <div>
                       <div className="flex items-center justify-between mb-2">
@@ -357,7 +355,7 @@ export default function Devices() {
                       </div>
 
                       {models.length > 0 ? (
-                        <div className="space-y-1.5 max-h-32 overflow-y-auto">
+                        <div className="space-y-1.5 max-h-32 overflow-y-auto pr-1">
                           {models.map(model => (
                             <div key={model.id} className="flex items-center justify-between gap-2 p-2 rounded-lg bg-muted/50 text-xs">
                               <div className="flex items-center gap-2 min-w-0">

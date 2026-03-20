@@ -1,5 +1,6 @@
 // Training & Federated Learning API for device integration
 import { getApiBaseUrl } from "@/lib/apiBaseUrl";
+import { buildApiRequestError, readJsonSafe } from "@/lib/httpErrors";
 
 export interface TrainingFeedback {
   id: string;
@@ -106,8 +107,8 @@ async function trainingRequest(action: string, params?: Record<string, string>, 
   );
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || 'Request failed');
+    const payload = await readJsonSafe(response);
+    throw buildApiRequestError(response, payload, "Request failed");
   }
 
   return response.json();

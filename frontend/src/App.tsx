@@ -18,7 +18,6 @@ import DeviceDetails from "./app-pages/DeviceDetails";
 import DeviceSetup from "./app-pages/DeviceSetup";
 import LinkDevices from "./app-pages/LinkDevices";
 import Settings from "./app-pages/Settings";
-import PolicyComparison from "./app-pages/PolicyComparison";
 import PitchDeck from "./app-pages/PitchDeck";
 import PodDashboard from "./app-pages/PodDashboard";
 import Auth from "./app-pages/Auth";
@@ -32,6 +31,7 @@ import AgentWorkflows from "./app-pages/AgentWorkflows";
 import ReviewQueue from "./app-pages/ReviewQueue";
 import Activity from "./app-pages/Activity";
 import DeviceLinkConfirm from "./app-pages/DeviceLinkConfirm";
+import Users from "./app-pages/Users";
 
 
 
@@ -92,6 +92,11 @@ const App = () => (
                   <Route path="/devices/pending" element={
                     <ProtectedRoute requireAdmin>
                       <PendingDevices />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/users" element={
+                    <ProtectedRoute requireAdmin>
+                      <Users />
                     </ProtectedRoute>
                   } />
                   <Route path="/devices/:id" element={

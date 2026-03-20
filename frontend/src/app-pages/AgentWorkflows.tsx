@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
 import {
-  Plus, Trash2, Loader2, Zap, ArrowDown, GripVertical, Play,
+  Plus, Trash2, Loader2, Zap, ArrowDown, GripVertical,
   Repeat, Calendar, Clock, ChevronDown, ChevronUp, Save, Settings2, Link2
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
@@ -181,7 +181,10 @@ export default function AgentWorkflows() {
 
   // Group agents by category
   const agentsByCategory = AGENT_REGISTRY.reduce((acc, a) => {
-    (acc[a.category] = acc[a.category] || []).push(a);
+    if (!acc[a.category]) {
+      acc[a.category] = [];
+    }
+    acc[a.category].push(a);
     return acc;
   }, {} as Record<string, typeof AGENT_REGISTRY>);
 

@@ -87,7 +87,6 @@ export default function Dashboard() {
   const [displayName, setDisplayName] = useState("User");
   const [totalQueries, setTotalQueries] = useState(0);
   const [avgSuccessRate, setAvgSuccessRate] = useState(100);
-  const [avgResponseTime, setAvgResponseTime] = useState("N/A");
   const [podQueryCounts, setPodQueryCounts] = useState<Record<string, number>>({});
   const [podLastActivity, setPodLastActivity] = useState<Record<string, string>>({});
   const [recentActivity, setRecentActivity] = useState<
@@ -108,8 +107,8 @@ export default function Dashboard() {
         .select("full_name,email")
         .eq("user_id", user.id)
         .maybeSingle();
-      const fallbackName = user.email?.split("@")[0] || "User";
-      setDisplayName(profile?.full_name || profile?.email?.split("@")[0] || fallbackName);
+      const fallbackName = user.email?.split("@")[0] ?? "User";
+      setDisplayName(profile?.full_name ?? profile?.email?.split("@")[0] ?? fallbackName);
 
       const { data, error } = await supabase
         .from("activated_models")
@@ -118,7 +117,7 @@ export default function Dashboard() {
         .order("activated_at", { ascending: false });
 
       if (error) throw error;
-      const podsData = data || [];
+      const podsData = data ?? [];
       setPods(podsData);
 
       const { data: conversations } = await supabase
@@ -131,10 +130,10 @@ export default function Dashboard() {
       let conversationQueryTotal = 0;
       const activityFeed: { id: string; action: string; time: string; status: "success" | "error"; podName: string }[] = [];
 
-      for (const conv of conversations || []) {
-        const modelId = conv.model_id || "generic-prompt";
+      for (const conv of conversations ?? []) {
+        const modelId = conv.model_id ?? "generic-prompt";
         const queryCount = Array.isArray((conv as any).chat_messages) ? (conv as any).chat_messages.length : 0;
-        queryCountByModel[modelId] = (queryCountByModel[modelId] || 0) + queryCount;
+        queryCountByModel[modelId] = (queryCountByModel[modelId] ?? 0) + queryCount;
         conversationQueryTotal += queryCount;
         const activityTime = conv.updated_at || null;
         if (!lastActivityByModel[modelId] || new Date(activityTime || 0).getTime() > new Date(lastActivityByModel[modelId]).getTime()) {
@@ -146,7 +145,7 @@ export default function Dashboard() {
           action: conv.title ? `Conversation: ${conv.title}` : "Conversation activity",
           time: toRelativeTime(activityTime),
           status: "success",
-          podName: podsData.find((p) => p.model_id === modelId)?.model_name || modelId,
+          podName: podsData.find((p) => p.model_id === modelId)?.model_name ?? modelId,
         });
       }
 
@@ -161,24 +160,12 @@ export default function Dashboard() {
         .order("started_at", { ascending: false })
         .limit(100);
 
-      const runRows = runs || [];
+      const runRows = runs ?? [];
       const completedRuns = runRows.filter((r) => r.status === "completed");
       const failedRuns = runRows.filter((r) => r.status === "failed");
       const consideredRuns = completedRuns.length + failedRuns.length;
       const successRate = consideredRuns > 0 ? (completedRuns.length / consideredRuns) * 100 : 100;
       setAvgSuccessRate(successRate);
-
-      const runDurations = completedRuns
-        .filter((r) => r.started_at && r.completed_at)
-        .map((r) => (new Date(r.completed_at as string).getTime() - new Date(r.started_at as string).getTime()) / 1000)
-        .filter((s) => Number.isFinite(s) && s >= 0);
-
-      if (runDurations.length > 0) {
-        const avgSeconds = runDurations.reduce((a, b) => a + b, 0) / runDurations.length;
-        setAvgResponseTime(avgSeconds < 1 ? `${Math.round(avgSeconds * 1000)}ms` : `${avgSeconds.toFixed(1)}s`);
-      } else {
-        setAvgResponseTime("N/A");
-      }
 
       const runActivities = runRows.slice(0, 5).map((r) => ({
         id: `run-${r.id}`,
@@ -338,10 +325,10 @@ export default function Dashboard() {
                 {pods.map((pod, index) => {
                   const Icon = getPodIcon(pod.model_id);
                   const metrics: PodMetrics = {
-                    totalQueries: podQueryCounts[pod.model_id] || 0,
+                    totalQueries: podQueryCounts[pod.model_id] ?? 0,
                     successRate: avgSuccessRate,
                     lastActivity: toRelativeTime(podLastActivity[pod.model_id]),
-                    trend: (podQueryCounts[pod.model_id] || 0) > 0 ? "Live data" : "No data",
+                    trend: (podQueryCounts[pod.model_id] ?? 0) > 0 ? "Live data" : "No data",
                   };
                   const colorClass = getPodColor(pod.model_id);
                   const gradient = getPodGradient(pod.model_id);
@@ -411,13 +398,13 @@ export default function Dashboard() {
                 </CardHeader>
                 <CardContent>
                   <div className="space-y-3">
-                    {recentActivity.map((activity, index) => {
+                    {recentActivity.map((activity) => {
                       const Icon = Activity;
                       const colorClass = "text-primary";
                       
                       return (
                         <div 
-                          key={index}
+                          key={activity.id}
                           className="flex items-center gap-3 p-3 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors"
                         >
                           <div className={`p-2 rounded-lg bg-background`}>

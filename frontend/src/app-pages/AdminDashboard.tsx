@@ -6,10 +6,11 @@ import { Progress } from '@/components/ui/progress';
 import { ModelAllocationSection } from '@/components/admin/ModelAllocationSection';
 import { PodActivationRequests } from '@/components/admin/PodActivationRequests';
 import { useUserRole } from '@/hooks/useUserRole';
-import { GlobalAdminRoleManager } from '@/components/admin/GlobalAdminRoleManager';
-import { UserCreationRequests } from '@/components/admin/UserCreationRequests';
 import { Badge } from '@/components/ui/badge';
 import { REALTIME_DEVICE_EVENT } from '@/lib/realtimeEvents';
+import { Button } from '@/components/ui/button';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Link } from 'react-router-dom';
 
 interface DashboardStats {
   totalDevices: number;
@@ -98,7 +99,8 @@ const STAT_CARDS_TEMPLATE: Record<string, {
 };
 
 export default function AdminDashboard() {
-  const { isGlobalAdmin, isAdmin, role } = useUserRole();
+  const { isAdmin } = useUserRole();
+  const [isLoading, setIsLoading] = useState(true);
   const [stats, setStats] = useState<DashboardStats>({
     totalDevices: 0,
     onlineDevices: 0,
@@ -109,7 +111,6 @@ export default function AdminDashboard() {
     totalModelsAssigned: 0,
     totalUsageToday: 0,
   });
-  const [loading, setLoading] = useState(true);
   const [pairings, setPairings] = useState<PairingSession[]>([]);
   const [linkedDevices, setLinkedDevices] = useState<LinkedDevice[]>([]);
   const [pairingDbReady, setPairingDbReady] = useState(true);
@@ -117,7 +118,6 @@ export default function AdminDashboard() {
   const fetchDashboardStats = useCallback(async () => {
     try {
       const dayMs = 24 * 60 * 60 * 1000;
-      const nowIso = new Date().toISOString();
       const yesterdayIso = new Date(Date.now() - dayMs).toISOString();
       const weekAgoIso = new Date(Date.now() - (7 * dayMs)).toISOString();
 
@@ -157,8 +157,8 @@ export default function AdminDashboard() {
 
       const now = new Date();
       const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
-      const usageToday = usageTodayCount || 0;
-      const usageYesterday = usageYesterdayCount || 0;
+      const usageToday = usageTodayCount ?? 0;
+      const usageYesterday = usageYesterdayCount ?? 0;
       const usageTrend = usageYesterday > 0
         ? `${Math.round(((usageToday - usageYesterday) / usageYesterday) * 100)}% vs yesterday`
         : usageToday > 0
@@ -166,13 +166,13 @@ export default function AdminDashboard() {
           : "No usage yet";
 
       setStats({
-        totalDevices: devices?.length || 0,
-        onlineDevices: devices?.filter(d => d.status === 'online').length || 0,
-        offlineDevices: devices?.filter(d => d.status === 'offline').length || 0,
-        pendingApprovals: pendingPodRequestsCount || 0,
-        expiringSoon: licenses?.filter(l => l.expires_at && new Date(l.expires_at) <= thirtyDaysFromNow).length || 0,
-        syncFailures: syncLogs?.length || 0,
-        totalModelsAssigned: assignedModelsCount || 0,
+        totalDevices: devices?.length ?? 0,
+        onlineDevices: devices?.filter(d => d.status === 'online').length ?? 0,
+        offlineDevices: devices?.filter(d => d.status === 'offline').length ?? 0,
+        pendingApprovals: pendingPodRequestsCount ?? 0,
+        expiringSoon: licenses?.filter(l => l.expires_at && new Date(l.expires_at) <= thirtyDaysFromNow).length ?? 0,
+        syncFailures: syncLogs?.length ?? 0,
+        totalModelsAssigned: assignedModelsCount ?? 0,
         totalUsageToday: usageToday,
       });
 
@@ -183,8 +183,6 @@ export default function AdminDashboard() {
       STAT_CARDS_TEMPLATE.totalUsageToday.trend = usageTrend;
     } catch (error) {
       console.error('Error fetching dashboard stats:', error);
-    } finally {
-      setLoading(false);
     }
   }, []);
 
@@ -206,7 +204,7 @@ export default function AdminDashboard() {
       }
 
       setPairingDbReady(true);
-      setPairings(pairingRows || []);
+      setPairings(pairingRows ?? []);
 
       const { data: allRecentDevices, error: devicesError } = await supabase
         .from('devices')
@@ -216,7 +214,7 @@ export default function AdminDashboard() {
 
       if (devicesError) throw devicesError;
 
-      const linked = (allRecentDevices || []).filter((row: any) => row?.metadata?.linked_from_pairing === true);
+      const linked = (allRecentDevices ?? []).filter((row: any) => row?.metadata?.linked_from_pairing === true);
       setLinkedDevices(linked.slice(0, 12));
     } catch (error) {
       console.error('Error fetching device pairing insights:', error);
@@ -224,12 +222,16 @@ export default function AdminDashboard() {
   }, []);
 
   useEffect(() => {
-    fetchDashboardStats();
-    fetchPairingInsights();
+    const bootstrap = async () => {
+      setIsLoading(true);
+      await Promise.all([fetchDashboardStats(), fetchPairingInsights()]);
+      setIsLoading(false);
+    };
+    void bootstrap();
 
     const handleDeviceRealtime = () => {
-      fetchDashboardStats();
-      fetchPairingInsights();
+      void fetchDashboardStats();
+      void fetchPairingInsights();
     };
     window.addEventListener(REALTIME_DEVICE_EVENT, handleDeviceRealtime);
 
@@ -256,6 +258,24 @@ export default function AdminDashboard() {
     { ...STAT_CARDS_TEMPLATE.totalModelsAssigned, value: stats.totalModelsAssigned },
     { ...STAT_CARDS_TEMPLATE.totalUsageToday, value: stats.totalUsageToday },
   ];
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen p-8 space-y-6">
+        <Skeleton className="h-10 w-72" />
+        <Skeleton className="h-5 w-96" />
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          {Array.from({ length: 8 }).map((_, i) => (
+            <Skeleton key={i} className="h-36 w-full" />
+          ))}
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <Skeleton className="h-72 w-full" />
+          <Skeleton className="h-72 w-full" />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen p-8 relative overflow-hidden">
@@ -287,7 +307,7 @@ export default function AdminDashboard() {
                 <CardTitle className="text-sm font-medium text-muted-foreground">
                   {stat.title}
                 </CardTitle>
-                <stat.icon className={`h-4 w-4 ${stat.color || 'text-primary'}`} />
+                <stat.icon className={`h-4 w-4 ${stat.color ?? 'text-primary'}`} />
               </div>
             </CardHeader>
             <CardContent>
@@ -426,7 +446,7 @@ export default function AdminDashboard() {
               pairings.map((p) => (
                 <div key={p.id} className="rounded-lg border border-border/60 p-3 flex items-center justify-between gap-3">
                   <div className="min-w-0">
-                    <p className="text-sm font-medium truncate">{p.primary_device_label || 'Primary session'}</p>
+                    <p className="text-sm font-medium truncate">{p.primary_device_label ?? 'Primary session'}</p>
                     <p className="text-xs text-muted-foreground">
                       {new Date(p.created_at).toLocaleString()} - expires {new Date(p.expires_at).toLocaleTimeString()}
                     </p>
@@ -457,7 +477,7 @@ export default function AdminDashboard() {
                     <Badge variant="outline">{d.status}</Badge>
                   </div>
                   <p className="text-xs text-muted-foreground mt-1">
-                    {d.os_type || 'Unknown OS'} | {d.app_version || 'Unknown app'} | {new Date(d.registered_at).toLocaleString()}
+                    {d.os_type ?? 'Unknown OS'} | {d.app_version ?? 'Unknown app'} | {new Date(d.registered_at).toLocaleString()}
                   </p>
                 </div>
               ))
@@ -470,21 +490,20 @@ export default function AdminDashboard() {
       <div className="mt-6 animate-fade-in">
         <ModelAllocationSection />
       </div>
-
-      {/* User creation requests inbox — visible to admin and global_admin */}
       {isAdmin && (
-        <div className="mt-6 animate-fade-in">
-          <UserCreationRequests viewerRole={isGlobalAdmin ? "global_admin" : "admin"} />
-        </div>
-      )}
-
-      {/* Role / User management — visible to admin and global_admin */}
-      {isAdmin && (
-        <div className="mt-6 animate-fade-in">
-          <GlobalAdminRoleManager
-            currentUserRole={isGlobalAdmin ? "global_admin" : "admin"}
-          />
-        </div>
+        <Card className="mt-6 border-border/50 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 shadow-premium">
+          <CardHeader>
+            <CardTitle>User Management</CardTitle>
+            <CardDescription>
+              User creation requests and role controls are available on the dedicated Users page.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button asChild>
+              <Link to="/users">Open Users Page</Link>
+            </Button>
+          </CardContent>
+        </Card>
       )}
     </div>
   );

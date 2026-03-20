@@ -1,5 +1,6 @@
 import { supabase } from "@/integrations/supabase/client";
 import { apiUrl } from "@/lib/apiBaseUrl";
+import { buildApiRequestError, notAuthenticatedError, readJsonSafe } from "@/lib/httpErrors";
 
 export interface SettingsPreferences {
   email_notifications: boolean;
@@ -28,7 +29,7 @@ async function authHeaders(): Promise<Record<string, string>> {
   const { data } = await supabase.auth.getSession();
   const token = data.session?.access_token;
   if (!token) {
-    throw new Error("Not authenticated");
+    throw notAuthenticatedError();
   }
   return {
     Authorization: `Bearer ${token}`,
@@ -40,8 +41,8 @@ export async function fetchSettingsProfile(): Promise<SettingsProfile> {
   const res = await fetch(apiUrl("/api/settings/profile"), {
     headers: await authHeaders(),
   });
-  const payload = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(payload?.error || "Failed to load profile");
+  const payload = await readJsonSafe(res);
+  if (!res.ok) throw buildApiRequestError(res, payload, "Failed to load profile");
   return payload.profile as SettingsProfile;
 }
 
@@ -54,16 +55,16 @@ export async function updateSettingsProfile(fullName: string, preferences: Setti
       preferences,
     }),
   });
-  const payload = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(payload?.error || "Failed to update profile");
+  const payload = await readJsonSafe(res);
+  if (!res.ok) throw buildApiRequestError(res, payload, "Failed to update profile");
 }
 
 export async function fetchPersonalApiKeys(): Promise<PersonalApiKeyRow[]> {
   const res = await fetch(apiUrl("/api/settings/api-keys"), {
     headers: await authHeaders(),
   });
-  const payload = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(payload?.error || "Failed to load API keys");
+  const payload = await readJsonSafe(res);
+  if (!res.ok) throw buildApiRequestError(res, payload, "Failed to load API keys");
   return (payload.keys || []) as PersonalApiKeyRow[];
 }
 
@@ -73,8 +74,8 @@ export async function createPersonalApiKey(name: string): Promise<{ api_key: str
     headers: await authHeaders(),
     body: JSON.stringify({ name }),
   });
-  const payload = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(payload?.error || "Failed to create API key");
+  const payload = await readJsonSafe(res);
+  if (!res.ok) throw buildApiRequestError(res, payload, "Failed to create API key");
   return payload as { api_key: string; key: PersonalApiKeyRow };
 }
 
@@ -83,6 +84,6 @@ export async function revokePersonalApiKey(keyId: string): Promise<void> {
     method: "DELETE",
     headers: await authHeaders(),
   });
-  const payload = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(payload?.error || "Failed to revoke API key");
+  const payload = await readJsonSafe(res);
+  if (!res.ok) throw buildApiRequestError(res, payload, "Failed to revoke API key");
 }

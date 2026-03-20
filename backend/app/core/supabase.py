@@ -133,8 +133,13 @@ async def postgrest_delete(table: str, query: str) -> None:
 
 
 async def get_device_by_token(device_token: str) -> Dict[str, Any]:
-    encoded = quote(device_token, safe="")
-    rows = await postgrest_get("devices", f"select=*&device_token=eq.{encoded}&limit=1")
+    token_hash = hashlib.sha256(device_token.encode("utf-8")).hexdigest()
+    encoded_hash = quote(token_hash, safe="")
+    rows = await postgrest_get("devices", f"select=*&token_hash=eq.{encoded_hash}&limit=1")
+    if not rows:
+        # Backward compatibility for environments where token_hash is not yet present.
+        encoded = quote(device_token, safe="")
+        rows = await postgrest_get("devices", f"select=*&device_token=eq.{encoded}&limit=1")
     if not rows:
         raise HTTPException(status_code=401, detail="Invalid device token")
     device = rows[0]

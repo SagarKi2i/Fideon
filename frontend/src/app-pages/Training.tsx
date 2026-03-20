@@ -14,7 +14,6 @@ import {
   Cpu,
   Globe,
   ThumbsUp,
-  ThumbsDown,
   Star,
   Play,
   RefreshCw,
@@ -78,7 +77,7 @@ export default function Training() {
         .from("activated_models")
         .select("model_id, model_name")
         .eq("user_id", user.id);
-      setActivatedModels(models || []);
+      setActivatedModels(models ?? []);
 
       const electron = await isElectron();
       setIsElectronApp(electron);
@@ -143,8 +142,8 @@ export default function Training() {
         model_id: feedbackModelId,
         prompt: feedbackPrompt,
         original_response: feedbackOriginal,
-        corrected_response: feedbackCorrected || undefined,
-        rating: feedbackRating || undefined,
+        corrected_response: feedbackCorrected ?? undefined,
+        rating: feedbackRating ?? undefined,
         feedback_type: feedbackCorrected ? "correction" : "rating",
       });
       toast({ title: "Feedback submitted", description: "Your feedback will be used for local training" });

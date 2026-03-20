@@ -27,6 +27,7 @@ CREATE POLICY "Admins can insert federated updates"
 -- Fix 4: user_roles tenant-JOIN policy caused 500 errors on every role lookup
 -- The JOIN to app_users inside an RLS policy creates a cascading evaluation crash
 DROP POLICY IF EXISTS "Admins can view user roles in own tenant" ON public.user_roles;
+DROP POLICY IF EXISTS "Admins can view all user roles" ON public.user_roles;
 CREATE POLICY "Admins can view all user roles"
   ON public.user_roles
   FOR SELECT

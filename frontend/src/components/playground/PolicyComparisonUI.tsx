@@ -4,11 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
-import { Separator } from "@/components/ui/separator";
 import { 
   Upload, 
-  FileText, 
   Loader2, 
   FileCheck, 
   Scale, 
@@ -21,7 +18,6 @@ import {
   DollarSign,
   Lightbulb,
   ArrowRight,
-  ChevronRight,
   Info,
   AlertCircle,
   Sparkles
@@ -66,7 +62,7 @@ interface ComparisonResult {
 
 // Parse mock result to structured data
 const parseComparisonResult = (result: string): ComparisonResult | null => {
-  if (!result || !result.includes("Policy Comparison Analysis")) return null;
+  if (!result?.includes("Policy Comparison Analysis")) return null;
   
   // Mock parsed comparison data
   return {
@@ -256,7 +252,7 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
 
       {/* Results Section */}
       {result && parsedResult && (
-        <OutputCorrection modelId={modelId || "policy-comparison"} prompt={lastPrompt} output={result}>
+        <OutputCorrection modelId={modelId ?? "policy-comparison"} prompt={lastPrompt} output={result}>
         <div className="space-y-6 animate-fade-in">
           {/* Summary Cards */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -443,8 +439,8 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {parsedResult.gaps.map((gap, index) => (
-                <div key={index} className="flex items-start gap-3 p-3 rounded-lg bg-amber-500/5 border border-amber-500/20">
+              {parsedResult.gaps.map((gap) => (
+                <div key={gap} className="flex items-start gap-3 p-3 rounded-lg bg-amber-500/5 border border-amber-500/20">
                   <AlertTriangle className="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" />
                   <div>
                     <p className="font-medium text-foreground">{gap}</p>
@@ -467,9 +463,9 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
             </CardHeader>
             <CardContent>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {parsedResult.strengths.map((strength, index) => (
+                {parsedResult.strengths.map((strength) => (
                   <div 
-                    key={index} 
+                    key={`${strength.policy}-${strength.description}`} 
                     className={`flex items-start gap-3 p-3 rounded-lg border ${
                       strength.policy === "A" 
                         ? "bg-blue-500/5 border-blue-500/20" 

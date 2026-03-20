@@ -5,11 +5,20 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
-import { CheckCircle2, XCircle, Clock, Package, User } from "lucide-react";
+import { CheckCircle2, XCircle, Clock, Package } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { useUserRole } from "@/hooks/useUserRole";
 import { safeLog } from "@/logger";
 import { computeAuditIntegrityHash } from "@/lib/auditHash";
+import { buildApiRequestError, readJsonSafe } from "@/lib/httpErrors";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 interface ActivationRequest {
   id: string;
@@ -23,13 +32,22 @@ interface ActivationRequest {
   rejection_reason: string | null;
 }
 
+interface RequestUserContext {
+  fullName: string | null;
+  email: string | null;
+  tenantId: string | null;
+  tenantName: string | null;
+}
+
 export function PodActivationRequests() {
   const { toast } = useToast();
   const [requests, setRequests] = useState<ActivationRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [processingId, setProcessingId] = useState<string | null>(null);
-  const [rejectionReason, setRejectionReason] = useState<Record<string, string>>({});
-  const [showRejectInput, setShowRejectInput] = useState<string | null>(null);
+  const [reviewRequest, setReviewRequest] = useState<ActivationRequest | null>(null);
+  const [reviewContext, setReviewContext] = useState<RequestUserContext | null>(null);
+  const [loadingReviewContext, setLoadingReviewContext] = useState(false);
+  const [reviewRejectionReason, setReviewRejectionReason] = useState("");
   const { role } = useUserRole();
 
   useEffect(() => {
@@ -47,11 +65,9 @@ export function PodActivationRequests() {
           "Content-Type": "application/json",
         },
       });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload?.error || "Failed to load activation requests");
-      }
-      setRequests(payload.requests || []);
+      const payload = await readJsonSafe(response);
+      if (!response.ok) throw buildApiRequestError(response, payload, "Failed to load activation requests");
+      setRequests(payload.requests ?? []);
     } catch (error) {
       console.error("Error loading requests:", error);
     } finally {
@@ -72,10 +88,8 @@ export function PodActivationRequests() {
           "Content-Type": "application/json",
         },
       });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload?.error || "Failed to approve request");
-      }
+      const payload = await readJsonSafe(response);
+      if (!response.ok) throw buildApiRequestError(response, payload, "Failed to approve request");
 
       // Audit: admin/global_admin approving a pod request
       try {
@@ -84,7 +98,7 @@ export function PodActivationRequests() {
           const createdAt = new Date().toISOString();
           const integrity_hash = await computeAuditIntegrityHash({
             user_id: user.id,
-            role: role || "admin",
+            role: role ?? "admin",
             event: `approve_pod:${request.model_id}`,
             action_code: "U",
             outcome_code: 0,
@@ -96,7 +110,7 @@ export function PodActivationRequests() {
           await (supabase as any).from("auth_audit").insert({
             user_id: user.id,
             email: user.email,
-            role: role || "admin",
+            role: role ?? "admin",
             event: `approve_pod:${request.model_id}`,
             action_code: "U",              // Update allocation state
             outcome_code: 0,
@@ -123,7 +137,7 @@ export function PodActivationRequests() {
       console.error("Error approving request:", error);
       toast({
         title: "Error",
-        description: "Failed to approve request",
+        description: error instanceof Error ? error.message : "Failed to approve request",
         variant: "destructive",
       });
     } finally {
@@ -131,7 +145,7 @@ export function PodActivationRequests() {
     }
   };
 
-  const handleReject = async (request: ActivationRequest) => {
+  const handleReject = async (request: ActivationRequest, rejectionReasonText?: string) => {
     setProcessingId(request.id);
     try {
       const { data: { session } } = await supabase.auth.getSession();
@@ -144,13 +158,11 @@ export function PodActivationRequests() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          rejection_reason: rejectionReason[request.id] || null,
+          rejection_reason: rejectionReasonText?.trim() || null,
         }),
       });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload?.error || "Failed to reject request");
-      }
+      const payload = await readJsonSafe(response);
+      if (!response.ok) throw buildApiRequestError(response, payload, "Failed to reject request");
 
       // Audit: admin/global_admin rejecting a pod request
       try {
@@ -159,7 +171,7 @@ export function PodActivationRequests() {
           const createdAt = new Date().toISOString();
           const integrity_hash = await computeAuditIntegrityHash({
             user_id: user.id,
-            role: role || "admin",
+            role: role ?? "admin",
             event: `reject_pod:${request.model_id}`,
             action_code: "U",
             outcome_code: 0,
@@ -171,7 +183,7 @@ export function PodActivationRequests() {
           await (supabase as any).from("auth_audit").insert({
             user_id: user.id,
             email: user.email,
-            role: role || "admin",
+            role: role ?? "admin",
             event: `reject_pod:${request.model_id}`,
             action_code: "U",              // Update request status
             outcome_code: 0,
@@ -193,17 +205,58 @@ export function PodActivationRequests() {
         description: `Activation request for ${request.model_name} has been rejected`,
       });
 
-      setShowRejectInput(null);
+      setReviewRequest(null);
+      setReviewRejectionReason("");
       loadRequests();
     } catch (error) {
       console.error("Error rejecting request:", error);
       toast({
         title: "Error",
-        description: "Failed to reject request",
+        description: error instanceof Error ? error.message : "Failed to reject request",
         variant: "destructive",
       });
     } finally {
       setProcessingId(null);
+    }
+  };
+
+  const openReviewModal = async (request: ActivationRequest) => {
+    setReviewRequest(request);
+    setReviewContext(null);
+    setReviewRejectionReason("");
+    setLoadingReviewContext(true);
+
+    try {
+      const { data: appUser, error } = await supabase
+        .from("app_users")
+        .select("full_name,email,tenant_id")
+        .eq("user_id", request.user_id)
+        .maybeSingle();
+
+      if (error) throw error;
+
+      let tenantName: string | null = null;
+      if (appUser?.tenant_id) {
+        const { data: tenant, error: tenantError } = await supabase
+          .from("tenants")
+          .select("name")
+          .eq("id", appUser.tenant_id)
+          .maybeSingle();
+        if (tenantError) throw tenantError;
+        tenantName = tenant?.name ?? null;
+      }
+
+      setReviewContext({
+        fullName: appUser?.full_name ?? null,
+        email: appUser?.email ?? null,
+        tenantId: appUser?.tenant_id ?? null,
+        tenantName,
+      });
+    } catch (error) {
+      console.error("Error loading request context:", error);
+      setReviewContext(null);
+    } finally {
+      setLoadingReviewContext(false);
     }
   };
 
@@ -264,63 +317,16 @@ export function PodActivationRequests() {
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      {showRejectInput === request.id ? (
-                        <div className="flex items-center gap-2">
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => setShowRejectInput(null)}
-                          >
-                            Cancel
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="destructive"
-                            onClick={() => handleReject(request)}
-                            disabled={processingId === request.id}
-                          >
-                            <XCircle className="h-3.5 w-3.5 mr-1" />
-                            Confirm Reject
-                          </Button>
-                        </div>
-                      ) : (
-                        <>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => setShowRejectInput(request.id)}
-                            disabled={processingId === request.id}
-                            className="text-destructive hover:text-destructive"
-                          >
-                            <XCircle className="h-3.5 w-3.5 mr-1" />
-                            Reject
-                          </Button>
-                          <Button
-                            size="sm"
-                            onClick={() => handleApprove(request)}
-                            disabled={processingId === request.id}
-                          >
-                            <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
-                            Approve
-                          </Button>
-                        </>
-                      )}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => openReviewModal(request)}
+                        disabled={processingId === request.id}
+                      >
+                        Review Request
+                      </Button>
                     </div>
                   </div>
-                  {showRejectInput === request.id && (
-                    <Textarea
-                      placeholder="Reason for rejection (optional)"
-                      value={rejectionReason[request.id] || ""}
-                      onChange={(e) =>
-                        setRejectionReason((prev) => ({
-                          ...prev,
-                          [request.id]: e.target.value,
-                        }))
-                      }
-                      className="text-sm"
-                      rows={2}
-                    />
-                  )}
                 </div>
               ))}
             </div>
@@ -362,6 +368,70 @@ export function PodActivationRequests() {
           </CardContent>
         </Card>
       )}
+
+      <Dialog open={!!reviewRequest} onOpenChange={(open) => !open && setReviewRequest(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Review Pod Activation Request</DialogTitle>
+            <DialogDescription>
+              Validate tenant context and approve in one click, or reject with a reason.
+            </DialogDescription>
+          </DialogHeader>
+          {reviewRequest ? (
+            <div className="space-y-3 py-2">
+              <div className="rounded-md border p-3 text-sm space-y-1">
+                <p className="font-medium">{reviewRequest.model_name}</p>
+                <p className="text-muted-foreground capitalize">{reviewRequest.domain}</p>
+                <p className="text-xs text-muted-foreground">
+                  Requested {new Date(reviewRequest.requested_at).toLocaleString()}
+                </p>
+              </div>
+
+              <div className="rounded-md border p-3 text-sm space-y-1">
+                {loadingReviewContext ? (
+                  <p className="text-muted-foreground">Loading tenant context...</p>
+                ) : (
+                  <>
+                    <p><span className="text-muted-foreground">Requested by:</span> {reviewContext?.fullName ?? "Unknown user"}</p>
+                    <p><span className="text-muted-foreground">Email:</span> {reviewContext?.email ?? "Not available"}</p>
+                    <p><span className="text-muted-foreground">Tenant:</span> {reviewContext?.tenantName ?? "Unassigned tenant"}</p>
+                    <p className="text-xs text-muted-foreground">Tenant ID: {reviewContext?.tenantId ?? "N/A"}</p>
+                    <p className="text-xs text-muted-foreground">User ID: {reviewRequest.user_id}</p>
+                  </>
+                )}
+              </div>
+
+              <Textarea
+                placeholder="Reason for rejection (optional)"
+                value={reviewRejectionReason}
+                onChange={(e) => setReviewRejectionReason(e.target.value)}
+                rows={3}
+              />
+            </div>
+          ) : null}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setReviewRequest(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={!reviewRequest || processingId === reviewRequest?.id}
+              onClick={() => reviewRequest && handleReject(reviewRequest, reviewRejectionReason)}
+            >
+              <XCircle className="h-4 w-4 mr-1.5" />
+              Decline
+            </Button>
+            <Button
+              disabled={!reviewRequest || processingId === reviewRequest?.id}
+              onClick={() => reviewRequest && handleApprove(reviewRequest)}
+            >
+              <CheckCircle2 className="h-4 w-4 mr-1.5" />
+              One-click Approve
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

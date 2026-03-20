@@ -613,7 +613,7 @@ export default function PodDashboard() {
         </div>
         <div className="flex gap-2">
           <Button 
-            onClick={() => navigate("/playground")} 
+            onClick={() => navigate(`/playground?model=${encodeURIComponent(pod.model_id)}`)}
             className="bg-gradient-primary"
           >
             <MessageSquare className="h-4 w-4 mr-2" />

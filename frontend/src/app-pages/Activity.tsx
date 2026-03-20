@@ -10,6 +10,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { safeLog } from "@/logger";
 import { ChevronLeft, ChevronRight, Download, RefreshCw } from "lucide-react";
+import { buildApiRequestError, readJsonSafe } from "@/lib/httpErrors";
+import { Skeleton } from "@/components/ui/skeleton";
 
 const PAGE_SIZE = 25;
 
@@ -63,7 +65,7 @@ function exportCsv(filename: string, rows: Record<string, unknown>[]) {
   URL.revokeObjectURL(url);
 }
 
-function RoleBadge({ role }: { role: string }) {
+function RoleBadge({ role }: Readonly<{ role: string }>) {
   return (
     <Badge variant={role.includes("admin") ? "default" : "outline"} className="text-xs">
       {role}
@@ -71,7 +73,7 @@ function RoleBadge({ role }: { role: string }) {
   );
 }
 
-function ModelBadge({ modelId }: { modelId?: string | null }) {
+function ModelBadge({ modelId }: Readonly<{ modelId?: string | null }>) {
   if (!modelId) return <span className="text-xs text-muted-foreground">-</span>;
   return (
     <Badge variant="secondary" className="text-xs font-mono">
@@ -258,7 +260,11 @@ function AuthEventsTab() {
 
         {/* Table */}
         {loading ? (
-          <p className="text-sm text-muted-foreground py-6 text-center">Loading…</p>
+          <div className="space-y-2 py-2">
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-full" />
+          </div>
         ) : rows.length === 0 ? (
           <p className="text-sm text-muted-foreground py-6 text-center">No auth events found.</p>
         ) : (
@@ -344,8 +350,8 @@ function SystemEventsTab() {
       const resp = await fetch(apiUrl(`/api/activity/system?${params}`), {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
-      const payload = await resp.json().catch(() => ({}));
-      if (!resp.ok) throw new Error(payload?.error || "Failed to load system logs");
+      const payload = await readJsonSafe(resp);
+      if (!resp.ok) throw buildApiRequestError(resp, payload, "Failed to load system logs");
       setRows((payload.logs || []) as SystemLogRow[]);
       setHasMore(!!payload.has_more);
     } catch (e: any) {
@@ -445,7 +451,11 @@ function SystemEventsTab() {
 
         {/* Table */}
         {loading ? (
-          <p className="text-sm text-muted-foreground py-6 text-center">Loading…</p>
+          <div className="space-y-2 py-2">
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-full" />
+          </div>
         ) : rows.length === 0 ? (
           <p className="text-sm text-muted-foreground py-6 text-center">No system events found.</p>
         ) : (
