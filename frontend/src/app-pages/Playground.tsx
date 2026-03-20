@@ -110,7 +110,7 @@ export default function Playground() {
           description: "Playground is only available for user accounts",
           variant: "destructive",
         });
-        navigate("/dashboard");
+        navigate("/");
         return;
       }
 

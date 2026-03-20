@@ -106,6 +106,13 @@ export default function Signup() {
   const [platform, setPlatform] = useState("");
   const [hardwareFingerprint, setHardwareFingerprint] = useState("");
   const [showAllModels, setShowAllModels] = useState(false);
+  const [step0Errors, setStep0Errors] = useState<{
+    tenantName?: string;
+    fullName?: string;
+    email?: string;
+    password?: string;
+    confirmPassword?: string;
+  }>({});
 
   useEffect(() => {
     const parseBrowser = (ua: string) => {
@@ -188,8 +195,35 @@ export default function Signup() {
     return true;
   };
 
+  const validateStep0 = () => {
+    const nextErrors: typeof step0Errors = {};
+    const normalizedEmail = email.trim().toLowerCase();
+
+    if (!tenantName.trim()) nextErrors.tenantName = "Tenant / Company Name is required.";
+    if (!fullName.trim()) nextErrors.fullName = "Your name is required.";
+    if (!normalizedEmail) nextErrors.email = "Work email is required.";
+    else if (!EMAIL_RE.test(normalizedEmail)) nextErrors.email = "Enter a valid work email address.";
+    if (!password) nextErrors.password = "Password is required.";
+    else if (password.length < 8) nextErrors.password = "Password must be at least 8 characters.";
+    if (!confirmPassword) nextErrors.confirmPassword = "Please confirm your password.";
+    else if (password !== confirmPassword) nextErrors.confirmPassword = "Passwords do not match.";
+
+    setStep0Errors(nextErrors);
+    return Object.keys(nextErrors).length === 0;
+  };
+
   const nextStep = () => {
-    if (!canGoNext()) {
+    if (step === 0) {
+      const valid = validateStep0();
+      if (!valid) {
+        toast({
+          title: "Missing information",
+          description: "Please correct the highlighted fields to continue.",
+          variant: "destructive",
+        });
+        return;
+      }
+    } else if (!canGoNext()) {
       toast({
         title: "Missing information",
         description: "Please complete this step before continuing.",
@@ -197,43 +231,16 @@ export default function Signup() {
       });
       return;
     }
-    if (step === 0) {
-      if (!EMAIL_RE.test(email.trim().toLowerCase())) {
-        toast({
-          title: "Invalid email",
-          description: "Enter a valid work email address.",
-          variant: "destructive",
-        });
-        return;
-      }
-      if (password.length < 8) {
-        toast({
-          title: "Password too short",
-          description: "Use at least 8 characters.",
-          variant: "destructive",
-        });
-        return;
-      }
-      if (password !== confirmPassword) {
-        toast({
-          title: "Passwords do not match",
-          description: "Please enter the same password in both fields.",
-          variant: "destructive",
-        });
-        return;
-      }
-    }
+    setStep0Errors({});
     setStep((s) => (s < 3 ? ((s + 1) as WizardStep) : s));
   };
 
   const prevStep = () => {
-    setStep((s) => {
-      if (s > 0) {
-        return ((s - 1) as WizardStep);
-      }
-      navigate("/auth");
-      return s;
-    });
+    if (step > 0) {
+      setStep((s) => ((s - 1) as WizardStep));
+      return;
+    }
+    navigate("/auth");
   };
 
   const handleComplete = async () => {
@@ -338,18 +345,38 @@ export default function Signup() {
                 <Input
                   id="tenant-name"
                   value={tenantName}
-                  onChange={(e) => setTenantName(e.target.value)}
+                  onChange={(e) => {
+                    setTenantName(e.target.value);
+                    if (step0Errors.tenantName) {
+                      setStep0Errors((prev) => ({ ...prev, tenantName: undefined }));
+                    }
+                  }}
                   placeholder="Acme Insurance Brokers"
+                  aria-invalid={Boolean(step0Errors.tenantName)}
+                  className={step0Errors.tenantName ? "border-destructive focus-visible:ring-destructive" : ""}
                 />
+                {step0Errors.tenantName && (
+                  <p className="text-xs text-destructive">{step0Errors.tenantName}</p>
+                )}
               </div>
               <div className="space-y-2">
                 <Label htmlFor="full-name">Your Name</Label>
                 <Input
                   id="full-name"
                   value={fullName}
-                  onChange={(e) => setFullName(e.target.value)}
+                  onChange={(e) => {
+                    setFullName(e.target.value);
+                    if (step0Errors.fullName) {
+                      setStep0Errors((prev) => ({ ...prev, fullName: undefined }));
+                    }
+                  }}
                   placeholder="Jane Doe"
+                  aria-invalid={Boolean(step0Errors.fullName)}
+                  className={step0Errors.fullName ? "border-destructive focus-visible:ring-destructive" : ""}
                 />
+                {step0Errors.fullName && (
+                  <p className="text-xs text-destructive">{step0Errors.fullName}</p>
+                )}
               </div>
             </div>
             <div className="grid gap-4 md:grid-cols-2">
@@ -359,9 +386,19 @@ export default function Signup() {
                   id="email"
                   type="email"
                   value={email}
-                  onChange={(e) => setEmail(e.target.value)}
+                  onChange={(e) => {
+                    setEmail(e.target.value);
+                    if (step0Errors.email) {
+                      setStep0Errors((prev) => ({ ...prev, email: undefined }));
+                    }
+                  }}
                   placeholder="you@company.com"
+                  aria-invalid={Boolean(step0Errors.email)}
+                  className={step0Errors.email ? "border-destructive focus-visible:ring-destructive" : ""}
                 />
+                {step0Errors.email && (
+                  <p className="text-xs text-destructive">{step0Errors.email}</p>
+                )}
               </div>
               <div className="space-y-2">
                 <Label htmlFor="password">Password</Label>
@@ -369,9 +406,23 @@ export default function Signup() {
                   id="password"
                   type="password"
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  onChange={(e) => {
+                    setPassword(e.target.value);
+                    if (step0Errors.password || step0Errors.confirmPassword) {
+                      setStep0Errors((prev) => ({
+                        ...prev,
+                        password: undefined,
+                        confirmPassword: undefined,
+                      }));
+                    }
+                  }}
                   placeholder="At least 8 characters"
+                  aria-invalid={Boolean(step0Errors.password)}
+                  className={step0Errors.password ? "border-destructive focus-visible:ring-destructive" : ""}
                 />
+                {step0Errors.password && (
+                  <p className="text-xs text-destructive">{step0Errors.password}</p>
+                )}
               </div>
             </div>
             <div className="space-y-2">
@@ -380,9 +431,19 @@ export default function Signup() {
                 id="confirm-password"
                 type="password"
                 value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
+                onChange={(e) => {
+                  setConfirmPassword(e.target.value);
+                  if (step0Errors.confirmPassword) {
+                    setStep0Errors((prev) => ({ ...prev, confirmPassword: undefined }));
+                  }
+                }}
                 placeholder="Re-enter password"
+                aria-invalid={Boolean(step0Errors.confirmPassword)}
+                className={step0Errors.confirmPassword ? "border-destructive focus-visible:ring-destructive" : ""}
               />
+              {step0Errors.confirmPassword && (
+                <p className="text-xs text-destructive">{step0Errors.confirmPassword}</p>
+              )}
             </div>
             <div className="space-y-3">
               <Label>Role in this tenant</Label>
@@ -684,7 +745,7 @@ export default function Signup() {
                 <Button
                   type="button"
                   onClick={nextStep}
-                  disabled={!canGoNext() || loading || completed}
+                  disabled={loading || completed}
                   className="flex items-center gap-1 text-xs md:text-sm"
                 >
                   Next
