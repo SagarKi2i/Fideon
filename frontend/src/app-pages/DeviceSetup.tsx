@@ -21,6 +21,10 @@ import {
   getStoredDeviceToken,
   setStoredDeviceToken,
   clearStoredDeviceToken,
+  getStoredDeviceJwt,
+  setStoredDeviceJwt,
+  clearStoredDeviceJwt,
+  registerDeviceV1,
   type DeviceModel,
 } from "@/lib/deviceApi";
 import {
@@ -43,17 +47,43 @@ export default function DeviceSetup() {
   const [ollamaRunning, setOllamaRunning] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState<Record<string, PullProgress>>({});
   const [isElectronApp, setIsElectronApp] = useState(false);
+  const [deviceJwt, setDeviceJwt] = useState("");
 
   useEffect(() => {
     checkElectron();
     const stored = getStoredDeviceToken();
+    const storedJwt = getStoredDeviceJwt();
     if (stored) {
       setDeviceToken(stored);
-      setIsConnected(true);
-      loadDeviceModels(stored);
+      if (storedJwt) {
+        setDeviceJwt(storedJwt);
+        setIsConnected(true);
+        loadDeviceModels(storedJwt);
+      }
     }
     checkOllama();
   }, []);
+
+  // Background heartbeat: every 60s, report device + local model status to cloud.
+  useEffect(() => {
+    if (!isElectronApp || !deviceJwt || !isConnected) {
+      return;
+    }
+
+    const intervalId = window.setInterval(async () => {
+      try {
+        const localModelStatuses = allocatedModels.map(model => ({
+          model_id: model.model_id,
+          is_downloaded: isModelInstalled(model.ollama_model_name),
+        }));
+        await performDeviceCheckin(deviceJwt, localModelStatuses);
+      } catch {
+        // Best-effort heartbeat; errors are intentionally swallowed to avoid UI noise.
+      }
+    }, 60000); // 60s
+
+    return () => window.clearInterval(intervalId);
+  }, [isElectronApp, deviceJwt, isConnected, allocatedModels, localModels]);
 
   const checkElectron = async () => {
     const result = await isElectron();
@@ -81,8 +111,17 @@ export default function DeviceSetup() {
 
     setLoading(true);
     try {
-      await loadDeviceModels(deviceToken);
+      const reg = await registerDeviceV1({
+        device_token: deviceToken,
+        device_name: "Edge Device",
+        os_type: navigator.platform,
+        app_version: "1.0.0",
+      });
       setStoredDeviceToken(deviceToken);
+      setStoredDeviceJwt(reg.device_token);
+      setDeviceJwt(reg.device_token);
+
+      await loadDeviceModels(reg.device_token);
       setIsConnected(true);
       toast({
         title: "Connected",
@@ -101,7 +140,9 @@ export default function DeviceSetup() {
 
   const handleDisconnect = () => {
     clearStoredDeviceToken();
+    clearStoredDeviceJwt();
     setDeviceToken("");
+    setDeviceJwt("");
     setIsConnected(false);
     setAllocatedModels([]);
     toast({
@@ -110,16 +151,16 @@ export default function DeviceSetup() {
     });
   };
 
-  const loadDeviceModels = async (token: string) => {
-    const response = await fetchDeviceModels(token);
+  const loadDeviceModels = async (jwt: string) => {
+    const response = await fetchDeviceModels(jwt);
     setAllocatedModels(response.models);
   };
 
   const handleRefresh = async () => {
-    if (!deviceToken) return;
+    if (!deviceJwt) return;
     setLoading(true);
     try {
-      await loadDeviceModels(deviceToken);
+      await loadDeviceModels(deviceJwt);
       await checkOllama();
       toast({
         title: "Refreshed",
@@ -137,7 +178,7 @@ export default function DeviceSetup() {
   };
 
   const handleSync = async () => {
-    if (!deviceToken) return;
+    if (!deviceJwt) return;
     setLoading(true);
     try {
       const localModelStatuses = allocatedModels.map(model => ({
@@ -145,8 +186,8 @@ export default function DeviceSetup() {
         is_downloaded: isModelInstalled(model.ollama_model_name),
       }));
       
-      await performDeviceCheckin(deviceToken, localModelStatuses);
-      await loadDeviceModels(deviceToken);
+      await performDeviceCheckin(deviceJwt, localModelStatuses);
+      await loadDeviceModels(deviceJwt);
       
       toast({
         title: "Synced",
