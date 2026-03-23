@@ -126,6 +126,13 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
   const [qrMarkup, setQrMarkup] = useState<string>("");
 
   useEffect(() => {
+    const recoveryFlow = isRecoveryRoute(location.pathname, location.search, location.hash);
+    if (!recoveryFlow) {
+      setView(initialView);
+    }
+  }, [initialView, location.hash, location.pathname, location.search]);
+
+  useEffect(() => {
     const isRecoveryCallback = isRecoveryRoute(
       location.pathname,
       window.location.search,
@@ -313,6 +320,38 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
 
     setLoading(true);
     try {
+      // Block reusing the current password:
+      // if signing in with the proposed password succeeds, it means the password
+      // is already active for this account and should not be reused.
+      try {
+        const { data: currentUserData } = await supabase.auth.getUser();
+        const currentEmail = currentUserData.user?.email;
+        if (currentEmail) {
+          const { data: existingPasswordMatch, error: existingPasswordError } =
+            await supabase.auth.signInWithPassword({
+              email: currentEmail,
+              password: newPassword,
+            });
+
+          if (!existingPasswordError && existingPasswordMatch.user) {
+            toast({
+              title: "Password already used",
+              description: "Please choose a new password that you haven't used for this account.",
+              variant: "destructive",
+            });
+            setLoading(false);
+            return;
+          }
+        }
+      } catch (passwordReuseCheckError) {
+        safeLog.error("auth_password_reuse_check_failed", {
+          error:
+            passwordReuseCheckError instanceof Error
+              ? passwordReuseCheckError.message
+              : String(passwordReuseCheckError),
+        });
+      }
+
       const { error } = await supabase.auth.updateUser({ password: newPassword });
       if (error) throw error;
       try {

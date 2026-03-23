@@ -23,7 +23,7 @@ interface ActivatedPod {
 
 interface PodMetrics {
   totalQueries: number;
-  successRate: number;
+  successRate: number | null;
   lastActivity: string;
   trend: string;
 }
@@ -87,7 +87,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [displayName, setDisplayName] = useState("User");
   const [totalQueries, setTotalQueries] = useState(0);
-  const [avgSuccessRate, setAvgSuccessRate] = useState(100);
+  const [avgSuccessRate, setAvgSuccessRate] = useState<number | null>(null);
   const [queryTrendPct, setQueryTrendPct] = useState<number | null>(null);
   const [avgResponseSeconds, setAvgResponseSeconds] = useState<number | null>(null);
   const [responseImprovementPct, setResponseImprovementPct] = useState<number | null>(null);
@@ -186,7 +186,7 @@ export default function Dashboard() {
       const completedRuns = runRows.filter((r) => r.status === "completed");
       const failedRuns = runRows.filter((r) => r.status === "failed");
       const consideredRuns = completedRuns.length + failedRuns.length;
-      const successRate = consideredRuns > 0 ? (completedRuns.length / consideredRuns) * 100 : 100;
+      const successRate = consideredRuns > 0 ? (completedRuns.length / consideredRuns) * 100 : null;
       setAvgSuccessRate(successRate);
 
       const completedDurations = completedRuns
@@ -382,7 +382,13 @@ export default function Dashboard() {
                 <CardContent className="p-3 md:p-6 pt-0">
                   <div className="text-2xl md:text-3xl font-bold text-foreground">{pods.length}</div>
                   <p className="text-xs text-primary mt-1">
-                    {avgSuccessRate >= 99 ? "All systems operational" : avgSuccessRate >= 95 ? "Stable performance" : "Performance degraded"}
+                    {avgSuccessRate === null
+                      ? "No run data yet"
+                      : avgSuccessRate >= 99
+                        ? "All systems operational"
+                        : avgSuccessRate >= 95
+                          ? "Stable performance"
+                          : "Performance degraded"}
                   </p>
                 </CardContent>
               </Card>
@@ -414,9 +420,17 @@ export default function Dashboard() {
                   <TrendingUp className="h-4 w-4 text-emerald-500" />
                 </CardHeader>
                 <CardContent className="p-3 md:p-6 pt-0">
-                  <div className="text-2xl md:text-3xl font-bold text-foreground">{avgSuccessRate.toFixed(1)}%</div>
+                  <div className="text-2xl md:text-3xl font-bold text-foreground">
+                    {avgSuccessRate === null ? "--" : `${avgSuccessRate.toFixed(1)}%`}
+                  </div>
                   <p className="text-xs text-primary mt-1">
-                    {avgSuccessRate >= 99 ? "Excellent performance" : avgSuccessRate >= 95 ? "Good performance" : "Needs attention"}
+                    {avgSuccessRate === null
+                      ? "No run data yet"
+                      : avgSuccessRate >= 99
+                        ? "Excellent performance"
+                        : avgSuccessRate >= 95
+                          ? "Good performance"
+                          : "Needs attention"}
                   </p>
                 </CardContent>
               </Card>
@@ -453,11 +467,12 @@ export default function Dashboard() {
               <div className="grid gap-4 md:gap-6 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
                 {pods.map((pod, index) => {
                   const Icon = getPodIcon(pod.model_id);
+                  const podQueries = podQueryCounts[pod.model_id] ?? 0;
                   const metrics: PodMetrics = {
-                    totalQueries: podQueryCounts[pod.model_id] ?? 0,
-                    successRate: avgSuccessRate,
+                    totalQueries: podQueries,
+                    successRate: podQueries > 0 ? avgSuccessRate : null,
                     lastActivity: toRelativeTime(podLastActivity[pod.model_id]),
-                    trend: (podQueryCounts[pod.model_id] ?? 0) > 0 ? "Live data" : "No data",
+                    trend: podQueries > 0 ? "Live data" : "No data",
                   };
                   const colorClass = getPodColor(pod.model_id);
                   const gradient = getPodGradient(pod.model_id);
@@ -498,7 +513,9 @@ export default function Dashboard() {
                           </div>
                           <div>
                             <p className="text-xs text-muted-foreground">Success Rate</p>
-                            <p className="text-lg font-semibold text-foreground">{metrics.successRate.toFixed(1)}%</p>
+                            <p className="text-lg font-semibold text-foreground">
+                              {metrics.successRate === null ? "--" : `${metrics.successRate.toFixed(1)}%`}
+                            </p>
                           </div>
                         </div>
                         <div>
@@ -506,7 +523,7 @@ export default function Dashboard() {
                             <span className="text-muted-foreground">Performance</span>
                             <span className="text-primary font-medium">{metrics.trend}</span>
                           </div>
-                          <Progress value={metrics.successRate} className="h-1.5" />
+                          <Progress value={metrics.successRate ?? 0} className="h-1.5" />
                         </div>
                       </CardContent>
                     </Card>
