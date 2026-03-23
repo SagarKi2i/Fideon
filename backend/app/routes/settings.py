@@ -133,6 +133,53 @@ async def update_profile(request: Request, authorization: Optional[str] = Header
     return {"success": True}
 
 
+@router.post("/api/settings/password-changed")
+async def mark_password_changed(request: Request, authorization: Optional[str] = Header(default=None)):
+    user = await verify_user(authorization)
+    user_id = user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    changed_at = datetime.now(timezone.utc).isoformat()
+    rows = await postgrest_get(
+        "app_users",
+        f"select=metadata&user_id=eq.{quote(user_id, safe='')}&limit=1",
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="User profile not found")
+
+    existing_metadata = rows[0].get("metadata")
+    if not isinstance(existing_metadata, dict):
+        existing_metadata = {}
+
+    next_metadata = {
+        **existing_metadata,
+        "password_updated_at": changed_at,
+    }
+
+    await postgrest_patch(
+        "app_users",
+        f"user_id=eq.{quote(user_id, safe='')}",
+        {
+            "last_password_changed_at": changed_at,
+            "metadata": next_metadata,
+        },
+    )
+
+    await insert_audit_log(
+        request=request,
+        user_id=user_id,
+        action="password_changed",
+        resource_type="app_user",
+        resource_id=user_id,
+        details={"password_changed": True},
+        previous_value=None,
+        new_value={"last_password_changed_at": changed_at},
+    )
+
+    return {"success": True, "last_password_changed_at": changed_at}
+
+
 @router.get("/api/settings/api-keys")
 async def list_personal_api_keys(authorization: Optional[str] = Header(default=None)):
     user = await verify_user(authorization)

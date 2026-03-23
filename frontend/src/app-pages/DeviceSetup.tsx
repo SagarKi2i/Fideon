@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
@@ -303,9 +304,8 @@ export default function DeviceSetup() {
             <div className="space-y-4">
               <div className="space-y-2">
                 <Label htmlFor="token">Device Token</Label>
-                <Input
+                <PasswordInput
                   id="token"
-                  type="password"
                   value={deviceToken}
                   onChange={(e) => setDeviceToken(e.target.value)}
                   placeholder="Enter your device token"
