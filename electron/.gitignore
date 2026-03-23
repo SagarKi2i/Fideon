@@ -1,4 +1,8 @@
 node_modules/
 dist/
+release/
+build/icon-256.png
+release/qa-share/
+release/win-unpacked/
 *.log
 
