@@ -18,35 +18,73 @@
   },
   "dependencies": {
     "dotenv": "^17.3.1",
+    "next": "14.2.35",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
     "next-electron-rsc": "^0.3.0"
   },
   "build": {
     "appId": "com.fideon.os",
     "productName": "Fideon OS",
+    "forceCodeSigning": false,
     "directories": {
       "output": "release",
       "buildResources": "build"
     },
     "files": [
-      "dist/**/*",
-      "package.json",
-      "../frontend/.next/standalone/**/*",
-      "../frontend/public/**/*",
-      "../frontend/.next/static/**/*"
+      {
+        "from": "dist",
+        "to": "dist",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "package.json",
+        "to": "package.json"
+      },
+      {
+        "from": "../frontend/.next/standalone",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../frontend/.next/static",
+        "to": ".next/static",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../frontend/public",
+        "to": "public",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../frontend/.next",
+        "to": ".next",
+        "filter": [
+          "required-server-files.json",
+          "server/functions-config-manifest.json"
+        ]
+      }
     ],
     "win": {
       "target": "nsis",
-      "icon": "../frontend/src/assets/fideon-logo.png"
+      "icon": "build/icon-256.png"
     },
     "mac": {
       "target": "dmg",
-      "icon": "../frontend/src/assets/fideon-logo.png"
+      "icon": "build/icon-256.png"
     },
     "linux": {
       "target": [
         "AppImage"
       ],
-      "icon": "../frontend/src/assets/fideon-logo.png"
+      "icon": "build/icon-256.png"
     }
   }
 }

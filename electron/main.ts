@@ -19,6 +19,25 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
 
+const logPath = path.join(app.getPath("userData"), "fideon-main.log");
+function log(msg: string) {
+  try {
+    fs.appendFileSync(logPath, `${new Date().toISOString()} ${msg}\n`, "utf8");
+  } catch {
+    // ignore logging failures
+  }
+}
+
+function formatUnknownError(err: unknown): string {
+  if (err instanceof Error) return `${err.message}\n${err.stack}`;
+  if (typeof err === "string") return err;
+  try {
+    return JSON.stringify(err, null, 2);
+  } catch {
+    return String(err);
+  }
+}
+
 // Only treat *packaged* builds as production.
 // Local `npm start` should always behave as dev even if NODE_ENV is set.
 const isProd = app.isPackaged;
@@ -85,32 +104,47 @@ if (!gotLock) {
 // Log unexpected main-process errors for easier debugging.
 process.on("uncaughtException", (err) => {
   console.error("[main] Uncaught exception:", err);
+  log(`[main] uncaughtException: ${formatUnknownError(err)}`);
 });
 
 process.on("unhandledRejection", (reason) => {
   console.error("[main] Unhandled rejection:", reason);
+  log(`[main] unhandledRejection: ${formatUnknownError(reason)}`);
 });
 
 function createTray() {
   if (tray) return;
 
-  // Reuse the existing Fideon logo from the Next.js app for the tray icon.
-  // In dev, this resolves to: ../frontend/src/assets/fideon-logo.png
-  const iconPath = path.join(
-    __dirname,
-    "..",
-    "..",
-    "frontend",
-    "src",
-    "assets",
-    "fideon-logo.png",
-  );
+  // Important: in packaged apps, dev-only relative paths to `frontend/src/assets/...`
+  // won't exist. Prefer an icon that we copy into Electron `resources/`.
+  const iconCandidates = [
+    path.join(process.resourcesPath, "fideon-tray.png"),
+    path.join(process.resourcesPath, "icon-256.png"),
+    path.join(app.getAppPath(), "fideon-tray.png"),
+    path.join(app.getAppPath(), "icon-256.png"),
+    // Dev fallback (when running locally)
+    path.join(
+      __dirname,
+      "..",
+      "..",
+      "frontend",
+      "src",
+      "assets",
+      "fideon-logo.png",
+    ),
+  ];
+
+  const iconPath = iconCandidates.find((p) => fs.existsSync(p)) ?? iconCandidates[0];
+  log(`[main] tray iconPath=${iconPath} exists=${fs.existsSync(iconPath)}`);
+
+  // nativeImage.createFromPath("") yields an empty image; if the file is missing we
+  // still create a tray object to avoid total startup failure.
   let icon = nativeImage.createFromPath(iconPath);
-  if (icon.isEmpty()) {
-    icon = nativeImage.createEmpty();
-  }
+  if (icon.isEmpty()) icon = nativeImage.createEmpty();
+  log(`[main] tray icon empty=${icon.isEmpty()}`);
 
   tray = new Tray(icon);
+  log(`[main] tray created`);
   const contextMenu = Menu.buildFromTemplate([
     {
       label: "Show Fideon OS",
@@ -145,12 +179,21 @@ async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
+    show: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
     },
+  });
+
+  // Ensure the window is visible (some systems can initially start hidden).
+  mainWindow.once("ready-to-show", () => {
+    if (!mainWindow) return;
+    mainWindow.show();
+    mainWindow.focus();
+    log(`[main] ready-to-show -> show+focus`);
   });
 
   mainWindow.on("close", (event) => {
@@ -160,12 +203,36 @@ async function createWindow() {
     }
   });
 
+  mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription) => {
+    // eslint-disable-next-line no-console
+    console.error("[main] did-fail-load:", { errorCode, errorDescription });
+    log(`[main] did-fail-load: ${errorCode} ${String(errorDescription)}`);
+  });
+
   // In dev, point to Next.js dev server; in prod, load the same URL
   // which is intercepted by next-electron-rsc (no open port).
   const startUrl =
-    process.env.ELECTRON_START_URL ?? "http://localhost:3000/electron-playground";
+    // Default to the main frontend page (not the ElectronPlayground demo page).
+    process.env.ELECTRON_START_URL ?? "http://localhost:3000/";
+  log(`[main] loading startUrl=${startUrl}`);
 
-  await mainWindow.loadURL(startUrl);
+  try {
+    await mainWindow.loadURL(startUrl);
+    // Ensure the window is visible when Next finishes wiring up.
+    mainWindow.show();
+    mainWindow.focus();
+    log(`[main] loadURL success`);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error("[main] loadURL failed:", err);
+    log(`[main] loadURL failed: ${String(err)}`);
+  }
+
+  mainWindow.webContents.once("dom-ready", () => {
+    if (!mainWindow) return;
+    mainWindow.show();
+    mainWindow.focus();
+  });
   createTray();
 }
 
