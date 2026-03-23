@@ -4,6 +4,7 @@ import { apiUrl } from "@/lib/apiBaseUrl";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { PasswordInput } from "@/components/ui/password-input";
 import { useToast } from "@/hooks/use-toast";
 import { ShieldPlus, Loader2, Clock } from "lucide-react";
 import type { Database } from "@/integrations/supabase/types";
@@ -350,15 +351,13 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
               {/* Password fields only when not a pending request */}
               {!selectedRoleOption.pending && (
                 <>
-                  <input
-                    type="password"
+                  <PasswordInput
                     placeholder="Password"
                     value={newUserPassword}
                     onChange={(e) => setNewUserPassword(e.target.value)}
                     className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                   />
-                  <input
-                    type="password"
+                  <PasswordInput
                     placeholder="Confirm password"
                     value={newUserConfirmPassword}
                     onChange={(e) => setNewUserConfirmPassword(e.target.value)}
