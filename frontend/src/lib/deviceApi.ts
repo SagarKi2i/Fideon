@@ -1,5 +1,6 @@
 // Device API for Electron app integration
 import { getApiBaseUrl } from "@/lib/apiBaseUrl";
+import { buildApiRequestError, readJsonSafe } from "@/lib/httpErrors";
 
 export interface DeviceModel {
   model_id: string;
@@ -15,6 +16,14 @@ export interface DeviceModelsResponse {
   device_id: string;
   models: DeviceModel[];
   total_models: number;
+}
+
+export interface DeviceRegisterV1Response {
+  success: boolean;
+  device_token: string; // device JWT
+  device_id: string;
+  device_name: string;
+  is_new: boolean;
 }
 
 export interface DevicePairingStartRequest {
@@ -61,42 +70,75 @@ export interface DevicePairingConfirmResponse {
   };
 }
 
-export async function fetchDeviceModels(deviceToken: string): Promise<DeviceModelsResponse> {
-  const response = await fetch(`${getApiBaseUrl()}/api/device-models`, {
-    method: 'GET',
+async function readErrorMessage(response: Response): Promise<string> {
+  const contentType = response.headers.get("content-type") || "";
+  try {
+    if (contentType.includes("application/json")) {
+      const data = await response.json();
+      return data?.detail || data?.error || JSON.stringify(data);
+    }
+    const text = await response.text();
+    // Some backends return plain text "Internal Server Error"
+    return text || `Request failed (${response.status})`;
+  } catch {
+    return `Request failed (${response.status})`;
+  }
+}
+
+export async function registerDeviceV1(payload: {
+  hardware_fingerprint?: string;
+  device_token?: string;
+  device_name?: string;
+  os_type?: string;
+  app_version?: string;
+  metadata?: Record<string, unknown>;
+}): Promise<DeviceRegisterV1Response> {
+  const response = await fetch(`${getApiBaseUrl()}/api/v1/devices/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const payload = await readJsonSafe(response);
+    throw buildApiRequestError(response, payload, "Failed to register device");
+  }
+
+  return response.json();
+}
+
+export async function fetchDeviceModels(deviceJwt: string): Promise<DeviceModelsResponse> {
+  const response = await fetch(`${getApiBaseUrl()}/api/v1/devices/models`, {
+    method: "GET",
     headers: {
-      'x-device-token': deviceToken,
+      Authorization: `Bearer ${deviceJwt}`,
     },
   });
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || 'Failed to fetch device models');
+    const payload = await readJsonSafe(response);
+    throw buildApiRequestError(response, payload, "Failed to fetch device models");
   }
 
   return response.json();
 }
 
 export async function performDeviceCheckin(
-  deviceToken: string,
+  deviceJwt: string,
   localModels: { model_id: string; is_downloaded: boolean }[]
-): Promise<{ success: boolean; message: string }> {
-  const response = await fetch(`${getApiBaseUrl()}/api/device-checkin`, {
-    method: 'POST',
+): Promise<{ success: boolean; device_id: string; last_seen_at: string }> {
+  const response = await fetch(`${getApiBaseUrl()}/api/v1/devices/heartbeat`, {
+    method: "PUT",
     headers: {
-      'Content-Type': 'application/json',
-      'x-device-token': deviceToken,
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${deviceJwt}`,
     },
-    body: JSON.stringify({
-      os_type: (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform ?? navigator.userAgent,
-      app_version: '1.0.0',
-      local_models: localModels,
-    }),
+    body: JSON.stringify({ local_models: localModels }),
   });
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || 'Failed to perform check-in');
+    const payload = await readJsonSafe(response);
+    throw buildApiRequestError(response, payload, "Heartbeat failed");
   }
 
   return response.json();
@@ -113,8 +155,8 @@ export async function sendDeviceHeartbeat(
   });
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.detail || "Heartbeat failed");
+    const payload = await readJsonSafe(response);
+    throw buildApiRequestError(response, payload, "Heartbeat failed");
   }
 
   return response.json();
@@ -132,6 +174,18 @@ export function clearStoredDeviceToken(): void {
   localStorage.removeItem('device_token');
 }
 
+export function getStoredDeviceJwt(): string | null {
+  return localStorage.getItem("device_jwt");
+}
+
+export function setStoredDeviceJwt(jwt: string): void {
+  localStorage.setItem("device_jwt", jwt);
+}
+
+export function clearStoredDeviceJwt(): void {
+  localStorage.removeItem("device_jwt");
+}
+
 export async function startDevicePairing(
   accessToken: string,
   payload: DevicePairingStartRequest
@@ -146,8 +200,8 @@ export async function startDevicePairing(
   });
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || "Failed to create pairing QR");
+    const payload = await readJsonSafe(response);
+    throw buildApiRequestError(response, payload, "Failed to create pairing QR");
   }
 
   return response.json();
@@ -165,8 +219,8 @@ export async function getDevicePairingStatus(
   });
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || "Failed to fetch pairing status");
+    const payload = await readJsonSafe(response);
+    throw buildApiRequestError(response, payload, "Failed to fetch pairing status");
   }
 
   return response.json();
@@ -190,8 +244,8 @@ export async function confirmDevicePairing(payload: {
   });
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || "Failed to confirm pairing");
+    const payload = await readJsonSafe(response);
+    throw buildApiRequestError(response, payload, "Failed to confirm pairing");
   }
 
   return response.json();

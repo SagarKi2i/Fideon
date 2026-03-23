@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useToast } from "@/hooks/use-toast";
 import { ShieldPlus, Loader2, Clock } from "lucide-react";
 import type { Database } from "@/integrations/supabase/types";
+import { buildApiRequestError, readJsonSafe } from "@/lib/httpErrors";
 
 type AppRole = Database["public"]["Enums"]["app_role"];
 
@@ -117,7 +118,7 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
           },
         });
         if (response.ok) {
-          const data = await response.json();
+          const data = await readJsonSafe(response);
           setUsers((data.users || []).map((u: any) => ({ ...u, role: (u.role || "user") as AppRole })));
           return;
         }
@@ -128,7 +129,11 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
       await loadUsersFromSupabaseFallback();
     } catch (error) {
       console.error("Error loading users:", error);
-      toast({ title: "Error", description: "Failed to load users", variant: "destructive" });
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to load users",
+        variant: "destructive"
+      });
     } finally {
       setLoading(false);
     }
@@ -152,7 +157,12 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
           },
           body: JSON.stringify({ user_id: userId, role }),
         });
-        if (response.ok) updated = true;
+        if (response.ok) {
+          updated = true;
+        } else {
+          const payload = await readJsonSafe(response);
+          throw buildApiRequestError(response, payload, "Could not update role");
+        }
       } catch (backendError) {
         console.warn("Primary /api/admin-set-user-role failed, using fallback:", backendError);
       }
@@ -219,10 +229,8 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
         body: JSON.stringify(body),
       });
 
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(result?.error || result?.detail || "Failed to create user");
-      }
+      const result = await readJsonSafe(response);
+      if (!response.ok) throw buildApiRequestError(response, result, "Failed to create user");
 
       if (result.pending) {
         toast({

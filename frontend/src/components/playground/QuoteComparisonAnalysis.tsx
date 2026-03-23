@@ -1,23 +1,19 @@
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { 
   CheckCircle2, 
   AlertTriangle, 
-  XCircle,
   DollarSign,
   Shield,
   TrendingUp,
   TrendingDown,
   Award,
-  Star,
   Zap,
   ThumbsUp,
   Target,
   BarChart3,
-  Clock,
-  Users
+  Clock
 } from "lucide-react";
 
 interface CarrierQuote {
@@ -38,7 +34,7 @@ interface QuoteComparisonAnalysisProps {
   insuranceType: string;
 }
 
-export default function QuoteComparisonAnalysis({ quotes, insuranceType }: QuoteComparisonAnalysisProps) {
+export default function QuoteComparisonAnalysis({ quotes }: QuoteComparisonAnalysisProps) {
   const completedQuotes = quotes.filter(q => q.status === "complete");
   
   if (completedQuotes.length === 0) return null;
@@ -48,20 +44,16 @@ export default function QuoteComparisonAnalysis({ quotes, insuranceType }: Quote
   const lowestPremium = Math.min(...premiums);
   const highestPremium = Math.max(...premiums);
   const avgPremium = Math.round(premiums.reduce((a, b) => a + b, 0) / premiums.length);
-  const premiumRange = highestPremium - lowestPremium;
   const potentialSavings = highestPremium - lowestPremium;
-
-  const deductibles = completedQuotes.map(q => q.deductible);
-  const avgDeductible = Math.round(deductibles.reduce((a, b) => a + b, 0) / deductibles.length);
 
   // Find best options
   const lowestPremiumCarrier = completedQuotes.find(q => q.premium === lowestPremium);
-  const lowestDeductibleCarrier = completedQuotes.reduce((a, b) => a.deductible < b.deductible ? a : b);
+  const lowestDeductibleCarrier = completedQuotes.reduce((a, b) => a.deductible < b.deductible ? a : b, completedQuotes[0]!);
   const bestValueCarrier = completedQuotes.reduce((a, b) => {
     const aScore = (a.premium / 100) + (a.deductible / 50);
     const bScore = (b.premium / 100) + (b.deductible / 50);
     return aScore < bScore ? a : b;
-  });
+  }, completedQuotes[0]!);
 
   // Sort by premium for ranking
   const sortedByPremium = [...completedQuotes].sort((a, b) => a.premium - b.premium);
@@ -225,8 +217,8 @@ export default function QuoteComparisonAnalysis({ quotes, insuranceType }: Quote
                     <td className="py-3 px-2 text-right">{quote.coverage}</td>
                     <td className="py-3 px-2">
                       <div className="flex flex-wrap gap-1 justify-center">
-                        {quote.features.slice(0, 2).map((feature, fidx) => (
-                          <Badge key={fidx} variant="secondary" className="text-xs whitespace-nowrap">
+                        {quote.features.slice(0, 2).map((feature) => (
+                          <Badge key={feature} variant="secondary" className="text-xs whitespace-nowrap">
                             {feature}
                           </Badge>
                         ))}

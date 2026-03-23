@@ -27,26 +27,31 @@ CREATE INDEX IF NOT EXISTS ucr_requested_by_idx ON public.user_creation_requests
 ALTER TABLE public.user_creation_requests ENABLE ROW LEVEL SECURITY;
 
 -- Requesters can see their own requests
+DROP POLICY IF EXISTS "ucr_requester_select" ON public.user_creation_requests;
 CREATE POLICY "ucr_requester_select"
   ON public.user_creation_requests FOR SELECT
   USING (requested_by = auth.uid());
 
 -- Admins (and global_admin via has_role hierarchy) can see all requests
+DROP POLICY IF EXISTS "ucr_admin_select" ON public.user_creation_requests;
 CREATE POLICY "ucr_admin_select"
   ON public.user_creation_requests FOR SELECT
   USING (public.has_role(auth.uid(), 'admin'));
 
 -- Any authenticated user whose role is 'admin' or 'user' can submit a request
+DROP POLICY IF EXISTS "ucr_insert" ON public.user_creation_requests;
 CREATE POLICY "ucr_insert"
   ON public.user_creation_requests FOR INSERT
   WITH CHECK (requested_by = auth.uid());
 
 -- Only admins can update (approve / reject)
+DROP POLICY IF EXISTS "ucr_admin_update" ON public.user_creation_requests;
 CREATE POLICY "ucr_admin_update"
   ON public.user_creation_requests FOR UPDATE
   USING (public.has_role(auth.uid(), 'admin'));
 
 -- Service role (backend) can delete if needed
+DROP POLICY IF EXISTS "ucr_service_delete" ON public.user_creation_requests;
 CREATE POLICY "ucr_service_delete"
   ON public.user_creation_requests FOR DELETE
   USING (true);

@@ -81,6 +81,7 @@ jobs:
         run: |
           docker build \
             -t neurapodacr.azurecr.io/backend:${{ github.sha }} \
+            --no-cache \
             backend/
 
       - name: Login to ACR & Push

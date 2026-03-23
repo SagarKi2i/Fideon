@@ -3,7 +3,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
@@ -109,7 +108,7 @@ interface ParsedRetrievalResult {
 
 // Parse the mock result to extract document data
 const parseRetrievalResult = (result: string): ParsedRetrievalResult | null => {
-  if (!result || !result.includes("Document Retrieval Results")) return null;
+  if (!result?.includes("Document Retrieval Results")) return null;
   
   // Mock parsed documents based on result with enhanced data
   const documents: RetrievedDocument[] = [
@@ -149,7 +148,7 @@ const parseRetrievalResult = (result: string): ParsedRetrievalResult | null => {
 
   const hasRenewalDocs = documents.some(d => d.type === "Policy Renewal");
   const hasInvoiceDocs = documents.some(d => d.type === "Invoice");
-  const totalPremium = documents.reduce((sum, d) => sum + (d.premium || 0), 0) / documents.filter(d => d.premium).length || 0;
+  const totalPremium = documents.reduce((sum, d) => sum + (d.premium ?? 0), 0) / (documents.filter(d => d.premium).length || 1);
   
   // Calculate days until expiration from renewal doc
   const renewalDoc = documents.find(d => d.expirationDate);
@@ -212,7 +211,6 @@ export default function DocumentRetrievalUI({ onRun, isRunning, result }: Docume
 
   const isFormValid = selectedCarriers.length > 0 && selectedAMS && selectedDocTypes.length > 0;
   const parsedResult = parseRetrievalResult(result);
-  const selectedCarrierData = selectedCarriers.map(id => carriers.find(c => c.id === id)).filter(Boolean);
   const selectedAMSData = amsOptions.find(a => a.id === selectedAMS);
 
   return (
@@ -414,9 +412,9 @@ export default function DocumentRetrievalUI({ onRun, isRunning, result }: Docume
             </CardHeader>
             <CardContent className="pt-4">
               <div className="space-y-3">
-                {parsedResult.documents.map((doc, index) => (
+                {parsedResult.documents.map((doc) => (
                   <div 
-                    key={index}
+                    key={doc.name}
                     className="flex items-center gap-4 p-4 rounded-lg border border-border bg-muted/30 hover:bg-muted/50 transition-colors"
                   >
                     <div className="h-12 w-12 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">

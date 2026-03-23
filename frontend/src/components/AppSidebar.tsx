@@ -4,15 +4,13 @@ import {
   ShoppingBag, 
   Box, 
   MessageSquare, 
-  FileText,
   Mail,
   Settings,
-  Brain,
   Monitor,
   Download,
-  Presentation,
   Shield,
   Clock,
+  Users,
   ChevronDown,
   Activity,
   GraduationCap,
@@ -23,14 +21,14 @@ import {
   QrCode,
 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
-import { useLocation } from "react-router-dom";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { isElectron } from "@/lib/ollama";
 import { useUserRole } from "@/hooks/useUserRole";
 import { supabase } from "@/integrations/supabase/client";
 import { Separator } from "@/components/ui/separator";
 import { HelpAssistant } from "@/components/HelpAssistant";
 import type { Database } from "@/integrations/supabase/types";
+import { Badge } from "@/components/ui/badge";
 
 import {
   Sidebar,
@@ -77,6 +75,7 @@ const items = [
 
 const adminItems = [
   { title: "Admin Dashboard", url: "/admin", icon: Shield },
+  { title: "Users", url: "/users", icon: Users },
   { title: "Devices", url: "/devices", icon: Monitor },
   { title: "Pending Approvals", url: "/devices/pending", icon: Clock },
 ];
@@ -86,9 +85,7 @@ const electronItems = [
 ];
 
 export function AppSidebar() {
-  const { state, isMobile, setOpenMobile } = useSidebar();
-  const location = useLocation();
-  const currentPath = location.pathname;
+  const { isMobile, setOpenMobile } = useSidebar();
   const { isAdmin, role } = useUserRole();
   const visibleItems = items.filter((item) => {
     if (!role) return false;
@@ -98,20 +95,10 @@ export function AppSidebar() {
   const [isElectronApp, setIsElectronApp] = useState(false);
   const [activatedPods, setActivatedPods] = useState<ActivatedPod[]>([]);
   const [podsOpen, setPodsOpen] = useState(true);
+  const [pendingPodRequestCount, setPendingPodRequestCount] = useState(0);
+  const [pendingReviewCount, setPendingReviewCount] = useState(0);
 
-  // Check if sidebar is expanded (works for both mobile and desktop)
-  const isExpanded = state === "expanded";
-
-  useEffect(() => {
-    const checkElectron = async () => {
-      const result = await isElectron();
-      setIsElectronApp(result);
-    };
-    checkElectron();
-    loadActivatedPods();
-  }, []);
-
-  const loadActivatedPods = async () => {
+  const loadActivatedPods = useCallback(async () => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
@@ -127,7 +114,83 @@ export function AppSidebar() {
     } catch (error) {
       console.error("Error loading pods:", error);
     }
-  };
+  }, []);
+
+  const loadPendingPodRequestCount = useCallback(async () => {
+    if (!isAdmin) return;
+    try {
+      const { count, error } = await supabase
+        .from("pod_activation_requests")
+        .select("id", { count: "exact", head: true })
+        .eq("status", "pending");
+
+      if (error) throw error;
+      setPendingPodRequestCount(count ?? 0);
+    } catch (error) {
+      console.error("Error loading pending pod request count:", error);
+    }
+  }, [isAdmin]);
+
+  const loadPendingReviewCount = useCallback(async () => {
+    if (!isAdmin) return;
+    try {
+      const { count, error } = await supabase
+        .from("decision_reviews")
+        .select("id", { count: "exact", head: true })
+        .eq("status", "pending");
+      if (error) throw error;
+      setPendingReviewCount(count ?? 0);
+    } catch (error) {
+      console.error("Error loading pending review count:", error);
+    }
+  }, [isAdmin]);
+
+  useEffect(() => {
+    const checkElectron = async () => {
+      const result = await isElectron();
+      setIsElectronApp(result);
+    };
+    checkElectron();
+    loadActivatedPods();
+    loadPendingPodRequestCount();
+    loadPendingReviewCount();
+  }, [loadActivatedPods, loadPendingPodRequestCount, loadPendingReviewCount]);
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    const channel = supabase
+      .channel("pod-activation-sidebar-badge")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "pod_activation_requests" },
+        () => {
+          loadPendingPodRequestCount();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [isAdmin, loadPendingPodRequestCount]);
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    const channel = supabase
+      .channel("decision-reviews-sidebar-badge")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "decision_reviews" },
+        () => {
+          loadPendingReviewCount();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [isAdmin, loadPendingReviewCount]);
 
   // Close sidebar on mobile when navigating
   const handleNavClick = () => {
@@ -135,16 +198,6 @@ export function AppSidebar() {
       setOpenMobile(false);
     }
   };
-
-  const isActive = (path: string) => {
-    if (path === "/") {
-      return currentPath === "/";
-    }
-    return currentPath.startsWith(path);
-  };
-
-  // Check if any pod dashboard is active
-  const isPodDashboardActive = currentPath.startsWith("/pod/");
 
   return (
     <Sidebar collapsible="icon">
@@ -173,6 +226,11 @@ export function AppSidebar() {
                     >
                       <item.icon className="h-4 w-4" />
                       <span>{item.title}</span>
+                      {item.title === "Review Queue" && isAdmin && pendingReviewCount > 0 ? (
+                        <Badge className="ml-auto h-5 min-w-5 px-1 text-[10px] leading-5">
+                          {pendingReviewCount > 99 ? "99+" : pendingReviewCount}
+                        </Badge>
+                      ) : null}
                     </NavLink>
                   </SidebarMenuButton>
                 </SidebarMenuItem>
@@ -201,7 +259,7 @@ export function AppSidebar() {
                       <SidebarMenuItem key={pod.id}>
                         <SidebarMenuButton asChild tooltip={pod.model_name}>
                           <NavLink 
-                            to={`/pod/${pod.model_id}`}
+                            to={`/playground?model=${encodeURIComponent(pod.model_id)}`}
                             onClick={handleNavClick}
                             className="hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
                             activeClassName="bg-sidebar-primary text-sidebar-primary-foreground font-medium"
@@ -235,6 +293,11 @@ export function AppSidebar() {
                       >
                         <item.icon className="h-4 w-4" />
                         <span>{item.title}</span>
+                        {item.title === "Pending Approvals" && pendingPodRequestCount > 0 ? (
+                          <Badge className="ml-auto h-5 min-w-5 px-1 text-[10px] leading-5">
+                            {pendingPodRequestCount > 99 ? "99+" : pendingPodRequestCount}
+                          </Badge>
+                        ) : null}
                       </NavLink>
                     </SidebarMenuButton>
                   </SidebarMenuItem>

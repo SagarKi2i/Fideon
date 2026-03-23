@@ -23,7 +23,6 @@ import {
 } from "@/components/ui/table";
 import {
   ArrowLeft,
-  Monitor,
   Circle,
   Loader2,
   RefreshCw,
@@ -223,8 +222,8 @@ export default function DeviceDetails() {
         return {
           device_id: id,
           model_id: modelId,
-          model_name: model?.model_name || modelId,
-          domain: model?.domain || "unknown",
+          model_name: model?.model_name ?? modelId,
+          domain: model?.domain ?? "unknown",
           allocated_by: user.id,
         };
       });
@@ -325,7 +324,9 @@ export default function DeviceDetails() {
         model_id: m.model_id,
         is_downloaded: !!m.is_downloaded,
       }));
-      await performDeviceCheckin(device.device_token, localModels);
+      // V1 device heartbeat requires a device JWT. Triggering sync from the admin UI
+      // can no longer be done using the legacy device_token once legacy endpoints are disabled.
+      throw new Error("Sync trigger requires device JWT (v1). Use Device Setup on the device.");
       toast({
         title: "Sync requested",
         description: "The device will pull allocated models on next check-in.",

@@ -3,6 +3,7 @@ import type { User } from '@supabase/supabase-js';
 import { supabase } from '@/integrations/supabase/client';
 import type { Database } from '@/integrations/supabase/types';
 import { apiUrl } from '@/lib/apiBaseUrl';
+import { buildApiRequestError, readJsonSafe } from '@/lib/httpErrors';
 
 type AppRole = Database['public']['Enums']['app_role'];
 
@@ -36,11 +37,14 @@ async function resolveUserRole(userId: string): Promise<AppRole> {
         });
         clearTimeout(timeout);
         if (res.ok) {
-          const payload = await res.json().catch(() => ({}));
+          const payload = await readJsonSafe(res);
           const backendRole = payload?.profile?.role;
           if (isAppRole(backendRole)) {
             return backendRole;
           }
+        } else if (res.status === 401 || res.status === 403) {
+          const payload = await readJsonSafe(res);
+          throw buildApiRequestError(res, payload, "Unable to resolve role");
         }
       } finally {
         clearTimeout(timeout);

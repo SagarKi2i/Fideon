@@ -14,6 +14,7 @@ import { safeLog } from "@/logger";
 import privateTenantBg from "@/assets/private-ai-tenant-bg.jpg";
 import { computeAuditIntegrityHash } from "@/lib/auditHash";
 import { apiUrl } from "@/lib/apiBaseUrl";
+import { buildApiRequestError, readJsonSafe } from "@/lib/httpErrors";
 
 type AuthView = "signin" | "forgot" | "reset";
 type AppRole = "global_admin" | "admin" | "user" | "viewer" | "guest";
@@ -48,11 +49,14 @@ async function resolveEffectiveRole(userId: string): Promise<AppRole> {
         });
         clearTimeout(timeout);
         if (res.ok) {
-          const payload = await res.json().catch(() => ({}));
+          const payload = await readJsonSafe(res);
           const backendRole = payload?.profile?.role;
           if (isAppRole(backendRole)) {
             return backendRole;
           }
+        } else if (res.status === 401 || res.status === 403) {
+          const payload = await readJsonSafe(res);
+          throw buildApiRequestError(res, payload, "Unable to resolve user role");
         }
       } finally {
         clearTimeout(timeout);
