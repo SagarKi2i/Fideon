@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { Layout } from "./components/Layout";
 import { ProtectedRoute } from "./components/ProtectedRoute";
+import { AuthRecoveryRedirector } from "./components/AuthRecoveryRedirector";
 import Dashboard from "./app-pages/Dashboard";
 import AdminDashboard from "./app-pages/AdminDashboard";
 import PendingDevices from "./app-pages/PendingDevices";
@@ -43,9 +44,12 @@ const App = () => (
       <Toaster />
       <Sonner />
       <BrowserRouter>
+        <AuthRecoveryRedirector />
         <Routes>
           <Route path="/electron-playground" element={<ElectronPlayground />} />
           <Route path="/auth" element={<Auth />} />
+          <Route path="/forgot-password" element={<Auth initialView="forgot" />} />
+          <Route path="/reset-password" element={<Auth initialView="reset" />} />
           <Route path="/signup" element={<Signup />} />
           <Route path="/device-link" element={<DeviceLinkConfirm />} />
           <Route path="/*" element={

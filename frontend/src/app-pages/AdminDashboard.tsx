@@ -21,6 +21,9 @@ interface DashboardStats {
   syncFailures: number;
   totalModelsAssigned: number;
   totalUsageToday: number;
+  deviceGrowthTrend: string | null;
+  usageTrend: string | null;
+  systemHealthText: string;
 }
 
 interface PairingSession {
@@ -110,6 +113,9 @@ export default function AdminDashboard() {
     syncFailures: 0,
     totalModelsAssigned: 0,
     totalUsageToday: 0,
+    deviceGrowthTrend: null,
+    usageTrend: null,
+    systemHealthText: 'No active issues',
   });
   const [pairings, setPairings] = useState<PairingSession[]>([]);
   const [linkedDevices, setLinkedDevices] = useState<LinkedDevice[]>([]);
@@ -164,6 +170,12 @@ export default function AdminDashboard() {
         : usageToday > 0
           ? "Active today"
           : "No usage yet";
+      const systemHealthText =
+        (syncLogs?.length ?? 0) > 0
+          ? "Sync failures detected"
+          : ((devices?.filter(d => d.status === 'online').length ?? 0) > 0
+            ? "Healthy and online"
+            : "No online devices");
 
       setStats({
         totalDevices: devices?.length ?? 0,
@@ -174,13 +186,10 @@ export default function AdminDashboard() {
         syncFailures: syncLogs?.length ?? 0,
         totalModelsAssigned: assignedModelsCount ?? 0,
         totalUsageToday: usageToday,
+        deviceGrowthTrend: devicesCreatedThisWeekCount ? `+${devicesCreatedThisWeekCount} this week` : null,
+        usageTrend,
+        systemHealthText,
       });
-
-      // attach real-time trend notes to card descriptors where relevant
-      STAT_CARDS_TEMPLATE.totalDevices.trend = devicesCreatedThisWeekCount
-        ? `+${devicesCreatedThisWeekCount} this week`
-        : undefined;
-      STAT_CARDS_TEMPLATE.totalUsageToday.trend = usageTrend;
     } catch (error) {
       console.error('Error fetching dashboard stats:', error);
     }
@@ -242,21 +251,45 @@ export default function AdminDashboard() {
       })
       .subscribe();
 
+    const adminStatsChannel = supabase
+      .channel('admin-dashboard-stats-live')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'devices' }, () => {
+        void fetchDashboardStats();
+        void fetchPairingInsights();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'device_licenses' }, () => {
+        void fetchDashboardStats();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'device_sync_logs' }, () => {
+        void fetchDashboardStats();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'activated_models' }, () => {
+        void fetchDashboardStats();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'pod_activation_requests' }, () => {
+        void fetchDashboardStats();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_messages' }, () => {
+        void fetchDashboardStats();
+      })
+      .subscribe();
+
     return () => {
       window.removeEventListener(REALTIME_DEVICE_EVENT, handleDeviceRealtime);
       supabase.removeChannel(pairingChannel);
+      supabase.removeChannel(adminStatsChannel);
     };
   }, [fetchDashboardStats, fetchPairingInsights]);
 
   const statCards = [
-    { ...STAT_CARDS_TEMPLATE.totalDevices, value: stats.totalDevices },
+    { ...STAT_CARDS_TEMPLATE.totalDevices, value: stats.totalDevices, trend: stats.deviceGrowthTrend ?? undefined },
     { ...STAT_CARDS_TEMPLATE.onlineDevices, value: stats.onlineDevices },
     { ...STAT_CARDS_TEMPLATE.offlineDevices, value: stats.offlineDevices },
     { ...STAT_CARDS_TEMPLATE.pendingApprovals, value: stats.pendingApprovals },
     { ...STAT_CARDS_TEMPLATE.expiringSoon, value: stats.expiringSoon },
     { ...STAT_CARDS_TEMPLATE.syncFailures, value: stats.syncFailures },
     { ...STAT_CARDS_TEMPLATE.totalModelsAssigned, value: stats.totalModelsAssigned },
-    { ...STAT_CARDS_TEMPLATE.totalUsageToday, value: stats.totalUsageToday },
+    { ...STAT_CARDS_TEMPLATE.totalUsageToday, value: stats.totalUsageToday, trend: stats.usageTrend ?? undefined },
   ];
 
   if (isLoading) {
@@ -412,7 +445,7 @@ export default function AdminDashboard() {
               {stats.pendingApprovals === 0 && stats.expiringSoon === 0 && stats.syncFailures === 0 && (
                 <div className="flex items-center justify-center p-8 text-muted-foreground">
                   <CheckCircle className="h-5 w-5 mr-2" />
-                  <span>All systems operational</span>
+                  <span>{stats.systemHealthText}</span>
                 </div>
               )}
             </div>

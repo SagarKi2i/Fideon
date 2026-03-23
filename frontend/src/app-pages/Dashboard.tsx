@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { 
   Brain, FileSearch, Scale, ClipboardList, FileText, 
@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { supabase } from "@/integrations/supabase/client";
 import { InfoTooltip } from "@/components/ui/info-tooltip";
+import type { RealtimeChannel } from "@supabase/supabase-js";
 
 interface ActivatedPod {
   id: string;
@@ -22,7 +23,7 @@ interface ActivatedPod {
 
 interface PodMetrics {
   totalQueries: number;
-  successRate: number;
+  successRate: number | null;
   lastActivity: string;
   trend: string;
 }
@@ -86,34 +87,31 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [displayName, setDisplayName] = useState("User");
   const [totalQueries, setTotalQueries] = useState(0);
-  const [avgSuccessRate, setAvgSuccessRate] = useState(100);
+  const [avgSuccessRate, setAvgSuccessRate] = useState<number | null>(null);
+  const [queryTrendPct, setQueryTrendPct] = useState<number | null>(null);
+  const [avgResponseSeconds, setAvgResponseSeconds] = useState<number | null>(null);
+  const [responseImprovementPct, setResponseImprovementPct] = useState<number | null>(null);
   const [podQueryCounts, setPodQueryCounts] = useState<Record<string, number>>({});
   const [podLastActivity, setPodLastActivity] = useState<Record<string, string>>({});
   const [recentActivity, setRecentActivity] = useState<
     { id: string; action: string; time: string; status: "success" | "error"; podName: string }[]
   >([]);
 
-  useEffect(() => {
-    loadActivatedPods();
-  }, []);
-
-  const loadActivatedPods = async () => {
+  const loadActivatedPods = useCallback(async (userId: string) => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-
       const { data: profile } = await supabase
         .from("app_users")
         .select("full_name,email")
-        .eq("user_id", user.id)
+        .eq("user_id", userId)
         .maybeSingle();
-      const fallbackName = user.email?.split("@")[0] ?? "User";
+      const { data: authData } = await supabase.auth.getUser();
+      const fallbackName = authData.user?.email?.split("@")[0] ?? "User";
       setDisplayName(profile?.full_name ?? profile?.email?.split("@")[0] ?? fallbackName);
 
       const { data, error } = await supabase
         .from("activated_models")
         .select("*")
-        .eq("user_id", user.id)
+        .eq("user_id", userId)
         .order("activated_at", { ascending: false });
 
       if (error) throw error;
@@ -122,19 +120,36 @@ export default function Dashboard() {
 
       const { data: conversations } = await supabase
         .from("chat_conversations")
-        .select("id, model_id, updated_at, title, chat_messages(id)")
-        .eq("user_id", user.id);
+        .select("id, model_id, updated_at, title, chat_messages(id,created_at)")
+        .eq("user_id", userId);
 
       const queryCountByModel: Record<string, number> = {};
       const lastActivityByModel: Record<string, string> = {};
       let conversationQueryTotal = 0;
+      const now = new Date();
+      const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+      const previousMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      let currentMonthQueries = 0;
+      let previousMonthQueries = 0;
       const activityFeed: { id: string; action: string; time: string; status: "success" | "error"; podName: string }[] = [];
 
       for (const conv of conversations ?? []) {
         const modelId = conv.model_id ?? "generic-prompt";
-        const queryCount = Array.isArray((conv as any).chat_messages) ? (conv as any).chat_messages.length : 0;
+        const messages = Array.isArray((conv as any).chat_messages) ? (conv as any).chat_messages : [];
+        const queryCount = messages.length;
         queryCountByModel[modelId] = (queryCountByModel[modelId] ?? 0) + queryCount;
         conversationQueryTotal += queryCount;
+
+        for (const msg of messages) {
+          const createdAt = new Date(msg.created_at);
+          if (Number.isNaN(createdAt.getTime())) continue;
+          if (createdAt >= currentMonthStart) {
+            currentMonthQueries += 1;
+          } else if (createdAt >= previousMonthStart && createdAt < currentMonthStart) {
+            previousMonthQueries += 1;
+          }
+        }
+
         const activityTime = conv.updated_at || null;
         if (!lastActivityByModel[modelId] || new Date(activityTime || 0).getTime() > new Date(lastActivityByModel[modelId]).getTime()) {
           lastActivityByModel[modelId] = activityTime || "";
@@ -152,11 +167,18 @@ export default function Dashboard() {
       setPodQueryCounts(queryCountByModel);
       setPodLastActivity(lastActivityByModel);
       setTotalQueries(conversationQueryTotal);
+      if (previousMonthQueries > 0) {
+        setQueryTrendPct(((currentMonthQueries - previousMonthQueries) / previousMonthQueries) * 100);
+      } else if (currentMonthQueries > 0) {
+        setQueryTrendPct(100);
+      } else {
+        setQueryTrendPct(0);
+      }
 
       const { data: runs } = await supabase
         .from("workflow_runs")
         .select("id,status,started_at,completed_at")
-        .eq("user_id", user.id)
+        .eq("user_id", userId)
         .order("started_at", { ascending: false })
         .limit(100);
 
@@ -164,8 +186,53 @@ export default function Dashboard() {
       const completedRuns = runRows.filter((r) => r.status === "completed");
       const failedRuns = runRows.filter((r) => r.status === "failed");
       const consideredRuns = completedRuns.length + failedRuns.length;
-      const successRate = consideredRuns > 0 ? (completedRuns.length / consideredRuns) * 100 : 100;
+      const successRate = consideredRuns > 0 ? (completedRuns.length / consideredRuns) * 100 : null;
       setAvgSuccessRate(successRate);
+
+      const completedDurations = completedRuns
+        .map((run) => {
+          if (!run.started_at || !run.completed_at) return null;
+          const durationSec = (new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()) / 1000;
+          return Number.isFinite(durationSec) && durationSec >= 0 ? durationSec : null;
+        })
+        .filter((v): v is number => v !== null);
+
+      if (completedDurations.length > 0) {
+        const avg = completedDurations.reduce((sum, value) => sum + value, 0) / completedDurations.length;
+        setAvgResponseSeconds(avg);
+      } else {
+        setAvgResponseSeconds(null);
+      }
+
+      const currentMonthDurations = completedRuns
+        .filter((run) => run.started_at && new Date(run.started_at) >= currentMonthStart)
+        .map((run) => {
+          if (!run.started_at || !run.completed_at) return null;
+          const durationSec = (new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()) / 1000;
+          return Number.isFinite(durationSec) && durationSec >= 0 ? durationSec : null;
+        })
+        .filter((v): v is number => v !== null);
+
+      const previousMonthDurations = completedRuns
+        .filter((run) => run.started_at && new Date(run.started_at) >= previousMonthStart && new Date(run.started_at) < currentMonthStart)
+        .map((run) => {
+          if (!run.started_at || !run.completed_at) return null;
+          const durationSec = (new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()) / 1000;
+          return Number.isFinite(durationSec) && durationSec >= 0 ? durationSec : null;
+        })
+        .filter((v): v is number => v !== null);
+
+      if (currentMonthDurations.length > 0 && previousMonthDurations.length > 0) {
+        const currentAvg = currentMonthDurations.reduce((sum, value) => sum + value, 0) / currentMonthDurations.length;
+        const previousAvg = previousMonthDurations.reduce((sum, value) => sum + value, 0) / previousMonthDurations.length;
+        if (previousAvg > 0) {
+          setResponseImprovementPct(((previousAvg - currentAvg) / previousAvg) * 100);
+        } else {
+          setResponseImprovementPct(null);
+        }
+      } else {
+        setResponseImprovementPct(null);
+      }
 
       const runActivities = runRows.slice(0, 5).map((r) => ({
         id: `run-${r.id}`,
@@ -185,7 +252,55 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    let channel: RealtimeChannel | null = null;
+    let isMounted = true;
+
+    const init = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user || !isMounted) {
+        setLoading(false);
+        return;
+      }
+
+      await loadActivatedPods(user.id);
+
+      channel = supabase
+        .channel(`dashboard-live-${user.id}`)
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "activated_models", filter: `user_id=eq.${user.id}` },
+          () => void loadActivatedPods(user.id)
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "chat_conversations", filter: `user_id=eq.${user.id}` },
+          () => void loadActivatedPods(user.id)
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "chat_messages" },
+          () => void loadActivatedPods(user.id)
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "workflow_runs", filter: `user_id=eq.${user.id}` },
+          () => void loadActivatedPods(user.id)
+        )
+        .subscribe();
+    };
+
+    void init();
+
+    return () => {
+      isMounted = false;
+      if (channel) {
+        supabase.removeChannel(channel);
+      }
+    };
+  }, [loadActivatedPods]);
 
   if (loading) {
     return (
@@ -266,7 +381,15 @@ export default function Dashboard() {
                 </CardHeader>
                 <CardContent className="p-3 md:p-6 pt-0">
                   <div className="text-2xl md:text-3xl font-bold text-foreground">{pods.length}</div>
-                  <p className="text-xs text-primary mt-1">All systems operational</p>
+                  <p className="text-xs text-primary mt-1">
+                    {avgSuccessRate === null
+                      ? "No run data yet"
+                      : avgSuccessRate >= 99
+                        ? "All systems operational"
+                        : avgSuccessRate >= 95
+                          ? "Stable performance"
+                          : "Performance degraded"}
+                  </p>
                 </CardContent>
               </Card>
 
@@ -280,7 +403,11 @@ export default function Dashboard() {
                 </CardHeader>
                 <CardContent className="p-3 md:p-6 pt-0">
                   <div className="text-2xl md:text-3xl font-bold text-foreground">{totalQueries.toLocaleString()}</div>
-                  <p className="text-xs text-primary mt-1">+18% this month</p>
+                  <p className="text-xs text-primary mt-1">
+                    {queryTrendPct === null
+                      ? "No trend data yet"
+                      : `${queryTrendPct >= 0 ? "+" : ""}${queryTrendPct.toFixed(1)}% vs last month`}
+                  </p>
                 </CardContent>
               </Card>
 
@@ -293,8 +420,18 @@ export default function Dashboard() {
                   <TrendingUp className="h-4 w-4 text-emerald-500" />
                 </CardHeader>
                 <CardContent className="p-3 md:p-6 pt-0">
-                  <div className="text-2xl md:text-3xl font-bold text-foreground">{avgSuccessRate.toFixed(1)}%</div>
-                  <p className="text-xs text-primary mt-1">Excellent performance</p>
+                  <div className="text-2xl md:text-3xl font-bold text-foreground">
+                    {avgSuccessRate === null ? "--" : `${avgSuccessRate.toFixed(1)}%`}
+                  </div>
+                  <p className="text-xs text-primary mt-1">
+                    {avgSuccessRate === null
+                      ? "No run data yet"
+                      : avgSuccessRate >= 99
+                        ? "Excellent performance"
+                        : avgSuccessRate >= 95
+                          ? "Good performance"
+                          : "Needs attention"}
+                  </p>
                 </CardContent>
               </Card>
 
@@ -307,8 +444,14 @@ export default function Dashboard() {
                   <Zap className="h-4 w-4 text-amber-500" />
                 </CardHeader>
                 <CardContent className="p-3 md:p-6 pt-0">
-                  <div className="text-2xl md:text-3xl font-bold text-foreground">1.8s</div>
-                  <p className="text-xs text-primary mt-1">-15% faster</p>
+                  <div className="text-2xl md:text-3xl font-bold text-foreground">
+                    {avgResponseSeconds === null ? "--" : `${avgResponseSeconds.toFixed(1)}s`}
+                  </div>
+                  <p className="text-xs text-primary mt-1">
+                    {responseImprovementPct === null
+                      ? "No baseline yet"
+                      : `${responseImprovementPct >= 0 ? "-" : "+"}${Math.abs(responseImprovementPct).toFixed(1)}% vs last month`}
+                  </p>
                 </CardContent>
               </Card>
             </div>
@@ -324,11 +467,12 @@ export default function Dashboard() {
               <div className="grid gap-4 md:gap-6 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
                 {pods.map((pod, index) => {
                   const Icon = getPodIcon(pod.model_id);
+                  const podQueries = podQueryCounts[pod.model_id] ?? 0;
                   const metrics: PodMetrics = {
-                    totalQueries: podQueryCounts[pod.model_id] ?? 0,
-                    successRate: avgSuccessRate,
+                    totalQueries: podQueries,
+                    successRate: podQueries > 0 ? avgSuccessRate : null,
                     lastActivity: toRelativeTime(podLastActivity[pod.model_id]),
-                    trend: (podQueryCounts[pod.model_id] ?? 0) > 0 ? "Live data" : "No data",
+                    trend: podQueries > 0 ? "Live data" : "No data",
                   };
                   const colorClass = getPodColor(pod.model_id);
                   const gradient = getPodGradient(pod.model_id);
@@ -369,7 +513,9 @@ export default function Dashboard() {
                           </div>
                           <div>
                             <p className="text-xs text-muted-foreground">Success Rate</p>
-                            <p className="text-lg font-semibold text-foreground">{metrics.successRate.toFixed(1)}%</p>
+                            <p className="text-lg font-semibold text-foreground">
+                              {metrics.successRate === null ? "--" : `${metrics.successRate.toFixed(1)}%`}
+                            </p>
                           </div>
                         </div>
                         <div>
@@ -377,7 +523,7 @@ export default function Dashboard() {
                             <span className="text-muted-foreground">Performance</span>
                             <span className="text-primary font-medium">{metrics.trend}</span>
                           </div>
-                          <Progress value={metrics.successRate} className="h-1.5" />
+                          <Progress value={metrics.successRate ?? 0} className="h-1.5" />
                         </div>
                       </CardContent>
                     </Card>

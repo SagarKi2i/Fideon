@@ -5,6 +5,7 @@ import type { Provider } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
@@ -23,6 +24,23 @@ const VALID_APP_ROLES: AppRole[] = ["global_admin", "admin", "user", "viewer", "
 
 function isAppRole(value: unknown): value is AppRole {
   return typeof value === "string" && VALID_APP_ROLES.includes(value as AppRole);
+}
+
+function isRecoveryRoute(pathname: string, search: string, hash: string): boolean {
+  const normalizedSearch = search.startsWith("?") ? search.slice(1) : search;
+  const normalizedHash = hash.startsWith("#") ? hash.slice(1) : hash;
+  const searchParams = new URLSearchParams(normalizedSearch);
+  const hashParams = new URLSearchParams(normalizedHash);
+
+  return (
+    pathname === "/reset-password" ||
+    searchParams.get("type")?.toLowerCase() === "recovery" ||
+    hashParams.get("type")?.toLowerCase() === "recovery" ||
+    /type=recovery/i.test(normalizedSearch) ||
+    /type=recovery/i.test(normalizedHash) ||
+    /recovery/i.test(normalizedSearch) ||
+    /recovery/i.test(normalizedHash)
+  );
 }
 
 async function resolveEffectiveRole(userId: string): Promise<AppRole> {
@@ -72,7 +90,11 @@ async function resolveEffectiveRole(userId: string): Promise<AppRole> {
   return "user";
 }
 
-export default function Auth() {
+interface AuthProps {
+  initialView?: AuthView;
+}
+
+export default function Auth({ initialView = "signin" }: AuthProps) {
   const navigate = useNavigate();
   const location = useLocation();
   const { toast } = useToast();
@@ -88,7 +110,7 @@ export default function Auth() {
     [ssoProviderCsv]
   );
 
-  const [view, setView] = useState<AuthView>("signin");
+  const [view, setView] = useState<AuthView>(initialView);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -104,13 +126,27 @@ export default function Auth() {
   const [qrMarkup, setQrMarkup] = useState<string>("");
 
   useEffect(() => {
-    const hash = window.location.hash.startsWith("#")
-      ? window.location.hash.slice(1)
-      : window.location.hash;
-    const hashParams = new URLSearchParams(hash);
-    if (hashParams.get("type") === "recovery") {
-      setView("reset");
+    const recoveryFlow = isRecoveryRoute(location.pathname, location.search, location.hash);
+    if (!recoveryFlow) {
+      setView(initialView);
     }
+  }, [initialView, location.hash, location.pathname, location.search]);
+
+  useEffect(() => {
+    const isRecoveryCallback = isRecoveryRoute(
+      location.pathname,
+      window.location.search,
+      window.location.hash,
+    );
+
+    safeLog.info("auth_reset_view_detection", {
+      pathname: location.pathname,
+      hasRecoveryMarker: isRecoveryCallback,
+      isRecoveryCallback,
+      forcingResetView: isRecoveryCallback ? true : false,
+    });
+
+    if (isRecoveryCallback) setView("reset");
 
     const bootstrap = async () => {
       const { data } = await supabase.auth.getUser();
@@ -126,7 +162,7 @@ export default function Auth() {
     });
 
     return () => subscription.unsubscribe();
-  }, []);
+  }, [location.pathname]);
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -137,6 +173,9 @@ export default function Auth() {
       navigate(`/device-link?pid=${encodeURIComponent(pid)}&code=${encodeURIComponent(code)}`, { replace: true });
     }
   }, [location.search, navigate]);
+
+  const forcedResetView = isRecoveryRoute(location.pathname, location.search, location.hash);
+  const effectiveView: AuthView = forcedResetView ? "reset" : view;
 
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -241,7 +280,7 @@ export default function Auth() {
     e.preventDefault();
     setLoading(true);
     try {
-      const redirectTo = `${window.location.origin}/auth`;
+      const redirectTo = `${window.location.origin}/reset-password`;
       const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
       if (error) throw error;
       toast({
@@ -281,13 +320,78 @@ export default function Auth() {
 
     setLoading(true);
     try {
+      // Block reusing the current password:
+      // if signing in with the proposed password succeeds, it means the password
+      // is already active for this account and should not be reused.
+      try {
+        const { data: currentUserData } = await supabase.auth.getUser();
+        const currentEmail = currentUserData.user?.email;
+        if (currentEmail) {
+          const { data: existingPasswordMatch, error: existingPasswordError } =
+            await supabase.auth.signInWithPassword({
+              email: currentEmail,
+              password: newPassword,
+            });
+
+          if (!existingPasswordError && existingPasswordMatch.user) {
+            toast({
+              title: "Password already used",
+              description: "Please choose a new password that you haven't used for this account.",
+              variant: "destructive",
+            });
+            setLoading(false);
+            return;
+          }
+        }
+      } catch (passwordReuseCheckError) {
+        safeLog.error("auth_password_reuse_check_failed", {
+          error:
+            passwordReuseCheckError instanceof Error
+              ? passwordReuseCheckError.message
+              : String(passwordReuseCheckError),
+        });
+      }
+
       const { error } = await supabase.auth.updateUser({ password: newPassword });
       if (error) throw error;
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        const accessToken = sessionData.session?.access_token;
+        if (accessToken) {
+          const res = await fetch(apiUrl("/api/settings/password-changed"), {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+            },
+          });
+
+          if (!res.ok) {
+            const payload = await readJsonSafe(res);
+            const apiError = buildApiRequestError(
+              res,
+              payload,
+              "Password changed, but failed to persist password timestamp",
+            );
+            safeLog.error("auth_password_changed_backend_sync_failed", {
+              error: apiError.message,
+            });
+          }
+        }
+      } catch (syncError) {
+        safeLog.error("auth_password_changed_backend_sync_exception", {
+          error: syncError instanceof Error ? syncError.message : String(syncError),
+        });
+      }
+
+      // Recovery flow creates a temporary session. Sign out after password update
+      // so the user explicitly signs in with the new password.
+      await supabase.auth.signOut();
+
       toast({
         title: "Password updated",
         description: "Sign in with your new password.",
       });
-      setView("signin");
+      navigate("/auth", { replace: true });
       setPassword("");
       setNewPassword("");
       setConfirmPassword("");
@@ -446,9 +550,8 @@ export default function Auth() {
       </div>
       <div className="space-y-2">
         <Label htmlFor="signin-password">Password</Label>
-        <Input
+        <PasswordInput
           id="signin-password"
-          type="password"
           placeholder="••••••••"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
@@ -465,7 +568,7 @@ export default function Auth() {
       </Button>
       <button
         type="button"
-        onClick={() => setView("forgot")}
+        onClick={() => navigate("/forgot-password")}
         className="w-full text-sm text-primary underline-offset-4 hover:underline bg-transparent border-none cursor-pointer py-1"
       >
         Forgot password?
@@ -495,7 +598,7 @@ export default function Auth() {
       </Button>
       <button
         type="button"
-        onClick={() => setView("signin")}
+        onClick={() => navigate("/auth")}
         className="w-full text-sm text-primary underline-offset-4 hover:underline bg-transparent border-none cursor-pointer py-1"
       >
         Back to sign in
@@ -507,9 +610,8 @@ export default function Auth() {
     <form onSubmit={handleResetPassword} className="space-y-4">
       <div className="space-y-2">
         <Label htmlFor="reset-password">New Password</Label>
-        <Input
+        <PasswordInput
           id="reset-password"
-          type="password"
           value={newPassword}
           onChange={(e) => setNewPassword(e.target.value)}
           minLength={8}
@@ -519,9 +621,8 @@ export default function Auth() {
       </div>
       <div className="space-y-2">
         <Label htmlFor="reset-password-confirm">Confirm Password</Label>
-        <Input
+        <PasswordInput
           id="reset-password-confirm"
-          type="password"
           value={confirmPassword}
           onChange={(e) => setConfirmPassword(e.target.value)}
           minLength={8}
@@ -534,7 +635,7 @@ export default function Auth() {
       </Button>
       <button
         type="button"
-        onClick={() => setView("signin")}
+        onClick={() => navigate("/auth")}
         className="w-full text-sm text-primary underline-offset-4 hover:underline bg-transparent border-none cursor-pointer py-1"
       >
         Back to sign in
@@ -626,17 +727,17 @@ export default function Auth() {
                 Welcome to Fideon OS
               </CardTitle>
               <CardDescription className="text-center">
-                {view === "signin" && "Sign in to access your Private AI Tenant"}
-                {view === "forgot" && "Request a secure password reset link"}
-                {view === "reset" && "Set a new password for your account"}
+                {effectiveView === "signin" && "Sign in to access your Private AI Tenant"}
+                {effectiveView === "forgot" && "Request a secure password reset link"}
+                {effectiveView === "reset" && "Set a new password for your account"}
               </CardDescription>
             </CardHeader>
             <CardContent>
-              {view === "signin" && signInView}
-              {view === "forgot" && forgotView}
-              {view === "reset" && resetView}
+              {effectiveView === "signin" && signInView}
+              {effectiveView === "forgot" && forgotView}
+              {effectiveView === "reset" && resetView}
 
-              {authEnableSso && allowedProviders.length > 0 && view === "signin" && (
+              {authEnableSso && allowedProviders.length > 0 && effectiveView === "signin" && (
                 <div className="mt-6 space-y-2">
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
                     <Mail className="h-3.5 w-3.5" />
@@ -658,7 +759,7 @@ export default function Auth() {
                 </div>
               )}
 
-              {authEnableMfa && (
+              {authEnableMfa && effectiveView === "signin" && (
                 <div className="mt-6 rounded-lg border border-border/60 bg-background/40 p-4 space-y-3">
                   <div className="flex items-center gap-2">
                     <KeyRound className="h-4 w-4 text-primary" />
