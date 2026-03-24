@@ -7,7 +7,8 @@ python-dotenv
 PyJWT>=2.0.0
 
 # LLM Fallback Service (ported from LLM Fallback 3)
-litellm @ https://github.com/BerriAI/litellm/archive/refs/tags/v1.82.8.zip
+# Use PyPI only — GitHub tag archives (e.g. .../tags/v1.82.8.zip) can 404 if the tag does not exist.
+litellm>=1.82.0,<1.83
 
 # Optional: semantic caching
 # sentence-transformers>=2.2.0

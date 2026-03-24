@@ -70,6 +70,32 @@ After changing any of the above, re-run the failed **Deploy** job (or push again
 
 ---
 
+## App Service (v1-dev): `Failed to get app runtime OS`
+
+**Error:** `Deployment Failed, Error: Failed to get app runtime OS` with `{}` in logs (often from `azure/webapps-deploy`).
+
+`webapps-deploy` with a **publish profile** calls Kudu (`https://<app>.scm.azurewebsites.net/diagnostics/runtime`) to detect the OS. If SCM returns 503, empty JSON, or is unreachable, this step fails.
+
+### Fix in Azure (keep publish profile deploy)
+
+1. **App setting (Linux):** Set `WEBSITE_WEBDEPLOY_USE_SCM` = `true`, then download a new **Publish profile** from the app and update the GitHub secret ([Microsoft docs](https://learn.microsoft.com/en-us/azure/app-service/deploy-container-github-action)).
+2. **SCM access:** Ensure **Networking** / **Access restrictions** do not block GitHub-hosted runners from `*.scm.azurewebsites.net` (similar to allowing Kudu / Advanced Tools).
+3. **Restart** the App Service and retry; transient Kudu 503s happen ([discussion](https://github.com/Azure/webapps-deploy/issues/95)).
+
+### Fix in GitHub (RBAC — avoids Kudu for this action)
+
+The same action uses the **ARM** path when you **do not** pass `publish-profile` and you run **`azure/login`** first.
+
+In GitHub → **Settings** → **Environments** → **development** (or the env that runs `deploy-app-service`):
+
+1. Add variable **`APPSERVICE_USE_AZURE_LOGIN`** = `true`.
+2. Add variable **`AZURE_RESOURCE_GROUP`** = the resource group name of the Web App.
+3. Add secret **`AZURE_CREDENTIALS`** = JSON for a service principal that can deploy to that Web App (e.g. **Website Contributor** on the app or resource group).
+
+Keep your existing ACR secrets; the workflow still pushes images the same way. After this, the deploy job uses RBAC instead of the publish profile for `webapps-deploy`.
+
+---
+
 ## Quick checklist (development)
 
 | Check | Where |
