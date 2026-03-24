@@ -35,9 +35,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: ${{ inputs.environment }}
-    permissions:
-      id-token: write
-      contents: read
     steps:
       - uses: actions/checkout@v4
 
