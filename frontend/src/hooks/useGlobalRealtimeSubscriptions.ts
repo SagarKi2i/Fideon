@@ -6,6 +6,17 @@ import { emitDeviceRealtime, emitNotificationRealtime } from "@/lib/realtimeEven
 import { safeLog } from "@/logger";
 import { pushRealtimeNotification } from "@/lib/realtimeNotificationStore";
 
+const REALTIME_BACKOFF_BASE_MS = 1_000;
+const REALTIME_BACKOFF_MAX_MS = 30_000;
+const REALTIME_BACKOFF_JITTER_MS = 500;
+
+type RealtimeChannelStatus =
+  | "SUBSCRIBED"
+  | "TIMED_OUT"
+  | "CHANNEL_ERROR"
+  | "CLOSED"
+  | string;
+
 function getPodRequestMessage(eventType: string, payload: any, requesterLabel?: string): string {
   const modelName = payload?.new?.model_name || "pod request";
   const ownerId = payload?.new?.user_id || payload?.old?.user_id;
@@ -213,6 +224,9 @@ export function useGlobalRealtimeSubscriptions() {
   const currentUserIdRef = useRef<string | null>(null);
   const currentRoleRef = useRef<string | null>(null);
   const requesterLabelCacheRef = useRef<Record<string, string>>({});
+  const reconnectAttemptRef = useRef(0);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const reconnectInFlightRef = useRef(false);
   const realtimeEnabled = process.env.NEXT_PUBLIC_ENABLE_GLOBAL_REALTIME !== "false";
 
   const persistNotification = useCallback(async (userId: string, detail: {
@@ -243,6 +257,19 @@ export function useGlobalRealtimeSubscriptions() {
         source_fingerprint: detail.fingerprint,
       });
   }, []);
+
+  const clearReconnectTimer = useCallback(() => {
+    if (reconnectTimerRef.current !== null && typeof window !== "undefined") {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  }, []);
+
+  const resetReconnectState = useCallback(() => {
+    reconnectAttemptRef.current = 0;
+    reconnectInFlightRef.current = false;
+    clearReconnectTimer();
+  }, [clearReconnectTimer]);
 
   const cleanupChannels = useCallback(() => {
     for (const channel of channelsRef.current) {
@@ -296,8 +323,12 @@ export function useGlobalRealtimeSubscriptions() {
     }
   }, [resolveRequesterLabel]);
 
-  const startRealtimeForUser = useCallback(async (userId: string) => {
-    if (currentUserIdRef.current === userId) return;
+  const startRealtimeForUser = useCallback(async (
+    userId: string,
+    options?: { force?: boolean }
+  ) => {
+    const force = options?.force === true;
+    if (currentUserIdRef.current === userId && !force) return;
 
     cleanupChannels();
     currentUserIdRef.current = userId;
@@ -326,6 +357,55 @@ export function useGlobalRealtimeSubscriptions() {
 
     // Notifications are now persisted in DB per user, so we avoid synthetic backlog replay.
 
+    const handleRealtimeStatus = (channelName: string, status: RealtimeChannelStatus, err?: Error) => {
+      safeLog.info("realtime_channel_status", {
+        channel: channelName,
+        status,
+        error: err?.message,
+      });
+
+      if (status === "SUBSCRIBED") {
+        reconnectAttemptRef.current = 0;
+        reconnectInFlightRef.current = false;
+        clearReconnectTimer();
+        return;
+      }
+
+      if (!(status === "TIMED_OUT" || status === "CHANNEL_ERROR" || status === "CLOSED")) return;
+      if (!currentUserIdRef.current || reconnectInFlightRef.current) return;
+
+      reconnectInFlightRef.current = true;
+      const attempt = reconnectAttemptRef.current + 1;
+      reconnectAttemptRef.current = attempt;
+      const backoff = Math.min(
+        REALTIME_BACKOFF_MAX_MS,
+        REALTIME_BACKOFF_BASE_MS * Math.pow(2, attempt - 1),
+      );
+      const jitter = Math.floor(Math.random() * REALTIME_BACKOFF_JITTER_MS);
+      const delayMs = backoff + jitter;
+
+      clearReconnectTimer();
+      safeLog.warn("realtime_resubscribe_scheduled", {
+        channel: channelName,
+        status,
+        attempt,
+        delay_ms: delayMs,
+      });
+
+      reconnectTimerRef.current = window.setTimeout(() => {
+        reconnectTimerRef.current = null;
+        const uid = currentUserIdRef.current;
+        if (!uid) {
+          reconnectInFlightRef.current = false;
+          return;
+        }
+        void startRealtimeForUser(uid, { force: true }).finally(() => {
+          // If subscription is not healthy, channel callbacks will schedule next attempt.
+          reconnectInFlightRef.current = false;
+        });
+      }, delayMs);
+    };
+
     const deviceChannel = supabase
       .channel("global-device-status-live")
       .on("postgres_changes", { event: "*", schema: "public", table: "devices" }, (payload: any) => {
@@ -342,11 +422,7 @@ export function useGlobalRealtimeSubscriptions() {
         });
       })
       .subscribe((status, err) => {
-        safeLog.info("realtime_channel_status", {
-          channel: "global-device-status-live",
-          status,
-          error: err?.message,
-        });
+        handleRealtimeStatus("global-device-status-live", status, err);
       });
 
     const notificationsChannel = supabase
@@ -451,15 +527,11 @@ export function useGlobalRealtimeSubscriptions() {
         },
       )
       .subscribe((status, err) => {
-        safeLog.info("realtime_channel_status", {
-          channel: "global-notifications-live",
-          status,
-          error: err?.message,
-        });
+        handleRealtimeStatus("global-notifications-live", status, err);
       });
 
     channelsRef.current = [deviceChannel, notificationsChannel];
-  }, [cleanupChannels, persistNotification, resolveRequesterLabel, toast]);
+  }, [cleanupChannels, clearReconnectTimer, persistNotification, resolveRequesterLabel, toast]);
 
   useEffect(() => {
     if (!realtimeEnabled) {
@@ -471,6 +543,34 @@ export function useGlobalRealtimeSubscriptions() {
 
     let active = true;
 
+    const recoverRealtimeConnection = () => {
+      const uid = currentUserIdRef.current;
+      if (!uid) return;
+      // Trigger immediate reconnect attempt for browser online/visibility recovery.
+      reconnectAttemptRef.current = 0;
+      clearReconnectTimer();
+      void startRealtimeForUser(uid, { force: true });
+    };
+
+    const handleOnline = () => {
+      safeLog.info("realtime_reconnect_trigger", { reason: "browser_online" });
+      recoverRealtimeConnection();
+    };
+
+    const handleVisibilityChange = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        safeLog.info("realtime_reconnect_trigger", { reason: "tab_visible" });
+        recoverRealtimeConnection();
+      }
+    };
+
+    if (typeof window !== "undefined") {
+      window.addEventListener("online", handleOnline);
+    }
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", handleVisibilityChange);
+    }
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (!active) return;
       if (session?.user?.id) {
@@ -481,8 +581,10 @@ export function useGlobalRealtimeSubscriptions() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (!active) return;
       if (event === "SIGNED_IN" && session?.user?.id) {
+        resetReconnectState();
         void startRealtimeForUser(session.user.id);
       } else if (event === "SIGNED_OUT") {
+        resetReconnectState();
         cleanupChannels();
         currentUserIdRef.current = null;
         currentRoleRef.current = null;
@@ -492,9 +594,16 @@ export function useGlobalRealtimeSubscriptions() {
     return () => {
       active = false;
       subscription.unsubscribe();
+      resetReconnectState();
       cleanupChannels();
       currentUserIdRef.current = null;
       currentRoleRef.current = null;
+      if (typeof window !== "undefined") {
+        window.removeEventListener("online", handleOnline);
+      }
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", handleVisibilityChange);
+      }
     };
-  }, [cleanupChannels, realtimeEnabled, startRealtimeForUser]);
+  }, [cleanupChannels, clearReconnectTimer, realtimeEnabled, resetReconnectState, startRealtimeForUser]);
 }
