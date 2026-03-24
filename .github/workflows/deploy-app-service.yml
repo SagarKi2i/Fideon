@@ -3,9 +3,13 @@
 # (avoids "Failed to get app runtime OS" when SCM/Kudu is broken or blocked).
 #
 # Per GitHub Environment (e.g. development):
-# - Variables: AZURE_WEBAPP_FRONTEND, AZURE_WEBAPP_BACKEND, AZURE_RESOURCE_GROUP
+# - Variables: AZURE_SUBSCRIPTION_ID, AZURE_WEBAPP_FRONTEND, AZURE_WEBAPP_BACKEND, AZURE_RESOURCE_GROUP
 #              AZURE_HEALTH_URL_FRONTEND (optional), AZURE_HEALTH_URL_BACKEND (optional)
-# - Secrets: AZURE_CREDENTIALS (service principal JSON), AZURE_CR_USERNAME, AZURE_CR_PASSWORD
+# - Secrets: AZURE_CREDENTIALS (service principal JSON from `az ad sp create-for-rbac ... --sdk-auth`),
+#            AZURE_CR_USERNAME, AZURE_CR_PASSWORD
+#
+# If login fails with "No subscriptions found", the SP has no role on that subscription — see
+# .github/DEPLOY-TROUBLESHOOTING.md ("Azure Login: No subscriptions found").
 
 on:
   workflow_call:
@@ -42,11 +46,13 @@ jobs:
       - name: Preflight - environment configuration
         shell: bash
         env:
+          SUB: ${{ vars.AZURE_SUBSCRIPTION_ID }}
           APP_FE: ${{ vars.AZURE_WEBAPP_FRONTEND }}
           APP_BE: ${{ vars.AZURE_WEBAPP_BACKEND }}
           RG: ${{ vars.AZURE_RESOURCE_GROUP }}
         run: |
           missing=""
+          [ -z "$SUB" ] && missing="$missing AZURE_SUBSCRIPTION_ID"
           [ -z "$APP_FE" ] && missing="$missing AZURE_WEBAPP_FRONTEND"
           [ -z "$APP_BE" ] && missing="$missing AZURE_WEBAPP_BACKEND"
           [ -z "$RG" ] && missing="$missing AZURE_RESOURCE_GROUP"
@@ -85,6 +91,7 @@ jobs:
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Deploy container (Azure CLI — no Kudu)
         uses: azure/cli@v2
