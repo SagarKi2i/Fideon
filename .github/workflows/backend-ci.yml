@@ -17,7 +17,7 @@ on:
 
 concurrency:
   group: backend-ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 jobs:
   ci:
@@ -40,7 +40,18 @@ jobs:
         working-directory: backend
         run: |
           pip install --upgrade pip
-          pip install --retries 5 --timeout 120 -r requirements.txt
+          for attempt in 1 2 3; do
+            echo "Installing requirements (attempt $attempt/3)"
+            if pip install --retries 5 --timeout 120 -r requirements.txt; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "Dependency install failed after 3 attempts"
+              exit 1
+            fi
+            echo "Install failed, retrying in 15s..."
+            sleep 15
+          done
           pip install pytest pytest-cov flake8
 
       - name: Lint
