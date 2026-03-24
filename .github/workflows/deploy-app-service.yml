@@ -1,8 +1,8 @@
-# Reusable deploy to Azure App Service (dev-focused).
-# Defaults target current dev setup:
-# - Resource Group: chatbot-server_group
-# - Frontend App: fideon-dev-frontend
-# - Backend App: fideon-dev-backend
+# Reusable deploy to Azure App Service using publish profiles.
+# Configure per GitHub Environment (development/staging/production):
+# - Variables: AZURE_WEBAPP_FRONTEND, AZURE_WEBAPP_BACKEND,
+#              AZURE_HEALTH_URL_FRONTEND (optional), AZURE_HEALTH_URL_BACKEND (optional)
+# - Secrets: AZURE_WEBAPP_PUBLISH_PROFILE_FRONTEND, AZURE_WEBAPP_PUBLISH_PROFILE_BACKEND
 
 on:
   workflow_call:
@@ -21,13 +21,13 @@ on:
         type: string
         default: 'neurapodacr.azurecr.io'
     secrets:
-      AZURE_CREDENTIALS:
-        required: true
-      AZURE_SUBSCRIPTION_ID:
-        required: false
       AZURE_CR_USERNAME:
         required: true
       AZURE_CR_PASSWORD:
+        required: true
+      AZURE_WEBAPP_PUBLISH_PROFILE_FRONTEND:
+        required: true
+      AZURE_WEBAPP_PUBLISH_PROFILE_BACKEND:
         required: true
 
 jobs:
@@ -38,65 +38,57 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Azure Login
-        uses: azure/login@v2
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Preflight - environment configuration
+        shell: bash
+        env:
+          APP_FE: ${{ vars.AZURE_WEBAPP_FRONTEND }}
+          APP_BE: ${{ vars.AZURE_WEBAPP_BACKEND }}
+        run: |
+          missing=""
+          [ -z "$APP_FE" ] && missing="$missing AZURE_WEBAPP_FRONTEND"
+          [ -z "$APP_BE" ] && missing="$missing AZURE_WEBAPP_BACKEND"
+          if [ -n "$missing" ]; then
+            echo "ERROR: Missing required environment variables:$missing"
+            echo "Set these in GitHub -> Settings -> Environments -> ${{ inputs.environment }} -> Variables"
+            exit 1
+          fi
 
       - name: Resolve App Service target
         id: target
         shell: bash
         env:
-          ENV_NAME: ${{ inputs.environment }}
           COMPONENT: ${{ inputs.component }}
         run: |
-          RG="chatbot-server_group"
           if [ "$COMPONENT" = "frontend" ]; then
-            APP="fideon-dev-frontend"
+            APP="${{ vars.AZURE_WEBAPP_FRONTEND }}"
+            HEALTH_URL="${{ vars.AZURE_HEALTH_URL_FRONTEND }}"
           else
-            APP="fideon-dev-backend"
+            APP="${{ vars.AZURE_WEBAPP_BACKEND }}"
+            HEALTH_URL="${{ vars.AZURE_HEALTH_URL_BACKEND }}"
           fi
 
-          # Keep this workflow safe: only development is supported for now.
-          if [ "$ENV_NAME" != "development" ]; then
-            echo "ERROR: deploy-app-service.yml currently supports only development."
-            echo "Requested: $ENV_NAME"
-            exit 1
+          if [ -z "$HEALTH_URL" ]; then
+            if [ "$COMPONENT" = "frontend" ]; then
+              HEALTH_URL="https://${APP}.azurewebsites.net/"
+            else
+              HEALTH_URL="https://${APP}.azurewebsites.net/health"
+            fi
           fi
 
-          echo "rg=$RG" >> "$GITHUB_OUTPUT"
           echo "app=$APP" >> "$GITHUB_OUTPUT"
+          echo "health_url=$HEALTH_URL" >> "$GITHUB_OUTPUT"
 
       - name: Deploy container to App Service
-        shell: bash
-        env:
-          RG: ${{ steps.target.outputs.rg }}
-          APP: ${{ steps.target.outputs.app }}
-          ACR: ${{ inputs.acr_login_server }}
-          IMAGE: ${{ inputs.acr_login_server }}/${{ inputs.component }}:${{ inputs.image_sha }}
-        run: |
-          az webapp config container set \
-            --name "$APP" \
-            --resource-group "$RG" \
-            --docker-custom-image-name "$IMAGE" \
-            --docker-registry-server-url "https://$ACR" \
-            --docker-registry-server-user "${{ secrets.AZURE_CR_USERNAME }}" \
-            --docker-registry-server-password "${{ secrets.AZURE_CR_PASSWORD }}"
-
-          az webapp restart --name "$APP" --resource-group "$RG"
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ steps.target.outputs.app }}
+          publish-profile: ${{ inputs.component == 'frontend' && secrets.AZURE_WEBAPP_PUBLISH_PROFILE_FRONTEND || secrets.AZURE_WEBAPP_PUBLISH_PROFILE_BACKEND }}
+          images: ${{ inputs.acr_login_server }}/${{ inputs.component }}:${{ inputs.image_sha }}
 
       - name: Health check
         shell: bash
-        env:
-          RG: ${{ steps.target.outputs.rg }}
-          APP: ${{ steps.target.outputs.app }}
         run: |
-          HOST=$(az webapp show -g "$RG" -n "$APP" --query defaultHostName -o tsv)
-          if [ "${{ inputs.component }}" = "frontend" ]; then
-            URL="https://${HOST}/"
-          else
-            URL="https://${HOST}/health"
-          fi
+          URL="${{ steps.target.outputs.health_url }}"
 
           for i in 1 2 3 4 5 6; do
             if curl -sf --max-time 15 "$URL" > /dev/null 2>&1; then
