@@ -3,11 +3,6 @@ name: Security & Dependency Audit
 on:
   schedule:
     - cron: "0 8 * * 1"
-  pull_request:
-    branches:
-      - 'v*-dev'
-      - 'v*-staging'
-      - 'v1'
   workflow_dispatch:
 
 jobs:

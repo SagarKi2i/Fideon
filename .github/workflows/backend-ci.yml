@@ -103,12 +103,10 @@ jobs:
   deploy-dev:
     needs: ci
     if: github.ref == 'refs/heads/v1-dev' && github.event_name == 'push'
-    uses: ./.github/workflows/deploy-env.yml
+    uses: ./.github/workflows/deploy-app-service.yml
     with:
       environment: development
       component: backend
-      container_name: neurapod-backend
-      port: '8080'
       image_sha: ${{ github.sha }}
     secrets: inherit
 
