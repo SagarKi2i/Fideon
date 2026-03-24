@@ -1,0 +1,115 @@
+# Reusable deploy to Azure App Service (dev-focused).
+# Defaults target current dev setup:
+# - Resource Group: chatbot-server_group
+# - Frontend App: fideon-dev-frontend
+# - Backend App: fideon-dev-backend
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      component:
+        required: true
+        type: string
+      image_sha:
+        required: true
+        type: string
+      acr_login_server:
+        required: false
+        type: string
+        default: 'neurapodacr.azurecr.io'
+    secrets:
+      AZURE_CREDENTIALS:
+        required: true
+      AZURE_SUBSCRIPTION_ID:
+        required: false
+      AZURE_CR_USERNAME:
+        required: true
+      AZURE_CR_PASSWORD:
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ inputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve App Service target
+        id: target
+        shell: bash
+        env:
+          ENV_NAME: ${{ inputs.environment }}
+          COMPONENT: ${{ inputs.component }}
+        run: |
+          RG="chatbot-server_group"
+          if [ "$COMPONENT" = "frontend" ]; then
+            APP="fideon-dev-frontend"
+          else
+            APP="fideon-dev-backend"
+          fi
+
+          # Keep this workflow safe: only development is supported for now.
+          if [ "$ENV_NAME" != "development" ]; then
+            echo "ERROR: deploy-app-service.yml currently supports only development."
+            echo "Requested: $ENV_NAME"
+            exit 1
+          fi
+
+          echo "rg=$RG" >> "$GITHUB_OUTPUT"
+          echo "app=$APP" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy container to App Service
+        shell: bash
+        env:
+          RG: ${{ steps.target.outputs.rg }}
+          APP: ${{ steps.target.outputs.app }}
+          ACR: ${{ inputs.acr_login_server }}
+          IMAGE: ${{ inputs.acr_login_server }}/${{ inputs.component }}:${{ inputs.image_sha }}
+        run: |
+          az webapp config container set \
+            --name "$APP" \
+            --resource-group "$RG" \
+            --docker-custom-image-name "$IMAGE" \
+            --docker-registry-server-url "https://$ACR" \
+            --docker-registry-server-user "${{ secrets.AZURE_CR_USERNAME }}" \
+            --docker-registry-server-password "${{ secrets.AZURE_CR_PASSWORD }}"
+
+          az webapp restart --name "$APP" --resource-group "$RG"
+
+      - name: Health check
+        shell: bash
+        env:
+          RG: ${{ steps.target.outputs.rg }}
+          APP: ${{ steps.target.outputs.app }}
+        run: |
+          HOST=$(az webapp show -g "$RG" -n "$APP" --query defaultHostName -o tsv)
+          if [ "${{ inputs.component }}" = "frontend" ]; then
+            URL="https://${HOST}/"
+          else
+            URL="https://${HOST}/health"
+          fi
+
+          for i in 1 2 3 4 5 6; do
+            if curl -sf --max-time 15 "$URL" > /dev/null 2>&1; then
+              echo "Healthy: $URL"
+              exit 0
+            fi
+            echo "Health check failed ($i/6), retrying in 10s..."
+            sleep 10
+          done
+
+          echo "ERROR: Health check failed for $URL"
+          exit 1
