@@ -24,39 +24,38 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     environment: ${{ github.ref_name == 'v1' && 'production' || github.ref_name == 'v1-staging' && 'staging' || 'development' }}
-    env:
-      CI_IMAGE: neurapodacr.azurecr.io/backend-ci:${{ github.sha }}
-      BACKEND_IMAGE: neurapodacr.azurecr.io/backend:${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Build Backend CI Image
-        run: |
-          docker build \
-            -f backend/Dockerfile.ci \
-            -t "$CI_IMAGE" \
-            backend/
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: backend/requirements.txt
 
-      - name: Lint (inside container)
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          pip install --upgrade pip
+          pip install --retries 5 --timeout 120 -r requirements.txt
+          pip install pytest pytest-cov flake8
+
+      - name: Lint
+        working-directory: backend
         continue-on-error: true
-        run: |
-          docker run --rm --entrypoint /bin/bash "$CI_IMAGE" -lc "
-            set -e
-            timeout 8m python -m flake8 /app --count --max-line-length=120 --extend-ignore=E501,F401 --exclude=.git,__pycache__,.pytest_cache,.mypy_cache,logs --statistics
-          "
+        run: flake8 . --count --max-line-length=120 --extend-ignore=E501,F401 --statistics
 
-      - name: Test (inside container)
+      - name: Test
+        working-directory: backend
         run: |
-          docker run --rm --entrypoint /bin/bash "$CI_IMAGE" -lc '
-          set -e
-          if find /app -name "test_*.py" -o -name "*_test.py" | grep -q .; then
-            timeout 12m python -m pytest /app --cov=/app --cov-report=xml
+          if find . -name "test_*.py" -o -name "*_test.py" | grep -q .; then
+            pytest --cov=. --cov-report=xml
           else
             echo "No test files found — skipping (non-blocking)"
           fi
-          '
 
       - name: SonarQube Scan
         if: >
@@ -72,43 +71,28 @@ jobs:
       # Quality Gate step intentionally removed for bootstrap:
       # we only need scans to succeed so SonarQube dashboards populate.
 
-      - name: Set up Docker Buildx
-        if: |
-          github.event_name == 'push' && (
-            github.ref == 'refs/heads/v1-dev' ||
-            github.ref == 'refs/heads/v1-staging' ||
-            github.ref == 'refs/heads/v1'
-          )
-        uses: docker/setup-buildx-action@v3
+      - name: Build Docker Image
+        if: github.event_name == 'push'
+        run: |
+          docker build \
+            -t neurapodacr.azurecr.io/backend:${{ github.sha }} \
+            backend/
 
-      - name: Login to ACR
+      - name: Login to ACR & Push
         if: |
           github.event_name == 'push' && (
             github.ref == 'refs/heads/v1-dev' ||
             github.ref == 'refs/heads/v1-staging' ||
             github.ref == 'refs/heads/v1'
           )
-        uses: docker/login-action@v3
-        with:
-          registry: neurapodacr.azurecr.io
-          username: ${{ secrets.AZURE_CR_USERNAME }}
-          password: ${{ secrets.AZURE_CR_PASSWORD }}
+        run: |
+          echo "${{ secrets.AZURE_CR_PASSWORD }}" | \
+            docker login neurapodacr.azurecr.io \
+              -u "${{ secrets.AZURE_CR_USERNAME }}" \
+              --password-stdin
 
-      - name: Build & Push Production Backend Image (cached)
-        if: |
-          github.event_name == 'push' && (
-            github.ref == 'refs/heads/v1-dev' ||
-            github.ref == 'refs/heads/v1-staging' ||
-            github.ref == 'refs/heads/v1'
-          )
-        uses: docker/build-push-action@v6
-        with:
-          context: backend
-          file: backend/Dockerfile
-          push: true
-          tags: ${{ env.BACKEND_IMAGE }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          docker push neurapodacr.azurecr.io/backend:${{ github.sha }}
+          echo "Pushed neurapodacr.azurecr.io/backend:${{ github.sha }}"
 
   deploy-dev:
     needs: ci
