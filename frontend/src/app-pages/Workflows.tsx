@@ -55,6 +55,18 @@ interface ActivatedModel {
   domain: string;
 }
 
+interface StepResultCandidate {
+  step?: unknown;
+  notes?: unknown;
+  completed_at?: unknown;
+}
+
+function getStepTimelineClass(index: number, currentStep: number): string {
+  if (index < currentStep) return "bg-green-500/10 text-green-500";
+  if (index === currentStep) return "bg-primary/10 text-primary ring-2 ring-primary";
+  return "bg-muted text-muted-foreground";
+}
+
 export default function Workflows() {
   const { toast } = useToast();
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
@@ -83,19 +95,16 @@ export default function Workflows() {
   const parseStepResults = (value: unknown): StepResult[] => {
     if (!Array.isArray(value)) return [];
     return value
-      .filter(
-        (item): item is StepResult =>
-          !!item &&
-          typeof item === "object" &&
-          typeof (item as any).step === "number" &&
-          typeof (item as any).notes === "string" &&
-          typeof (item as any).completed_at === "string"
-      )
-      .map((item) => ({
-        step: item.step,
-        notes: item.notes,
-        completed_at: item.completed_at,
-      }));
+      .filter((item): item is StepResult => {
+        if (!item || typeof item !== "object") return false;
+        const candidate = item as StepResultCandidate;
+        return (
+          typeof candidate.step === "number" &&
+          typeof candidate.notes === "string" &&
+          typeof candidate.completed_at === "string"
+        );
+      })
+      .map((item) => ({ step: item.step, notes: item.notes, completed_at: item.completed_at }));
   };
 
   useEffect(() => {
@@ -294,7 +303,7 @@ export default function Workflows() {
 
     const currentStep = activeRun?.workflow.parsed_steps[activeRun.run.current_step];
     const contextPrefix = currentStep
-      ? `[Workflow: ${activeRun?.workflow.title} | Step ${activeRun.run.current_step + 1}: ${currentStep.title}]\n\n`
+      ? `[Workflow: ${activeRun.workflow.title} | Step ${activeRun.run.current_step + 1}: ${currentStep.title}]\n\n`
       : "";
 
     const messages: { role: "user" | "assistant"; content: string }[] = [
@@ -358,11 +367,7 @@ export default function Workflows() {
           {/* Step Timeline */}
           <div className="flex gap-2 overflow-x-auto pb-2">
             {activeRun.workflow.parsed_steps.map((s, i) => (
-              <div key={i} className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-medium shrink-0 ${
-                i < activeRun.run.current_step ? "bg-green-500/10 text-green-500" :
-                i === activeRun.run.current_step ? "bg-primary/10 text-primary ring-2 ring-primary" :
-                "bg-muted text-muted-foreground"
-              }`}>
+              <div key={`${s.title}-${i}`} className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-medium shrink-0 ${getStepTimelineClass(i, activeRun.run.current_step)}`}>
                 {i < activeRun.run.current_step ? <CheckCircle2 className="h-3 w-3" /> : <Circle className="h-3 w-3" />}
                 {s.title}
               </div>
@@ -491,8 +496,8 @@ export default function Workflows() {
               </CardHeader>
               <CardContent>
                 <div className="space-y-2">
-                  {activeRun.run.step_results.map((r, i) => (
-                    <div key={i} className="flex items-start gap-2 text-sm">
+                  {activeRun.run.step_results.map((r) => (
+                    <div key={`${r.step}-${r.completed_at}`} className="flex items-start gap-2 text-sm">
                       <CheckCircle2 className="h-4 w-4 text-green-500 mt-0.5 shrink-0" />
                       <div>
                         <span className="font-medium">{activeRun.workflow.parsed_steps[r.step]?.title}</span>
@@ -627,7 +632,7 @@ export default function Workflows() {
                 <CardContent>
                   <div className="space-y-2 mb-4">
                     {w.parsed_steps.slice(0, 3).map((s, i) => (
-                      <div key={i} className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <div key={`${w.id}-${s.title}-${i}`} className="flex items-center gap-2 text-sm text-muted-foreground">
                         <Circle className="h-3 w-3 shrink-0" />
                         <span className="truncate">{s.title}</span>
                       </div>

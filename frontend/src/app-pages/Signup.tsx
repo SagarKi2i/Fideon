@@ -10,11 +10,20 @@ import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { CheckCircle2, ChevronLeft, ChevronRight, Cpu, MonitorSmartphone, Shield, Sparkles, User } from "lucide-react";
+import { apiUrl } from "@/lib/apiBaseUrl";
 
 type WizardStep = 0 | 1 | 2 | 3;
 type AppRole = Database["public"]["Enums"]["app_role"];
 type DeviceType = "desktop" | "laptop" | "mobile" | "tablet" | "other";
+type NavigatorWithUserAgentData = Navigator & { userAgentData?: { platform?: string } };
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const PASSWORD_STRENGTH_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d]).+$/;
+const LIMITS = {
+  tenantName: { min: 2, max: 100 },
+  fullName: { min: 2, max: 80 },
+  email: { min: 6, max: 254, localPartMax: 64 },
+  password: { min: 8, max: 72 },
+};
 
 const APP_ROLES: Array<{ label: string; value: AppRole }> = [
   { label: "Global Admin", value: "global_admin" },
@@ -43,6 +52,13 @@ const PLANS = [
     description: "For regulated, multi-tenant deployments at scale.",
     features: ["Unlimited users", "Multi-region", "Advanced governance"],
   },
+] as const;
+
+const STEP_META = [
+  { index: 0, label: "Account" },
+  { index: 1, label: "Plan" },
+  { index: 2, label: "Model" },
+  { index: 3, label: "Device" },
 ] as const;
 
 const ALL_MODELS = [
@@ -114,6 +130,45 @@ export default function Signup() {
     password?: string;
     confirmPassword?: string;
   }>({});
+  const [checkingEmail, setCheckingEmail] = useState(false);
+  const [lastCheckedEmail, setLastCheckedEmail] = useState("");
+  const [lastCheckedEmailExists, setLastCheckedEmailExists] = useState<boolean | null>(null);
+
+  const buildStep0Errors = () => {
+    const nextErrors: typeof step0Errors = {};
+    const normalizedEmail = email.trim().toLowerCase();
+    const emailLocalPart = normalizedEmail.split("@")[0] || "";
+
+    if (!tenantName.trim()) nextErrors.tenantName = "Tenant / Company Name is required.";
+    else if (tenantName.trim().length < LIMITS.tenantName.min) {
+      nextErrors.tenantName = `Tenant / Company Name must be at least ${LIMITS.tenantName.min} characters.`;
+    } else if (tenantName.trim().length > LIMITS.tenantName.max) {
+      nextErrors.tenantName = `Tenant / Company Name must be ${LIMITS.tenantName.max} characters or fewer.`;
+    }
+    if (!fullName.trim()) nextErrors.fullName = "Your name is required.";
+    else if (fullName.trim().length < LIMITS.fullName.min) {
+      nextErrors.fullName = `Your name must be at least ${LIMITS.fullName.min} characters.`;
+    } else if (fullName.trim().length > LIMITS.fullName.max) {
+      nextErrors.fullName = `Your name must be ${LIMITS.fullName.max} characters or fewer.`;
+    }
+    if (!normalizedEmail) nextErrors.email = "Work email is required.";
+    else if (normalizedEmail.length < LIMITS.email.min || normalizedEmail.length > LIMITS.email.max) {
+      nextErrors.email = `Work email must be ${LIMITS.email.min}-${LIMITS.email.max} characters.`;
+    } else if (emailLocalPart.length > LIMITS.email.localPartMax) {
+      nextErrors.email = `Email username must be ${LIMITS.email.localPartMax} characters or fewer.`;
+    }
+    else if (!EMAIL_RE.test(normalizedEmail)) nextErrors.email = "Enter a valid work email address.";
+    if (!password) nextErrors.password = "Password is required.";
+    else if (password.length < LIMITS.password.min || password.length > LIMITS.password.max) {
+      nextErrors.password = `Password must be ${LIMITS.password.min}-${LIMITS.password.max} characters.`;
+    } else if (!PASSWORD_STRENGTH_RE.test(password)) {
+      nextErrors.password = "Use at least 1 uppercase, 1 lowercase, 1 number, and 1 special character.";
+    }
+    if (!confirmPassword) nextErrors.confirmPassword = "Please confirm your password.";
+    else if (password !== confirmPassword) nextErrors.confirmPassword = "Passwords do not match.";
+
+    return nextErrors;
+  };
 
   useEffect(() => {
     const parseBrowser = (ua: string) => {
@@ -149,6 +204,11 @@ export default function Signup() {
       if (/Macintosh|Windows NT|Linux x86_64|X11/i.test(ua)) return "desktop";
       return "other";
     };
+    const detectPlatform = (ua: string) => {
+      const platformFromUaData = (navigator as NavigatorWithUserAgentData).userAgentData?.platform;
+      if (platformFromUaData) return platformFromUaData;
+      return detectOs(ua);
+    };
 
     const toSha256 = async (value: string) => {
       if (!window.crypto?.subtle) return "";
@@ -166,13 +226,14 @@ export default function Signup() {
     setOsName(detectOs(ua));
     setDeviceType(detectDeviceType(ua));
     setLocale(navigator.language || "");
-    setPlatform(navigator.platform || "");
+    const resolvedPlatform = detectPlatform(ua);
+    setPlatform(resolvedPlatform || "");
     setTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone || "");
 
     const fingerprintSeed = [
       navigator.userAgent,
       navigator.language,
-      navigator.platform,
+      resolvedPlatform,
       String(navigator.hardwareConcurrency || ""),
       `${window.screen?.width || ""}x${window.screen?.height || ""}`,
       Intl.DateTimeFormat().resolvedOptions().timeZone || "",
@@ -197,29 +258,62 @@ export default function Signup() {
   };
 
   const validateStep0 = () => {
-    const nextErrors: typeof step0Errors = {};
-    const normalizedEmail = email.trim().toLowerCase();
-
-    if (!tenantName.trim()) nextErrors.tenantName = "Tenant / Company Name is required.";
-    if (!fullName.trim()) nextErrors.fullName = "Your name is required.";
-    if (!normalizedEmail) nextErrors.email = "Work email is required.";
-    else if (!EMAIL_RE.test(normalizedEmail)) nextErrors.email = "Enter a valid work email address.";
-    if (!password) nextErrors.password = "Password is required.";
-    else if (password.length < 8) nextErrors.password = "Password must be at least 8 characters.";
-    if (!confirmPassword) nextErrors.confirmPassword = "Please confirm your password.";
-    else if (password !== confirmPassword) nextErrors.confirmPassword = "Passwords do not match.";
-
+    const nextErrors = buildStep0Errors();
     setStep0Errors(nextErrors);
     return Object.keys(nextErrors).length === 0;
   };
 
-  const nextStep = () => {
+  const checkEmailAlreadyExists = async (emailInput: string) => {
+    const normalizedEmail = emailInput.trim().toLowerCase();
+    if (!normalizedEmail || !EMAIL_RE.test(normalizedEmail)) {
+      return false;
+    }
+    if (normalizedEmail === lastCheckedEmail && lastCheckedEmailExists !== null) {
+      return lastCheckedEmailExists;
+    }
+
+    setCheckingEmail(true);
+    try {
+      const res = await fetch(
+        apiUrl(`/api/v1/auth/email-availability?email=${encodeURIComponent(normalizedEmail)}`),
+        { method: "GET" },
+      );
+      if (!res.ok) {
+        setLastCheckedEmail(normalizedEmail);
+        setLastCheckedEmailExists(false);
+        return false;
+      }
+      const payload = await res.json().catch(() => null);
+      const exists = Boolean(payload?.exists);
+      setLastCheckedEmail(normalizedEmail);
+      setLastCheckedEmailExists(exists);
+      return exists;
+    } finally {
+      setCheckingEmail(false);
+    }
+  };
+
+  const nextStep = async () => {
     if (step === 0) {
       const valid = validateStep0();
       if (!valid) {
         toast({
           title: "Missing information",
           description: "Please correct the highlighted fields to continue.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      const exists = await checkEmailAlreadyExists(email);
+      if (exists) {
+        setStep0Errors((prev) => ({
+          ...prev,
+          email: "This work email is already registered. Please sign in or use other email.",
+        }));
+        toast({
+          title: "Email already used",
+          description: "This work email is already registered. Please sign in or use other email.",
           variant: "destructive",
         });
         return;
@@ -312,9 +406,11 @@ export default function Signup() {
       console.error("Onboarding error:", error);
       const rawMessage = String(error?.message || "").toLowerCase();
       const friendlyMessage = rawMessage.includes("already registered")
+        || rawMessage.includes("already been registered")
+        || rawMessage.includes("already exists")
         ? "This email is already registered. Try signing in or using password reset."
         : rawMessage.includes("password")
-        ? "Password does not meet security requirements. Use at least 8 characters."
+        ? `Password does not meet security requirements. Use ${LIMITS.password.min}-${LIMITS.password.max} characters with uppercase, lowercase, number, and special character.`
         : error?.message ?? "Something went wrong while creating your tenant.";
       toast({
         title: "Onboarding failed",
@@ -346,10 +442,30 @@ export default function Signup() {
                 <Input
                   id="tenant-name"
                   value={tenantName}
+                  minLength={LIMITS.tenantName.min}
+                  maxLength={LIMITS.tenantName.max}
                   onChange={(e) => {
                     setTenantName(e.target.value);
                     if (step0Errors.tenantName) {
                       setStep0Errors((prev) => ({ ...prev, tenantName: undefined }));
+                    }
+                  }}
+                  onBlur={() => {
+                    if (!tenantName.trim()) {
+                      setStep0Errors((prev) => ({
+                        ...prev,
+                        tenantName: "Tenant / Company Name is required.",
+                      }));
+                    } else if (tenantName.trim().length < LIMITS.tenantName.min) {
+                      setStep0Errors((prev) => ({
+                        ...prev,
+                        tenantName: `Tenant / Company Name must be at least ${LIMITS.tenantName.min} characters.`,
+                      }));
+                    } else if (tenantName.trim().length > LIMITS.tenantName.max) {
+                      setStep0Errors((prev) => ({
+                        ...prev,
+                        tenantName: `Tenant / Company Name must be ${LIMITS.tenantName.max} characters or fewer.`,
+                      }));
                     }
                   }}
                   placeholder="Acme Insurance Brokers"
@@ -365,10 +481,30 @@ export default function Signup() {
                 <Input
                   id="full-name"
                   value={fullName}
+                  minLength={LIMITS.fullName.min}
+                  maxLength={LIMITS.fullName.max}
                   onChange={(e) => {
                     setFullName(e.target.value);
                     if (step0Errors.fullName) {
                       setStep0Errors((prev) => ({ ...prev, fullName: undefined }));
+                    }
+                  }}
+                  onBlur={() => {
+                    if (!fullName.trim()) {
+                      setStep0Errors((prev) => ({
+                        ...prev,
+                        fullName: "Your name is required.",
+                      }));
+                    } else if (fullName.trim().length < LIMITS.fullName.min) {
+                      setStep0Errors((prev) => ({
+                        ...prev,
+                        fullName: `Your name must be at least ${LIMITS.fullName.min} characters.`,
+                      }));
+                    } else if (fullName.trim().length > LIMITS.fullName.max) {
+                      setStep0Errors((prev) => ({
+                        ...prev,
+                        fullName: `Your name must be ${LIMITS.fullName.max} characters or fewer.`,
+                      }));
                     }
                   }}
                   placeholder="Jane Doe"
@@ -386,11 +522,52 @@ export default function Signup() {
                 <Input
                   id="email"
                   type="email"
+                  minLength={LIMITS.email.min}
+                  maxLength={LIMITS.email.max}
                   value={email}
                   onChange={(e) => {
                     setEmail(e.target.value);
+                    setLastCheckedEmail("");
+                    setLastCheckedEmailExists(null);
                     if (step0Errors.email) {
                       setStep0Errors((prev) => ({ ...prev, email: undefined }));
+                    }
+                  }}
+                  onBlur={() => {
+                    const normalizedEmail = email.trim().toLowerCase();
+                    const emailLocalPart = normalizedEmail.split("@")[0] || "";
+                    if (!normalizedEmail) {
+                      setStep0Errors((prev) => ({
+                        ...prev,
+                        email: "Work email is required.",
+                      }));
+                    } else if (
+                      normalizedEmail.length < LIMITS.email.min ||
+                      normalizedEmail.length > LIMITS.email.max
+                    ) {
+                      setStep0Errors((prev) => ({
+                        ...prev,
+                        email: `Work email must be ${LIMITS.email.min}-${LIMITS.email.max} characters.`,
+                      }));
+                    } else if (emailLocalPart.length > LIMITS.email.localPartMax) {
+                      setStep0Errors((prev) => ({
+                        ...prev,
+                        email: `Email username must be ${LIMITS.email.localPartMax} characters or fewer.`,
+                      }));
+                    } else if (!EMAIL_RE.test(normalizedEmail)) {
+                      setStep0Errors((prev) => ({
+                        ...prev,
+                        email: "Enter a valid work email address.",
+                      }));
+                    } else {
+                      void checkEmailAlreadyExists(normalizedEmail).then((exists) => {
+                        if (exists) {
+                          setStep0Errors((prev) => ({
+                            ...prev,
+                            email: "This work email is already registered. Please sign in or use other email.",
+                          }));
+                        }
+                      });
                     }
                   }}
                   placeholder="you@company.com"
@@ -400,11 +577,16 @@ export default function Signup() {
                 {step0Errors.email && (
                   <p className="text-xs text-destructive">{step0Errors.email}</p>
                 )}
+                {!step0Errors.email && checkingEmail && (
+                  <p className="text-xs text-muted-foreground">Checking email availability...</p>
+                )}
               </div>
               <div className="space-y-2">
                 <Label htmlFor="password">Password</Label>
                 <PasswordInput
                   id="password"
+                  minLength={LIMITS.password.min}
+                  maxLength={LIMITS.password.max}
                   value={password}
                   onChange={(e) => {
                     setPassword(e.target.value);
@@ -416,6 +598,28 @@ export default function Signup() {
                       }));
                     }
                   }}
+                  onBlur={() => {
+                    if (!password) {
+                      setStep0Errors((prev) => ({
+                        ...prev,
+                        password: "Password is required.",
+                      }));
+                    } else if (
+                      password.length < LIMITS.password.min ||
+                      password.length > LIMITS.password.max
+                    ) {
+                      setStep0Errors((prev) => ({
+                        ...prev,
+                        password: `Password must be ${LIMITS.password.min}-${LIMITS.password.max} characters.`,
+                      }));
+                    } else if (!PASSWORD_STRENGTH_RE.test(password)) {
+                      setStep0Errors((prev) => ({
+                        ...prev,
+                        password:
+                          "Use at least 1 uppercase, 1 lowercase, 1 number, and 1 special character.",
+                      }));
+                    }
+                  }}
                   placeholder="At least 8 characters"
                   aria-invalid={Boolean(step0Errors.password)}
                   className={step0Errors.password ? "border-destructive focus-visible:ring-destructive" : ""}
@@ -423,17 +627,37 @@ export default function Signup() {
                 {step0Errors.password && (
                   <p className="text-xs text-destructive">{step0Errors.password}</p>
                 )}
+                {!step0Errors.password && (
+                  <p className="text-[11px] text-muted-foreground">
+                    {`Use ${LIMITS.password.min}-${LIMITS.password.max} characters with uppercase, lowercase, number, and special character.`}
+                  </p>
+                )}
               </div>
             </div>
             <div className="space-y-2">
               <Label htmlFor="confirm-password">Confirm Password</Label>
               <PasswordInput
                 id="confirm-password"
+                minLength={LIMITS.password.min}
+                maxLength={LIMITS.password.max}
                 value={confirmPassword}
                 onChange={(e) => {
                   setConfirmPassword(e.target.value);
                   if (step0Errors.confirmPassword) {
                     setStep0Errors((prev) => ({ ...prev, confirmPassword: undefined }));
+                  }
+                }}
+                onBlur={() => {
+                  if (!confirmPassword) {
+                    setStep0Errors((prev) => ({
+                      ...prev,
+                      confirmPassword: "Please confirm your password.",
+                    }));
+                  } else if (password !== confirmPassword) {
+                    setStep0Errors((prev) => ({
+                      ...prev,
+                      confirmPassword: "Passwords do not match.",
+                    }));
                   }
                 }}
                 placeholder="Re-enter password"
@@ -695,11 +919,12 @@ export default function Signup() {
             </Badge>
           </div>
           <div className="flex items-center gap-2 mt-2">
-            {[0, 1, 2, 3].map((i) => {
+            {STEP_META.map((stepItem) => {
+              const i = stepItem.index;
               const active = step === i;
               const isCompleted = step > i || completed;
               return (
-                <div key={i} className="flex-1 flex items-center gap-2">
+                <div key={stepItem.label} className="flex-1 flex items-center gap-2">
                   <div
                     className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-medium border ${
                       isCompleted
@@ -712,10 +937,7 @@ export default function Signup() {
                     {isCompleted ? <CheckCircle2 className="h-4 w-4" /> : i + 1}
                   </div>
                   <div className="hidden md:block text-[11px] text-muted-foreground">
-                    {i === 0 && "Account"}
-                    {i === 1 && "Plan"}
-                    {i === 2 && "Model"}
-                    {i === 3 && "Device"}
+                    {stepItem.label}
                   </div>
                   {i < 3 && (
                     <div className="flex-1 h-[1px] bg-border/60" />
@@ -741,15 +963,22 @@ export default function Signup() {
             </Button>
             <div className="flex items-center gap-2">
               {step < 3 ? (
-                <Button
-                  type="button"
-                  onClick={nextStep}
-                  disabled={loading || completed}
-                  className="flex items-center gap-1 text-xs md:text-sm"
-                >
-                  Next
-                  <ChevronRight className="h-3 w-3" />
-                </Button>
+                <div className="flex flex-col items-end gap-1">
+                  <Button
+                    type="button"
+                    onClick={nextStep}
+                    disabled={loading || completed || (step === 0 && !canGoNext())}
+                    className="flex items-center gap-1 text-xs md:text-sm"
+                  >
+                    Next
+                    <ChevronRight className="h-3 w-3" />
+                  </Button>
+                  {step === 0 && !canGoNext() && (
+                    <p className="text-[11px] text-destructive text-right">
+                      Fill all required fields to continue.
+                    </p>
+                  )}
+                </div>
               ) : (
                 <div className="flex items-center gap-2">
                   <Button

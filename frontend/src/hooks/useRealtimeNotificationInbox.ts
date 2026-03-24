@@ -1,18 +1,46 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  clearRealtimeNotifications,
-  getRealtimeNotifications,
-  markRealtimeNotificationRead,
-  markRealtimeNotificationsRead,
   REALTIME_NOTIFICATION_STORE_UPDATED_EVENT,
-  type StoredRealtimeNotification,
 } from "@/lib/realtimeNotificationStore";
+import type { StoredRealtimeNotification } from "@/lib/realtimeNotificationStore";
+import { supabase } from "@/integrations/supabase/client";
 
 export function useRealtimeNotificationInbox() {
   const [items, setItems] = useState<StoredRealtimeNotification[]>([]);
 
   const refresh = useCallback(() => {
-    setItems(getRealtimeNotifications());
+    void (async () => {
+      const { data: userData } = await supabase.auth.getUser();
+      const user = userData.user;
+      if (!user) {
+        setItems([]);
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from("user_notifications")
+        .select("id, table_name, event_type, message, target_path, created_at, read_at, source_fingerprint")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false })
+        .limit(50);
+
+      if (error) {
+        setItems([]);
+        return;
+      }
+
+      const mapped: StoredRealtimeNotification[] = (data || []).map((row) => ({
+        id: row.id,
+        table: row.table_name as StoredRealtimeNotification["table"],
+        eventType: row.event_type as StoredRealtimeNotification["eventType"],
+        message: row.message,
+        targetPath: row.target_path ?? undefined,
+        createdAt: row.created_at,
+        read: Boolean(row.read_at),
+        fingerprint: row.source_fingerprint,
+      }));
+      setItems(mapped);
+    })();
   }, []);
 
   useEffect(() => {
@@ -27,18 +55,41 @@ export function useRealtimeNotificationInbox() {
   const unreadCount = items.filter((item) => !item.read).length;
 
   const markAllRead = useCallback(() => {
-    markRealtimeNotificationsRead();
-    refresh();
+    void (async () => {
+      const { data: userData } = await supabase.auth.getUser();
+      const user = userData.user;
+      if (!user) return;
+      await supabase
+        .from("user_notifications")
+        .update({ read_at: new Date().toISOString() })
+        .eq("user_id", user.id)
+        .is("read_at", null);
+      refresh();
+    })();
   }, [refresh]);
 
   const clearAll = useCallback(() => {
-    clearRealtimeNotifications();
-    refresh();
+    void (async () => {
+      const { data: userData } = await supabase.auth.getUser();
+      const user = userData.user;
+      if (!user) return;
+      await supabase
+        .from("user_notifications")
+        .delete()
+        .eq("user_id", user.id);
+      refresh();
+    })();
   }, [refresh]);
 
   const markRead = useCallback((id: string) => {
-    markRealtimeNotificationRead(id);
-    refresh();
+    void (async () => {
+      await supabase
+        .from("user_notifications")
+        .update({ read_at: new Date().toISOString() })
+        .eq("id", id)
+        .is("read_at", null);
+      refresh();
+    })();
   }, [refresh]);
 
   return {

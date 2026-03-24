@@ -67,6 +67,12 @@ const STATUS_CONFIG: Record<string, { label: string; variant: "default" | "secon
   rejected: { label: "Rejected", variant: "destructive", icon: XCircle },
 };
 
+const getConfidenceColorClass = (pct: number): string => {
+  if (pct >= 80) return "text-green-500";
+  if (pct >= 50) return "text-amber-500";
+  return "text-red-500";
+};
+
 export default function ReviewQueue() {
   const { toast } = useToast();
   const { isAdmin, loading: roleLoading } = useUserRole();
@@ -148,7 +154,7 @@ export default function ReviewQueue() {
   const renderConfidenceBar = (score: number | null) => {
     if (score === null) return null;
     const pct = Math.round(score * 100);
-    const color = pct >= 80 ? "text-green-500" : pct >= 50 ? "text-amber-500" : "text-red-500";
+    const color = getConfidenceColorClass(pct);
     return (
       <div className="flex items-center gap-2 text-xs">
         <span className={`font-medium ${color}`}>{pct}%</span>
@@ -162,6 +168,7 @@ export default function ReviewQueue() {
     const isExpanded = expandedId === review.id;
     const statusCfg = STATUS_CONFIG[review.status] ?? STATUS_CONFIG.pending;
     const StatusIcon = statusCfg.icon;
+    const handleCardToggle = () => setExpandedId(isExpanded ? null : review.id);
 
     return (
       <div
@@ -170,7 +177,16 @@ export default function ReviewQueue() {
       >
         <div
           className="flex items-start justify-between p-4 cursor-pointer"
-          onClick={() => setExpandedId(isExpanded ? null : review.id)}
+          onClick={handleCardToggle}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              handleCardToggle();
+            }
+          }}
+          role="button"
+          tabIndex={0}
+          aria-expanded={isExpanded}
         >
           <div className="flex items-start gap-3 flex-1 min-w-0">
             <div className="p-2 rounded-lg bg-primary/10 mt-0.5">

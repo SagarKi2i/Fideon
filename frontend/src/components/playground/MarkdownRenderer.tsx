@@ -13,7 +13,59 @@ import {
 } from "lucide-react";
 
 interface MarkdownRendererProps {
-  content: string;
+  readonly content: string;
+}
+
+type StatusPattern = {
+  pattern: RegExp;
+  icon: typeof CheckCircle2;
+  color: string;
+  bg: string;
+};
+
+type StatusTone = "positive" | "negative" | "neutral";
+
+const STATUS_PATTERNS: StatusPattern[] = [
+  { pattern: /^✓\s*(.+)$/u, icon: CheckCircle2, color: "text-green-600", bg: "bg-green-500/10" },
+  { pattern: /^⚠(?:️)?\s*(.+)$/u, icon: AlertTriangle, color: "text-amber-600", bg: "bg-amber-500/10" },
+  { pattern: /^🚩\s*(.+)$/u, icon: AlertTriangle, color: "text-red-600", bg: "bg-red-500/10" },
+  { pattern: /^❌\s*(.+)$/u, icon: XCircle, color: "text-red-600", bg: "bg-red-500/10" },
+];
+
+const STATUS_PREFIX_RE = /^[✓⚠🚩❌]\s*/u;
+const BULLET_PREFIX_RE = /^[•\-*]\s*/;
+const NUMBERED_LIST_RE = /^\d+[.)]\s/;
+const LABEL_VALUE_RE = /:/;
+const BOLD_RE = /\*\*([^*]+)\*\*/;
+
+function resolveStatusTone(value: string): StatusTone {
+  const lower = value.toLowerCase();
+  const isPositive =
+    lower.includes("approved") || lower.includes("compliant") || lower.includes("active") || value.includes("✓");
+  if (isPositive) return "positive";
+  const isNegative =
+    lower.includes("denied") || lower.includes("rejected") || lower.includes("failed") || value.includes("❌");
+  if (isNegative) return "negative";
+  return "neutral";
+}
+
+function statusToneClasses(tone: StatusTone): { container: string; badge: string } {
+  if (tone === "positive") {
+    return {
+      container: "bg-green-500/5 border-green-500/30",
+      badge: "bg-green-500/10 text-green-600 border-green-500/30",
+    };
+  }
+  if (tone === "negative") {
+    return {
+      container: "bg-red-500/5 border-red-500/30",
+      badge: "bg-red-500/10 text-red-600 border-red-500/30",
+    };
+  }
+  return {
+    container: "bg-primary/5 border-primary/30",
+    badge: "bg-primary/10 text-primary border-primary/30",
+  };
 }
 
 export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
@@ -47,16 +99,7 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
     };
 
     const parseInlineFormatting = (text: string): JSX.Element => {
-      // Status indicators
-      const statusPatterns = [
-        { pattern: /^✓\s*(.+)$/u, icon: CheckCircle2, color: 'text-green-600', bg: 'bg-green-500/10' },
-        { pattern: /^⚠(?:️)?\s*(.+)$/u, icon: AlertTriangle, color: 'text-amber-600', bg: 'bg-amber-500/10' },
-        { pattern: /^🚩\s*(.+)$/u, icon: AlertTriangle, color: 'text-red-600', bg: 'bg-red-500/10' },
-        { pattern: /^❌\s*(.+)$/u, icon: XCircle, color: 'text-red-600', bg: 'bg-red-500/10' },
-      ];
-
-      // Check for status indicators first
-      for (const { pattern, icon: Icon, color, bg } of statusPatterns) {
+      for (const { pattern, icon: Icon, color, bg } of STATUS_PATTERNS) {
         const match = pattern.exec(text);
         if (match) {
           const matchedText = match[1] ?? text;
@@ -79,7 +122,7 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
       let keyIndex = 0;
 
       while (remaining.length > 0) {
-        const boldMatch = remaining.match(/\*\*([^*]+)\*\*/);
+        const boldMatch = BOLD_RE.exec(remaining);
         
         if (boldMatch && boldMatch.index !== undefined) {
           // Add text before the bold
@@ -101,7 +144,7 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
         }
       }
 
-      return <>{parts.map((part, idx) => 
+      return <>{parts.map((part, idx) =>
         typeof part === 'string' ? <span key={`text-${idx}`}>{part}</span> : part
       )}</>;
     };
@@ -142,7 +185,12 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
       }
 
       // Section with label and value (Label: Value)
-      if (trimmedLine.includes(':') && !trimmedLine.startsWith('•') && !trimmedLine.startsWith('-') && !trimmedLine.match(/^\d+\./)) {
+      if (
+        LABEL_VALUE_RE.test(trimmedLine) &&
+        !trimmedLine.startsWith("•") &&
+        !trimmedLine.startsWith("-") &&
+        !NUMBERED_LIST_RE.test(trimmedLine)
+      ) {
         const colonIndex = trimmedLine.indexOf(':');
         const label = trimmedLine.slice(0, colonIndex).replace(/^\*\*/, '').replace(/\*\*$/, '');
         const value = trimmedLine.slice(colonIndex + 1).trim();
@@ -150,23 +198,15 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
         // Check if this is a status line
         if (label.toLowerCase().includes('status') || label.toLowerCase().includes('eligibility') || label.toLowerCase().includes('compliance')) {
           flushList();
-          const isPositive = value.toLowerCase().includes('approved') || value.toLowerCase().includes('compliant') || value.toLowerCase().includes('active') || value.includes('✓');
-          const isNegative = value.toLowerCase().includes('denied') || value.toLowerCase().includes('rejected') || value.toLowerCase().includes('failed') || value.includes('❌');
+          const tone = resolveStatusTone(value);
+          const toneClasses = statusToneClasses(tone);
           elements.push(
-            <div key={lineIdx} className={`flex items-center justify-between p-4 rounded-xl border ${
-              isPositive ? 'bg-green-500/5 border-green-500/30' : 
-              isNegative ? 'bg-red-500/5 border-red-500/30' : 
-              'bg-primary/5 border-primary/30'
-            } my-3`}>
+            <div key={lineIdx} className={`flex items-center justify-between p-4 rounded-xl border ${toneClasses.container} my-3`}>
               <span className="font-medium text-muted-foreground">{label}</span>
-              <Badge className={`${
-                isPositive ? 'bg-green-500/10 text-green-600 border-green-500/30' : 
-                isNegative ? 'bg-red-500/10 text-red-600 border-red-500/30' : 
-                'bg-primary/10 text-primary border-primary/30'
-              }`}>
-                {isPositive && <CheckCircle2 className="h-3 w-3 mr-1" />}
-                {isNegative && <XCircle className="h-3 w-3 mr-1" />}
-                {value.replace(/[✓❌⚠️]/g, '').trim()}
+              <Badge className={toneClasses.badge}>
+                {tone === "positive" && <CheckCircle2 className="h-3 w-3 mr-1" />}
+                {tone === "negative" && <XCircle className="h-3 w-3 mr-1" />}
+                {value.replace(STATUS_PREFIX_RE, "").trim()}
               </Badge>
             </div>
           );
@@ -192,12 +232,12 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
           flushList();
           listType = 'bullet';
         }
-        currentList.push(trimmedLine.replace(/^[•\-*]\s*/, ''));
+        currentList.push(trimmedLine.replace(BULLET_PREFIX_RE, ''));
         return;
       }
 
       // Numbered list
-      if (/^\d+[.)]\s/.test(trimmedLine)) {
+      if (NUMBERED_LIST_RE.test(trimmedLine)) {
         if (listType !== 'numbered') {
           flushList();
           listType = 'numbered';

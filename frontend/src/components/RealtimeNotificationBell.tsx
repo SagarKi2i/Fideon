@@ -26,6 +26,10 @@ export function RealtimeNotificationBell() {
       navigate(item.targetPath);
     }
   };
+  const getItemClassName = (item: (typeof items)[number]) =>
+    `rounded-md border p-2 transition-colors ${
+      item.read ? "opacity-70" : "bg-muted/40"
+    } ${item.targetPath ? "cursor-pointer hover:bg-muted/60" : ""}`;
 
   return (
     <Popover>
@@ -59,27 +63,26 @@ export function RealtimeNotificationBell() {
           <ScrollArea className="h-80">
             <div className="space-y-2 p-3">
               {items.map((item) => (
-                <div
-                  key={item.id}
-                  role={item.targetPath ? "button" : undefined}
-                  tabIndex={item.targetPath ? 0 : -1}
-                  onClick={() => handleNotificationClick(item)}
-                  onKeyDown={(e) => {
-                    if (!item.targetPath) return;
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      handleNotificationClick(item);
-                    }
-                  }}
-                  className={`rounded-md border p-2 transition-colors ${
-                    item.read ? "opacity-70" : "bg-muted/40"
-                  } ${item.targetPath ? "cursor-pointer hover:bg-muted/60" : ""}`}
-                >
-                  <div className="text-sm">{item.message}</div>
-                  <div className="mt-1 text-[11px] text-muted-foreground">
-                    {toRelativeTime(item.createdAt)} - {item.table}
+                item.targetPath ? (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => handleNotificationClick(item)}
+                    className={`${getItemClassName(item)} w-full text-left`}
+                  >
+                    <div className="text-sm">{item.message}</div>
+                    <div className="mt-1 text-[11px] text-muted-foreground">
+                      {toRelativeTime(item.createdAt)} - {item.table}
+                    </div>
+                  </button>
+                ) : (
+                  <div key={item.id} className={getItemClassName(item)}>
+                    <div className="text-sm">{item.message}</div>
+                    <div className="mt-1 text-[11px] text-muted-foreground">
+                      {toRelativeTime(item.createdAt)} - {item.table}
+                    </div>
                   </div>
-                </div>
+                )
               ))}
             </div>
           </ScrollArea>

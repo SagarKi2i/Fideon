@@ -21,6 +21,8 @@ from app.core.supabase import (
 
 router = APIRouter()
 VALID_ROLES = {"global_admin", "admin", "user", "viewer", "guest"}
+ADMIN_ACCESS_REQUIRED = "Admin access required"
+PASSWORD_REQUIRED = "Password is required"
 
 # ── Roles an admin can create INSTANTLY (no approval needed) ──────────────────
 ADMIN_INSTANT_ROLES = {"user", "viewer", "guest"}
@@ -55,6 +57,10 @@ def _parse_admin_create_user_body(body: dict) -> tuple[str, Optional[str], Optio
     if not email:
         raise HTTPException(status_code=400, detail="Email is required")
     return email, password, full_name, role, action
+
+
+def _utc_now_z() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 async def _update_password_for_existing_user(email: str, password: str) -> dict:
@@ -149,6 +155,123 @@ async def _finalize_user_creation(
     return user_data
 
 
+async def _handle_update_password_action(
+    request: Request,
+    requester: dict,
+    requester_role: Optional[str],
+    email: str,
+    password: Optional[str],
+) -> dict:
+    if requester_role not in {"admin", "global_admin"}:
+        raise HTTPException(status_code=403, detail=ADMIN_ACCESS_REQUIRED)
+    if not password:
+        raise HTTPException(status_code=400, detail=PASSWORD_REQUIRED)
+    user = await _update_password_for_existing_user(email, password)
+    await insert_audit_log(
+        request=request,
+        user_id=requester["id"],
+        action="update_password",
+        resource_type="user",
+        resource_id=user["id"],
+        previous_value=None,
+        new_value=None,
+    )
+    return {"success": True, "message": "Password updated successfully"}
+
+
+async def _handle_global_admin_create(
+    request: Request,
+    requester: dict,
+    email: str,
+    full_name: Optional[str],
+    role: str,
+    password: Optional[str],
+) -> dict:
+    if not password:
+        raise HTTPException(status_code=400, detail=PASSWORD_REQUIRED)
+    user_data = await _finalize_user_creation(
+        request, requester["id"], email, full_name, role, password
+    )
+    return {"success": True, "pending": False,
+            "user": {"id": user_data.get("id"), "email": user_data.get("email")}}
+
+
+async def _queue_user_creation_request(
+    request: Request,
+    requester: dict,
+    requester_role: str,
+    email: str,
+    full_name: Optional[str],
+    role: str,
+) -> None:
+    await postgrest_insert(
+        "user_creation_requests",
+        {
+            "requested_by": requester["id"],
+            "requester_role": requester_role,
+            "email": email,
+            "full_name": full_name,
+            "requested_role": role,
+            "status": "pending",
+        },
+    )
+    await insert_audit_log(
+        request=request,
+        user_id=requester["id"],
+        action="request_create_user",
+        resource_type="user_creation_request",
+        resource_id=None,
+        details={"role": role, "email": email},
+        previous_value=None,
+        new_value={"status": "pending", "role": role},
+    )
+
+
+async def _handle_admin_create(
+    request: Request,
+    requester: dict,
+    email: str,
+    password: Optional[str],
+    full_name: Optional[str],
+    role: str,
+) -> dict:
+    if role in ADMIN_INSTANT_ROLES:
+        if not password:
+            raise HTTPException(status_code=400, detail=PASSWORD_REQUIRED)
+        user_data = await _finalize_user_creation(
+            request, requester["id"], email, full_name, role, password
+        )
+        return {"success": True, "pending": False,
+                "user": {"id": user_data.get("id"), "email": user_data.get("email")}}
+
+    if role in ADMIN_PENDING_ROLES:
+        await _queue_user_creation_request(request, requester, "admin", email, full_name, role)
+        return {
+            "success": True,
+            "pending": True,
+            "message": f"Request to create an admin user ({email}) has been submitted for global admin approval.",
+        }
+
+    raise HTTPException(status_code=403, detail="Admins cannot create this role")
+
+
+async def _handle_user_create(
+    request: Request,
+    requester: dict,
+    email: str,
+    full_name: Optional[str],
+    role: str,
+) -> dict:
+    if role not in USER_PENDING_ROLES:
+        raise HTTPException(status_code=403, detail="Users can only request creation of 'user' role accounts")
+    await _queue_user_creation_request(request, requester, "user", email, full_name, role)
+    return {
+        "success": True,
+        "pending": True,
+        "message": f"Request to create user ({email}) has been submitted for admin approval.",
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # LIST USERS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -157,7 +280,7 @@ async def list_users(authorization: Optional[str] = Header(default=None)):
     user = await verify_user(authorization)
     roles = await postgrest_get("user_roles", f"select=role&user_id=eq.{quote(user['id'], safe='')}&limit=1")
     if not roles or roles[0].get("role") not in {"admin", "global_admin"}:
-        raise HTTPException(status_code=403, detail="Admin access required")
+        raise HTTPException(status_code=403, detail=ADMIN_ACCESS_REQUIRED)
 
     users = await admin_list_users()
     user_roles = await postgrest_get("user_roles", "select=user_id,role")
@@ -186,104 +309,27 @@ async def admin_create_user(request: Request, authorization: Optional[str] = Hea
 
     # ── Password-update action (admin/global_admin only) ──────────────────────
     if action == "update_password":
-        if requester_role not in {"admin", "global_admin"}:
-            raise HTTPException(status_code=403, detail="Admin access required")
-        if not password:
-            raise HTTPException(status_code=400, detail="Password is required")
-        user = await _update_password_for_existing_user(email, password)
-        await insert_audit_log(
-            request=request,
-            user_id=requester["id"],
-            action="update_password",
-            resource_type="user",
-            resource_id=user["id"],
-            previous_value=None,
-            new_value=None,
+        return await _handle_update_password_action(
+            request, requester, requester_role, email, password
         )
-        return {"success": True, "message": "Password updated successfully"}
 
     # ── GLOBAL ADMIN: create any role instantly ───────────────────────────────
     if requester_role == "global_admin":
-        if not password:
-            raise HTTPException(status_code=400, detail="Password is required")
-        user_data = await _finalize_user_creation(
-            request, requester["id"], email, full_name, role, password
+        return await _handle_global_admin_create(
+            request, requester, email, full_name, role, password
         )
-        return {"success": True, "pending": False,
-                "user": {"id": user_data.get("id"), "email": user_data.get("email")}}
 
     # ── ADMIN: instant for user/viewer/guest; pending for admin ───────────────
     if requester_role == "admin":
-        if role in ADMIN_INSTANT_ROLES:
-            if not password:
-                raise HTTPException(status_code=400, detail="Password is required")
-            user_data = await _finalize_user_creation(
-                request, requester["id"], email, full_name, role, password
-            )
-            return {"success": True, "pending": False,
-                    "user": {"id": user_data.get("id"), "email": user_data.get("email")}}
-
-        if role in ADMIN_PENDING_ROLES:
-            # Needs global_admin approval — queue the request (no password stored)
-            await postgrest_insert(
-                "user_creation_requests",
-                {
-                    "requested_by": requester["id"],
-                    "requester_role": "admin",
-                    "email": email,
-                    "full_name": full_name,
-                    "requested_role": role,
-                    "status": "pending",
-                },
-            )
-            await insert_audit_log(
-                request=request,
-                user_id=requester["id"],
-                action="request_create_user",
-                resource_type="user_creation_request",
-                resource_id=None,
-                details={"role": role, "email": email},
-                previous_value=None,
-                new_value={"status": "pending", "role": role},
-            )
-            return {
-                "success": True,
-                "pending": True,
-                "message": f"Request to create an admin user ({email}) has been submitted for global admin approval.",
-            }
-
-        raise HTTPException(status_code=403, detail="Admins cannot create this role")
+        return await _handle_admin_create(
+            request, requester, email, password, full_name, role
+        )
 
     # ── USER: can request creation of another user (pending approval) ─────────
     if requester_role == "user":
-        if role not in USER_PENDING_ROLES:
-            raise HTTPException(status_code=403, detail="Users can only request creation of 'user' role accounts")
-        await postgrest_insert(
-            "user_creation_requests",
-            {
-                "requested_by": requester["id"],
-                "requester_role": "user",
-                "email": email,
-                "full_name": full_name,
-                "requested_role": role,
-                "status": "pending",
-            },
+        return await _handle_user_create(
+            request, requester, email, full_name, role
         )
-        await insert_audit_log(
-            request=request,
-            user_id=requester["id"],
-            action="request_create_user",
-            resource_type="user_creation_request",
-            resource_id=None,
-            details={"role": role, "email": email},
-            previous_value=None,
-            new_value={"status": "pending", "role": role},
-        )
-        return {
-            "success": True,
-            "pending": True,
-            "message": f"Request to create user ({email}) has been submitted for admin approval.",
-        }
 
     # viewer and guest cannot create or request any users
     raise HTTPException(status_code=403, detail=f"Role '{requester_role}' is not permitted to create or request user accounts")
@@ -338,9 +384,9 @@ async def admin_set_user_role(request: Request, authorization: Optional[str] = H
 # ─────────────────────────────────────────────────────────────────────────────
 @router.get("/api/user-creation-requests")
 async def list_user_creation_requests(authorization: Optional[str] = Header(default=None)):
-    requester, requester_role = await _get_requester_role(authorization)
+    _, requester_role = await _get_requester_role(authorization)
     if requester_role not in {"admin", "global_admin"}:
-        raise HTTPException(status_code=403, detail="Admin access required")
+        raise HTTPException(status_code=403, detail=ADMIN_ACCESS_REQUIRED)
 
     # global_admin sees ALL pending requests
     # admin sees only requests from 'user' role (user→user requests)
@@ -382,7 +428,7 @@ async def approve_user_creation_request(
 ):
     requester, requester_role = await _get_requester_role(authorization)
     if requester_role not in {"admin", "global_admin"}:
-        raise HTTPException(status_code=403, detail="Admin access required")
+        raise HTTPException(status_code=403, detail=ADMIN_ACCESS_REQUIRED)
 
     # Fetch the pending request
     rows = await postgrest_get(
@@ -420,7 +466,7 @@ async def approve_user_creation_request(
         {
             "status": "approved",
             "reviewed_by": requester["id"],
-            "reviewed_at": datetime.datetime.utcnow().isoformat() + "Z",
+            "reviewed_at": _utc_now_z(),
         },
     )
 
@@ -453,7 +499,7 @@ async def reject_user_creation_request(
 ):
     requester, requester_role = await _get_requester_role(authorization)
     if requester_role not in {"admin", "global_admin"}:
-        raise HTTPException(status_code=403, detail="Admin access required")
+        raise HTTPException(status_code=403, detail=ADMIN_ACCESS_REQUIRED)
 
     rows = await postgrest_get(
         "user_creation_requests",
@@ -480,7 +526,7 @@ async def reject_user_creation_request(
         {
             "status": "rejected",
             "reviewed_by": requester["id"],
-            "reviewed_at": datetime.datetime.utcnow().isoformat() + "Z",
+            "reviewed_at": _utc_now_z(),
             "rejection_reason": rejection_reason,
         },
     )

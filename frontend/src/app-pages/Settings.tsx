@@ -90,6 +90,9 @@ interface AMSSystem {
 
 const logoSrc = (logo: string | { src: string }) => (typeof logo === "string" ? logo : logo.src);
 
+const getConnectionStatusCardClass = (connected: boolean): string =>
+  connected ? "border-primary/50 bg-primary/5" : "border-border hover:border-primary/30";
+
 const carriers: CarrierCredential[] = [
   { id: "travelers", name: "Travelers", logo: "🏢", connected: false },
   { id: "hartford", name: "The Hartford", logo: "🦌", connected: false },
@@ -310,16 +313,14 @@ export default function Settings() {
   const handleAMSConfigSubmit = () => {
     if (!selectedAMS) return;
 
-    if (amsConnectionType === "sdk") {
-      if (!amsSDKForm.clientId.trim() || !amsSDKForm.clientKey.trim()) {
-        toast({ title: "Validation Error", description: "Client ID and Client Key are required", variant: "destructive" });
-        return;
-      }
-    } else {
+    if (amsConnectionType !== "sdk") {
       if (!amsUIForm.username.trim() || !amsUIForm.password.trim() || !amsUIForm.enterpriseId.trim()) {
         toast({ title: "Validation Error", description: "Username, Password, and Enterprise ID are required", variant: "destructive" });
         return;
       }
+    } else if (!amsSDKForm.clientId.trim() || !amsSDKForm.clientKey.trim()) {
+      toast({ title: "Validation Error", description: "Client ID and Client Key are required", variant: "destructive" });
+      return;
     }
 
     setAmsSystems(prev =>
@@ -502,11 +503,7 @@ export default function Settings() {
                 {carrierCredentials.map((carrier) => (
                   <Card 
                     key={carrier.id} 
-                    className={`border transition-all ${
-                      carrier.connected 
-                        ? "border-primary/50 bg-primary/5" 
-                        : "border-border hover:border-primary/30"
-                    }`}
+                    className={`border transition-all ${getConnectionStatusCardClass(carrier.connected)}`}
                   >
                     <CardContent className="p-4">
                       <div className="flex items-center justify-between">
@@ -633,11 +630,7 @@ export default function Settings() {
                 {amsSystems.map((ams) => (
                   <Card 
                     key={ams.id} 
-                    className={`border transition-all ${
-                      ams.connected 
-                        ? "border-primary/50 bg-primary/5" 
-                        : "border-border hover:border-primary/30"
-                    }`}
+                    className={`border transition-all ${getConnectionStatusCardClass(ams.connected)}`}
                   >
                     <CardContent className="p-4">
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">

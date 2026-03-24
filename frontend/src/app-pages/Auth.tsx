@@ -1,4 +1,3 @@
-import React from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import type { Provider } from "@supabase/supabase-js";
@@ -19,11 +18,45 @@ import { buildApiRequestError, readJsonSafe } from "@/lib/httpErrors";
 
 type AuthView = "signin" | "forgot" | "reset";
 type AppRole = "global_admin" | "admin" | "user" | "viewer" | "guest";
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const PASSWORD_STRENGTH_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d]).+$/;
+const AUTH_LIMITS = {
+  email: { min: 6, max: 254, localPartMax: 64 },
+  password: { min: 8, max: 72 },
+};
 
 const VALID_APP_ROLES: AppRole[] = ["global_admin", "admin", "user", "viewer", "guest"];
 
 function isAppRole(value: unknown): value is AppRole {
   return typeof value === "string" && VALID_APP_ROLES.includes(value as AppRole);
+}
+
+function validateEmail(emailInput: string): string | null {
+  const normalized = emailInput.trim().toLowerCase();
+  const localPart = normalized.split("@")[0] || "";
+  if (!normalized) return "Email is required.";
+  if (normalized.length < AUTH_LIMITS.email.min || normalized.length > AUTH_LIMITS.email.max) {
+    return `Email must be ${AUTH_LIMITS.email.min}-${AUTH_LIMITS.email.max} characters.`;
+  }
+  if (localPart.length > AUTH_LIMITS.email.localPartMax) {
+    return `Email username must be ${AUTH_LIMITS.email.localPartMax} characters or fewer.`;
+  }
+  if (!EMAIL_RE.test(normalized)) return "Enter a valid email address.";
+  return null;
+}
+
+function validateStrongPassword(passwordInput: string): string | null {
+  if (!passwordInput) return "Password is required.";
+  if (
+    passwordInput.length < AUTH_LIMITS.password.min ||
+    passwordInput.length > AUTH_LIMITS.password.max
+  ) {
+    return `Password must be ${AUTH_LIMITS.password.min}-${AUTH_LIMITS.password.max} characters.`;
+  }
+  if (!PASSWORD_STRENGTH_RE.test(passwordInput)) {
+    return "Use at least 1 uppercase, 1 lowercase, 1 number, and 1 special character.";
+  }
+  return null;
 }
 
 function isRecoveryRoute(pathname: string, search: string, hash: string): boolean {
@@ -91,7 +124,20 @@ async function resolveEffectiveRole(userId: string): Promise<AppRole> {
 }
 
 interface AuthProps {
-  initialView?: AuthView;
+  readonly initialView?: AuthView;
+}
+
+function getViewDescription(effectiveView: AuthView): string {
+  if (effectiveView === "signin") return "Sign in to access your Private AI Tenant";
+  if (effectiveView === "forgot") return "Request a secure password reset link";
+  return "Set a new password for your account";
+}
+
+function getFriendlySignInErrorMessage(rawMsg: string, accountExists: boolean): string {
+  if (!/invalid login credentials/i.test(rawMsg)) return rawMsg;
+  return accountExists
+    ? "Password is incorrect. Please check your details or contact your admin."
+    : "No account found for this email.";
 }
 
 export default function Auth({ initialView = "signin" }: AuthProps) {
@@ -100,7 +146,7 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
   const { toast } = useToast();
   const authEnableSso = process.env.NEXT_PUBLIC_AUTH_ENABLE_SSO === "true";
   const authEnableMfa = process.env.NEXT_PUBLIC_AUTH_ENABLE_MFA === "true";
-  const ssoProviderCsv = process.env.NEXT_PUBLIC_AUTH_SSO_PROVIDERS || "";
+  const ssoProviderCsv = process.env.NEXT_PUBLIC_AUTH_SSO_PROVIDERS ?? "";
   const allowedProviders = useMemo(
     () =>
       ssoProviderCsv
@@ -143,7 +189,7 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
       pathname: location.pathname,
       hasRecoveryMarker: isRecoveryCallback,
       isRecoveryCallback,
-      forcingResetView: isRecoveryCallback ? true : false,
+      forcingResetView: isRecoveryCallback,
     });
 
     if (isRecoveryCallback) setView("reset");
@@ -179,12 +225,22 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
 
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
+    const normalizedEmail = email.trim().toLowerCase();
+    const emailError = validateEmail(normalizedEmail);
+    if (emailError) {
+      toast({ title: "Invalid email", description: emailError, variant: "destructive" });
+      return;
+    }
+    if (!password) {
+      toast({ title: "Missing password", description: "Password is required.", variant: "destructive" });
+      return;
+    }
     setLoading(true);
 
     try {
-      safeLog.info("auth_signin_attempt", { email });
+      safeLog.info("auth_signin_attempt", { email: normalizedEmail });
       const { data: signInData, error } = await supabase.auth.signInWithPassword({
-        email,
+        email: normalizedEmail,
         password,
       });
 
@@ -214,7 +270,7 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
 
           await (supabase as any).from("auth_audit").insert({
             user_id: signInData.user.id,
-            email,
+            email: normalizedEmail,
             role: effectiveRole,
             event: "login",
             action_code: "E",          // Execute (auth workflow)
@@ -237,7 +293,7 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
           navigate("/");
         }
       } else {
-        safeLog.info("auth_signin_success_no_user", { email });
+        safeLog.info("auth_signin_success_no_user", { email: normalizedEmail });
         navigate("/");
       }
     } catch (error: any) {
@@ -246,7 +302,7 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
       // after a failed login (auth.uid() is null, RLS would reject the insert).
       // Logged here via structlog as the server-side audit trail for this event.
       safeLog.error("login_failed", {
-        email,
+        email: normalizedEmail,
         event: "login_failed",
         action_code: "E",
         outcome_code: 8,
@@ -260,11 +316,8 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
         const { count } = await supabase
           .from("app_users")
           .select("user_id", { count: "exact", head: true })
-          .eq("email", email.trim().toLowerCase());
-        friendlyMsg =
-          count === 0
-            ? "No account found for this email."
-            : "Password is incorrect. Please check your details or contact your admin.";
+          .eq("email", normalizedEmail);
+        friendlyMsg = getFriendlySignInErrorMessage(rawMsg, (count ?? 0) > 0);
       }
       toast({
         title: "Sign in failed",
@@ -278,10 +331,16 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
 
   const handleForgotPassword = async (e: React.FormEvent) => {
     e.preventDefault();
+    const normalizedEmail = email.trim().toLowerCase();
+    const emailError = validateEmail(normalizedEmail);
+    if (emailError) {
+      toast({ title: "Invalid email", description: emailError, variant: "destructive" });
+      return;
+    }
     setLoading(true);
     try {
       const redirectTo = `${window.location.origin}/reset-password`;
-      const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
+      const { error } = await supabase.auth.resetPasswordForEmail(normalizedEmail, { redirectTo });
       if (error) throw error;
       toast({
         title: "Reset email sent",
@@ -301,10 +360,11 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
 
   const handleResetPassword = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (newPassword.length < 8) {
+    const passwordError = validateStrongPassword(newPassword);
+    if (passwordError) {
       toast({
-        title: "Password too short",
-        description: "Use at least 8 characters.",
+        title: "Invalid password",
+        description: passwordError,
         variant: "destructive",
       });
       return;
@@ -544,6 +604,8 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
           placeholder="your@email.com"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
+          minLength={AUTH_LIMITS.email.min}
+          maxLength={AUTH_LIMITS.email.max}
           required
           className="bg-background/50"
         />
@@ -555,6 +617,8 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
           placeholder="••••••••"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
+          minLength={AUTH_LIMITS.password.min}
+          maxLength={AUTH_LIMITS.password.max}
           required
           className="bg-background/50"
         />
@@ -589,6 +653,8 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
           placeholder="your@email.com"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
+          minLength={AUTH_LIMITS.email.min}
+          maxLength={AUTH_LIMITS.email.max}
           required
           className="bg-background/50"
         />
@@ -614,7 +680,8 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
           id="reset-password"
           value={newPassword}
           onChange={(e) => setNewPassword(e.target.value)}
-          minLength={8}
+          minLength={AUTH_LIMITS.password.min}
+          maxLength={AUTH_LIMITS.password.max}
           required
           className="bg-background/50"
         />
@@ -625,7 +692,8 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
           id="reset-password-confirm"
           value={confirmPassword}
           onChange={(e) => setConfirmPassword(e.target.value)}
-          minLength={8}
+          minLength={AUTH_LIMITS.password.min}
+          maxLength={AUTH_LIMITS.password.max}
           required
           className="bg-background/50"
         />
@@ -727,9 +795,7 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
                 Welcome to Fideon OS
               </CardTitle>
               <CardDescription className="text-center">
-                {effectiveView === "signin" && "Sign in to access your Private AI Tenant"}
-                {effectiveView === "forgot" && "Request a secure password reset link"}
-                {effectiveView === "reset" && "Set a new password for your account"}
+                {getViewDescription(effectiveView)}
               </CardDescription>
             </CardHeader>
             <CardContent>

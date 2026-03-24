@@ -20,6 +20,8 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 import { UserPlus, Loader2, Clock, CheckCircle, XCircle, RefreshCw } from "lucide-react";
 
@@ -149,8 +151,9 @@ export function InviteUserPanel() {
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground">Full Name (optional)</label>
-                <input
+                <Label htmlFor="invite-full-name" className="text-xs font-medium text-muted-foreground">Full Name (optional)</Label>
+                <Input
+                  id="invite-full-name"
                   type="text"
                   placeholder="Jane Smith"
                   value={name}
@@ -159,8 +162,9 @@ export function InviteUserPanel() {
                 />
               </div>
               <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground">Email *</label>
-                <input
+                <Label htmlFor="invite-email" className="text-xs font-medium text-muted-foreground">Email *</Label>
+                <Input
+                  id="invite-email"
                   type="email"
                   placeholder="jane@example.com"
                   value={email}
@@ -172,7 +176,7 @@ export function InviteUserPanel() {
 
             <p className="text-xs text-muted-foreground">
               Role: <span className="font-medium text-foreground">user</span>
-              &nbsp;· No password needed — the new user will receive a setup email on approval.
+              {" · "}No password needed - the new user will receive a setup email on approval.
             </p>
 
             <Button onClick={handleSubmit} disabled={submitting}>

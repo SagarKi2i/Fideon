@@ -1160,6 +1160,42 @@ export type Database = {
           },
         ]
       }
+      user_notifications: {
+        Row: {
+          created_at: string
+          event_type: string
+          id: string
+          message: string
+          read_at: string | null
+          source_fingerprint: string
+          table_name: string
+          target_path: string | null
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          event_type: string
+          id?: string
+          message: string
+          read_at?: string | null
+          source_fingerprint: string
+          table_name: string
+          target_path?: string | null
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          event_type?: string
+          id?: string
+          message?: string
+          read_at?: string | null
+          source_fingerprint?: string
+          table_name?: string
+          target_path?: string | null
+          user_id?: string
+        }
+        Relationships: []
+      }
       user_roles: {
         Row: {
           created_at: string | null

@@ -55,8 +55,8 @@ export function FAQSection() {
       </CardHeader>
       <CardContent className="relative">
         <Accordion type="single" collapsible className="w-full">
-          {faqs.map((faq, index) => (
-            <AccordionItem key={index} value={`item-${index}`} className="border-border/50">
+          {faqs.map((faq) => (
+            <AccordionItem key={faq.question} value={`item-${faq.question}`} className="border-border/50">
               <AccordionTrigger className="text-sm text-left hover:text-primary hover:no-underline py-3">
                 {faq.question}
               </AccordionTrigger>

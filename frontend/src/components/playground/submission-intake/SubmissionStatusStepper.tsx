@@ -2,7 +2,7 @@ import { Check, Clock, Filter, UserCheck, DollarSign, XCircle } from "lucide-rea
 import { ParsedSubmission } from "./types";
 
 interface SubmissionStatusStepperProps {
-  status: ParsedSubmission["status"];
+  readonly status: ParsedSubmission["status"];
 }
 
 const steps = [
@@ -23,6 +23,16 @@ export default function SubmissionStatusStepper({ status }: SubmissionStatusStep
         const isCompleted = index < currentIndex;
         const isCurrent = index === currentIndex;
         const isPending = index > currentIndex;
+        const getStepClassName = () => {
+          if (isCompleted) return "bg-green-500 text-white shadow-lg shadow-green-500/30";
+          if (isCurrent && !isDeclined) {
+            return "bg-primary text-primary-foreground shadow-lg shadow-primary/30 ring-4 ring-primary/20";
+          }
+          if (isCurrent && isDeclined) return "bg-destructive text-destructive-foreground shadow-lg shadow-destructive/30";
+          if (isPending) return "bg-muted text-muted-foreground";
+          return "";
+        };
+        const stepClassName = getStepClassName();
 
         return (
           <div key={step.id} className="flex items-center flex-1">
@@ -30,10 +40,7 @@ export default function SubmissionStatusStepper({ status }: SubmissionStatusStep
               <div
                 className={`
                   w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300
-                  ${isCompleted ? "bg-green-500 text-white shadow-lg shadow-green-500/30" : ""}
-                  ${isCurrent && !isDeclined ? "bg-primary text-primary-foreground shadow-lg shadow-primary/30 ring-4 ring-primary/20" : ""}
-                  ${isCurrent && isDeclined ? "bg-destructive text-destructive-foreground shadow-lg shadow-destructive/30" : ""}
-                  ${isPending ? "bg-muted text-muted-foreground" : ""}
+                  ${stepClassName}
                 `}
               >
                 {isCompleted ? (

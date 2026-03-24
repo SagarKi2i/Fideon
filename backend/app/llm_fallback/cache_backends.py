@@ -240,7 +240,7 @@ class MomentoCache:
                 case CreateCache.Success():
                     logger.info(f"Created Momento cache '{self.cache_name}'")
                 case CreateCache.AlreadyExists():
-                    pass
+                    logger.debug(f"Momento cache '{self.cache_name}' already exists")
         except Exception as exc:
             logger.warning(f"Momento cache check: {exc}")
 

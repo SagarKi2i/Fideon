@@ -23,7 +23,7 @@ interface Props {
    * The role of the currently logged-in user.
    * Controls which roles are available in the "Add User" form.
    */
-  currentUserRole: "global_admin" | "admin" | "user";
+  readonly currentUserRole: "global_admin" | "admin" | "user";
 }
 
 /**
@@ -57,6 +57,47 @@ function getRoleOptions(creatorRole: Props["currentUserRole"]): Array<{ role: Ap
   return [
     { role: "user", pending: true },        // needs admin/global_admin approval
   ];
+}
+
+function getCardCopy(currentUserRole: Props["currentUserRole"]): { title: string; description: string } {
+  if (currentUserRole === "global_admin") {
+    return {
+      title: "Global Admin – Role Management",
+      description: "Create users of any role, promote/demote existing users.",
+    };
+  }
+  if (currentUserRole === "admin") {
+    return {
+      title: "Admin – User Management",
+      description: "Create users, viewers, or guests instantly. Admin creation requires global admin approval.",
+    };
+  }
+  return {
+    title: "Invite a New User",
+    description: "Request the creation of a new user account (requires admin or global admin approval).",
+  };
+}
+
+function getCreateUserValidationError(
+  email: string,
+  password: string,
+  confirmPassword: string,
+  needsPassword: boolean
+): { title: string; description: string } | null {
+  if (!email.trim()) {
+    return { title: "Missing email", description: "Email is required." };
+  }
+  if (!needsPassword) return null;
+  if (!password.trim()) {
+    return { title: "Missing password", description: "Password is required." };
+  }
+  if (password.length < 8) {
+    return { title: "Weak password", description: "Password must be at least 8 characters." };
+  }
+  if (password !== confirmPassword) {
+    return { title: "Password mismatch", description: "Passwords do not match." };
+  }
+  return null;
 }
 
 export function GlobalAdminRoleManager({ currentUserRole }: Props) {
@@ -185,26 +226,17 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
   };
 
   const createUser = async () => {
-    if (!newUserEmail.trim()) {
-      toast({ title: "Missing email", description: "Email is required.", variant: "destructive" });
-      return;
-    }
-
     // Password required only for instant creation (global_admin and admin creating non-admin roles)
     const needsPassword = !selectedRoleOption.pending;
-    if (needsPassword) {
-      if (!newUserPassword.trim()) {
-        toast({ title: "Missing password", description: "Password is required.", variant: "destructive" });
-        return;
-      }
-      if (newUserPassword.length < 8) {
-        toast({ title: "Weak password", description: "Password must be at least 8 characters.", variant: "destructive" });
-        return;
-      }
-      if (newUserPassword !== newUserConfirmPassword) {
-        toast({ title: "Password mismatch", description: "Passwords do not match.", variant: "destructive" });
-        return;
-      }
+    const validationError = getCreateUserValidationError(
+      newUserEmail,
+      newUserPassword,
+      newUserConfirmPassword,
+      needsPassword
+    );
+    if (validationError) {
+      toast({ ...validationError, variant: "destructive" });
+      return;
     }
 
     setCreating(true);
@@ -262,19 +294,7 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
   const canSeeUserList = currentUserRole === "global_admin" || currentUserRole === "admin";
   const canChangeExistingRoles = currentUserRole === "global_admin";
 
-  const cardTitle =
-    currentUserRole === "global_admin"
-      ? "Global Admin – Role Management"
-      : currentUserRole === "admin"
-      ? "Admin – User Management"
-      : "Invite a New User";
-
-  const cardDescription =
-    currentUserRole === "global_admin"
-      ? "Create users of any role, promote/demote existing users."
-      : currentUserRole === "admin"
-      ? "Create users, viewers, or guests instantly. Admin creation requires global admin approval."
-      : "Request the creation of a new user account (requires admin or global admin approval).";
+  const { title: cardTitle, description: cardDescription } = getCardCopy(currentUserRole);
 
   return (
     <Card className="border-border/50 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 shadow-premium">

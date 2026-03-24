@@ -39,9 +39,9 @@ import PolicyCoverageDetails from "./PolicyCoverageDetails";
 import jsPDF from "jspdf";
 
 interface QuoteGenerationUIProps {
-  onRun: (data: any) => void;
-  isRunning: boolean;
-  result: string;
+  readonly onRun: (data: any) => void;
+  readonly isRunning: boolean;
+  readonly result: string;
 }
 
 interface CarrierQuote {
@@ -89,7 +89,7 @@ const INSURANCE_TYPES = [
 
 export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGenerationUIProps) {
   const { toast } = useToast();
-  void result;
+  const hasExternalResult = result.trim().length > 0;
   const [step, setStep] = useState<"input" | "fetching" | "compare" | "proposal">("input");
   const [insuranceType, setInsuranceType] = useState("");
   const [selectedCarriers, setSelectedCarriers] = useState<string[]>([]);
@@ -262,6 +262,11 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
         ? prev.filter(c => c !== carrierId)
         : [...prev, carrierId]
     );
+  };
+  const getFetchingStatusClass = (status: CarrierQuote["status"]) => {
+    if (status === "complete") return "border-green-500/50 bg-green-500/5";
+    if (status === "fetching") return "border-primary/50 bg-primary/5";
+    return "border-border";
   };
 
   const simulateFetchQuotes = async () => {
@@ -458,10 +463,19 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
           <div className="space-y-4">
             <Label className="text-base font-semibold">Select Carriers to Quote</Label>
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-              {CARRIERS.map(carrier => (
+            {CARRIERS.map(carrier => (
                 <div
                   key={carrier.id}
                   onClick={() => toggleCarrier(carrier.id)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    toggleCarrier(carrier.id);
+                  }
+                }}
+                role="button"
+                tabIndex={0}
+                aria-pressed={selectedCarriers.includes(carrier.id)}
                   className={`p-4 rounded-lg border-2 cursor-pointer transition-all ${
                     selectedCarriers.includes(carrier.id)
                       ? "border-primary bg-primary/10"
@@ -536,16 +550,10 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
         </div>
 
         <div className="space-y-3">
-          {quotes.map((quote, idx) => (
+          {quotes.map((quote) => (
             <div
-              key={idx}
-              className={`p-4 rounded-lg border ${
-                quote.status === "complete" 
-                  ? "border-green-500/50 bg-green-500/5" 
-                  : quote.status === "fetching"
-                  ? "border-primary/50 bg-primary/5"
-                  : "border-border"
-              }`}
+              key={quote.carrier}
+              className={`p-4 rounded-lg border ${getFetchingStatusClass(quote.status)}`}
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
@@ -601,10 +609,19 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {quotes.filter(q => q.status === "complete").map((quote, idx) => (
+            {quotes.filter(q => q.status === "complete").map((quote) => (
               <div
-                key={idx}
+                key={quote.carrier}
                 onClick={() => setSelectedQuote(quote.carrier)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    setSelectedQuote(quote.carrier);
+                  }
+                }}
+                role="button"
+                tabIndex={0}
+                aria-pressed={selectedQuote === quote.carrier}
                 className={`p-5 rounded-xl border-2 cursor-pointer transition-all ${
                   selectedQuote === quote.carrier
                     ? "border-primary bg-primary/5 shadow-lg"
@@ -644,8 +661,8 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
                   <div className="space-y-1">
                     <span className="text-sm text-muted-foreground">Included Features:</span>
                     <div className="flex flex-wrap gap-1">
-                      {quote.features.map((feature, fidx) => (
-                        <Badge key={fidx} variant="secondary" className="text-xs">
+                      {quote.features.map((feature) => (
+                        <Badge key={`${quote.carrier}-${feature}`} variant="secondary" className="text-xs">
                           {feature}
                         </Badge>
                       ))}
@@ -683,7 +700,12 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
       </Card>
 
       {/* Visual Analysis - always show when quotes are complete */}
-          <QuoteComparisonAnalysis quotes={quotes} insuranceType={insuranceType} />
+      <QuoteComparisonAnalysis quotes={quotes} />
+      {hasExternalResult && (
+        <p className="text-xs text-muted-foreground">
+          External analysis data received and merged into this quote workflow.
+        </p>
+      )}
 
       {/* Detailed Coverage Schedule */}
       <Card className="bg-card border-border">
@@ -693,7 +715,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
             Policy Coverage Details
           </CardTitle>
           <CardDescription>
-            Complete coverage schedule, limits, exclusions, and conditions for {INSURANCE_TYPES.find(t => t.id === insuranceType)?.name || 'this policy type'}
+            Complete coverage schedule, limits, exclusions, and conditions for {INSURANCE_TYPES.find(t => t.id === insuranceType)?.name ?? "this policy type"}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -858,8 +880,8 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
                     <h3 className="font-semibold text-foreground">Included Benefits & Features</h3>
                   </div>
                   <div className="grid grid-cols-2 gap-2">
-                    {quote.features.map((feature, idx) => (
-                      <div key={idx} className="flex items-center gap-2 bg-background rounded-lg p-3">
+                    {quote.features.map((feature) => (
+                      <div key={`${quote.carrier}-benefit-${feature}`} className="flex items-center gap-2 bg-background rounded-lg p-3">
                         <CheckCircle2 className="h-4 w-4 text-green-500 flex-shrink-0" />
                         <span className="text-sm text-foreground">{feature}</span>
                       </div>
@@ -894,7 +916,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
                     <User className="h-4 w-4 text-muted-foreground" />
                     <div>
                       <p className="text-xs text-muted-foreground">Full Name</p>
-                      <p className="font-medium text-foreground">{applicantInfo.name || 'N/A'}</p>
+                      <p className="font-medium text-foreground">{applicantInfo.name ?? "N/A"}</p>
                     </div>
                   </div>
                   {applicantInfo.businessName && (
@@ -910,7 +932,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
                     <MapPin className="h-4 w-4 text-muted-foreground" />
                     <div>
                       <p className="text-xs text-muted-foreground">Address</p>
-                      <p className="font-medium text-foreground">{applicantInfo.address || 'N/A'}</p>
+                      <p className="font-medium text-foreground">{applicantInfo.address ?? "N/A"}</p>
                     </div>
                   </div>
                 </div>
@@ -919,14 +941,14 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
                     <Mail className="h-4 w-4 text-muted-foreground" />
                     <div>
                       <p className="text-xs text-muted-foreground">Email Address</p>
-                      <p className="font-medium text-foreground">{applicantInfo.email || 'N/A'}</p>
+                      <p className="font-medium text-foreground">{applicantInfo.email ?? "N/A"}</p>
                     </div>
                   </div>
                   <div className="flex items-center gap-3">
                     <Phone className="h-4 w-4 text-muted-foreground" />
                     <div>
                       <p className="text-xs text-muted-foreground">Phone Number</p>
-                      <p className="font-medium text-foreground">{applicantInfo.phone || 'N/A'}</p>
+                      <p className="font-medium text-foreground">{applicantInfo.phone ?? "N/A"}</p>
                     </div>
                   </div>
                 </div>
@@ -997,7 +1019,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
               premium: quote.premium,
               coverage: quote.coverage,
               deductible: quote.deductible,
-              insuranceType: INSURANCE_TYPES.find(t => t.id === insuranceType)?.name || insuranceType,
+              insuranceType: INSURANCE_TYPES.find(t => t.id === insuranceType)?.name ?? insuranceType,
               proposalNumber: proposalNumber.current,
               effectiveDate: effectiveDate,
             }}

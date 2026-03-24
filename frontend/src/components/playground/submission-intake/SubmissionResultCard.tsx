@@ -11,7 +11,7 @@ import AppetiteMatchGauge from "./AppetiteMatchGauge";
 import RiskFactorsList from "./RiskFactorsList";
 
 interface SubmissionResultCardProps {
-  submission: ParsedSubmission;
+  readonly submission: ParsedSubmission;
 }
 
 export default function SubmissionResultCard({ submission }: SubmissionResultCardProps) {
@@ -124,9 +124,9 @@ export default function SubmissionResultCard({ submission }: SubmissionResultCar
                 Documents Received
               </h4>
               <div className="flex flex-wrap gap-2">
-                {submission.documents.map((doc, idx) => (
+                {submission.documents.map((doc) => (
                   <Badge 
-                    key={idx} 
+                    key={doc}
                     variant="secondary" 
                     className="text-xs px-2.5 py-1 bg-muted/50"
                   >
@@ -166,7 +166,7 @@ export default function SubmissionResultCard({ submission }: SubmissionResultCar
               <div className="space-y-3">
                 {submission.nextSteps.map((step, idx) => (
                   <div 
-                    key={idx} 
+                    key={`${idx + 1}-${step}`}
                     className="flex items-start gap-3 p-3 rounded-lg bg-muted/30 border border-border/50 hover:bg-muted/50 transition-colors"
                   >
                     <div className="w-6 h-6 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0 mt-0.5">
@@ -218,11 +218,11 @@ function DetailRow({
   label, 
   value, 
   highlight = false 
-}: { 
-  icon: React.ElementType; 
-  label: string; 
-  value: string; 
-  highlight?: boolean;
+}: {
+  readonly icon: React.ElementType;
+  readonly label: string;
+  readonly value: string;
+  readonly highlight?: boolean;
 }) {
   return (
     <div className="flex items-start gap-3">

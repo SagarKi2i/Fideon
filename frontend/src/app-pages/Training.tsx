@@ -197,6 +197,16 @@ export default function Training() {
 
   const hasContributed = (round: FederatedRound) =>
     contributions.some(c => c.model_id === round.model_id && c.round_number === round.round_number);
+  const getJobBadgeVariant = (status: string): "default" | "destructive" | "secondary" => {
+    if (status === "completed") return "default";
+    if (status === "failed") return "destructive";
+    return "secondary";
+  };
+  const getRoundBadgeVariant = (status: string): "default" | "secondary" | "outline" => {
+    if (status === "completed") return "default";
+    if (status === "aggregating") return "secondary";
+    return "outline";
+  };
 
   if (!isElectronApp && !webMode) {
     return null;
@@ -463,11 +473,7 @@ export default function Training() {
                           <div className="flex items-center gap-2">
                             <span className="font-medium capitalize">{job.model_id.replace("-", " ")}</span>
                             <Badge variant="outline">{job.training_type}</Badge>
-                            <Badge variant={
-                              job.status === "completed" ? "default" :
-                              job.status === "failed" ? "destructive" :
-                              "secondary"
-                            }>{job.status}</Badge>
+                            <Badge variant={getJobBadgeVariant(job.status)}>{job.status}</Badge>
                           </div>
                           <p className="text-sm text-muted-foreground">
                             {job.feedback_count} samples • {new Date(job.created_at).toLocaleDateString()}
@@ -529,11 +535,7 @@ export default function Training() {
                           <div className="flex items-center gap-2">
                             <h4 className="font-medium capitalize">{round.model_id.replace("-", " ")}</h4>
                             <Badge variant="outline">Round {round.round_number}</Badge>
-                            <Badge variant={
-                              round.status === "completed" ? "default" :
-                              round.status === "aggregating" ? "secondary" :
-                              "outline"
-                            }>{round.status}</Badge>
+                            <Badge variant={getRoundBadgeVariant(round.status)}>{round.status}</Badge>
                           </div>
                           {contributed && (
                             <Badge variant="default" className="bg-green-500">

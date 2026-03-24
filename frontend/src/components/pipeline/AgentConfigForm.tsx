@@ -93,13 +93,18 @@ export interface AgentConfig {
 }
 
 interface AgentConfigFormProps {
-  agentId: string;
-  config: AgentConfig;
-  onChange: (config: AgentConfig) => void;
+  readonly agentId: string;
+  readonly config: AgentConfig;
+  readonly onChange: (config: AgentConfig) => void;
+}
+
+interface AgentSectionProps {
+  readonly config: AgentConfig;
+  readonly onChange: (config: AgentConfig) => void;
 }
 
 // ==================== Document Retrieval Config ====================
-function DocumentRetrievalConfig({ config, onChange }: { config: AgentConfig; onChange: (c: AgentConfig) => void }) {
+function DocumentRetrievalConfig({ config, onChange }: AgentSectionProps) {
   const selectedCarriers: string[] = config.carriers || [];
   const selectedDocTypes: string[] = config.documentTypes || [];
   const selectedAMS: string = config.ams || "";
@@ -165,7 +170,7 @@ function DocumentRetrievalConfig({ config, onChange }: { config: AgentConfig; on
 }
 
 // ==================== Policy Comparison Config ====================
-function PolicyComparisonConfig({ config, onChange }: { config: AgentConfig; onChange: (c: AgentConfig) => void }) {
+function PolicyComparisonConfig({ config, onChange }: AgentSectionProps) {
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">Compares two policies side-by-side for coverage, limits, deductibles, and gaps.</p>
@@ -200,7 +205,7 @@ function PolicyComparisonConfig({ config, onChange }: { config: AgentConfig; onC
 }
 
 // ==================== Quote Generation Config ====================
-function QuoteGenerationConfig({ config, onChange }: { config: AgentConfig; onChange: (c: AgentConfig) => void }) {
+function QuoteGenerationConfig({ config, onChange }: AgentSectionProps) {
   const selectedCarriers: string[] = config.carriers || [];
   return (
     <div className="space-y-3">
@@ -237,7 +242,7 @@ function QuoteGenerationConfig({ config, onChange }: { config: AgentConfig; onCh
 }
 
 // ==================== Claims FNOL Config ====================
-function ClaimsFNOLConfig({ config, onChange }: { config: AgentConfig; onChange: (c: AgentConfig) => void }) {
+function ClaimsFNOLConfig({ config, onChange }: AgentSectionProps) {
   return (
     <div className="space-y-3">
       <div className="space-y-1.5">
@@ -261,7 +266,7 @@ function ClaimsFNOLConfig({ config, onChange }: { config: AgentConfig; onChange:
 }
 
 // ==================== Claims Adjudication Config ====================
-function ClaimsAdjudicationConfig({ config, onChange }: { config: AgentConfig; onChange: (c: AgentConfig) => void }) {
+function ClaimsAdjudicationConfig({ config, onChange }: AgentSectionProps) {
   return (
     <div className="space-y-3">
       <div className="space-y-1.5">
@@ -293,7 +298,7 @@ function ClaimsAdjudicationConfig({ config, onChange }: { config: AgentConfig; o
 }
 
 // ==================== Submission Intake Config ====================
-function SubmissionIntakeConfig({ config, onChange }: { config: AgentConfig; onChange: (c: AgentConfig) => void }) {
+function SubmissionIntakeConfig({ config, onChange }: AgentSectionProps) {
   return (
     <div className="space-y-3">
       <div className="space-y-1.5">
@@ -330,7 +335,7 @@ function SubmissionIntakeConfig({ config, onChange }: { config: AgentConfig; onC
 }
 
 // ==================== Generic Agent Config ====================
-function GenericAgentConfig({ config, onChange }: { config: AgentConfig; onChange: (c: AgentConfig) => void }) {
+function GenericAgentConfig({ config, onChange }: AgentSectionProps) {
   return (
     <div className="space-y-3">
       <div className="space-y-1.5">
@@ -353,7 +358,7 @@ function GenericAgentConfig({ config, onChange }: { config: AgentConfig; onChang
 }
 
 // ==================== Custom Workflow Config ====================
-function CustomWorkflowConfig({ config, onChange }: { config: AgentConfig; onChange: (c: AgentConfig) => void }) {
+function CustomWorkflowConfig({ config, onChange }: AgentSectionProps) {
   const [workflows, setWorkflows] = useState<{ id: string; title: string; description: string | null; category: string | null; steps_count: number }[]>([]);
   const [loading, setLoading] = useState(true);
 

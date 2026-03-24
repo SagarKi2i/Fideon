@@ -112,6 +112,52 @@ export default function AgentWorkflows() {
     setSteps(ns);
   };
 
+  const getScheduleConfigPayload = (): ScheduleConfig | null => {
+    if (!scheduleConfig.enabled) return null;
+    if (scheduleConfig.type === "recurring") {
+      return {
+        ...scheduleConfig,
+        cron_expression: cronPreset,
+        scheduled_at: undefined,
+      };
+    }
+    return {
+      ...scheduleConfig,
+      cron_expression: undefined,
+      scheduled_at: scheduledDate ? `${scheduledDate}T${scheduledTime}` : undefined,
+    };
+  };
+
+  const savePipeline = async (schedConfig: ScheduleConfig | null, userId: string) => {
+    if (editingPipeline) {
+      const { error } = await supabase.from("agent_pipelines")
+        .update({
+          name: pipelineName,
+          description: pipelineDesc || null,
+          steps: steps as any,
+          schedule_config: schedConfig as any,
+        } as any)
+        .eq("id", editingPipeline.id);
+      if (error) throw error;
+      toast({ title: "Pipeline Updated" });
+      return;
+    }
+
+    const { error } = await supabase.from("agent_pipelines").insert({
+      user_id: userId,
+      name: pipelineName,
+      description: pipelineDesc || null,
+      steps: steps as any,
+      schedule_config: schedConfig as any,
+    } as any);
+    if (error) throw error;
+    toast({ title: "Pipeline Created", description: `${steps.length} agent${steps.length > 1 ? "s" : ""} connected` });
+  };
+
+  const onStepPassOutputChange = (index: number, value: boolean) => {
+    setSteps(prev => prev.map((s, i) => (i === index ? { ...s, pass_output: value } : s)));
+  };
+
   const handleSave = async () => {
     if (!pipelineName.trim() || steps.length === 0) {
       toast({ title: "Missing fields", description: "Name and at least one agent required", variant: "destructive" });
@@ -122,26 +168,8 @@ export default function AgentWorkflows() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not authenticated");
 
-      const schedConfig: ScheduleConfig | null = scheduleConfig.enabled ? {
-        ...scheduleConfig,
-        cron_expression: scheduleConfig.type === "recurring" ? cronPreset : undefined,
-        scheduled_at: scheduleConfig.type === "one_time" && scheduledDate ? `${scheduledDate}T${scheduledTime}` : undefined,
-      } : null;
-
-      if (editingPipeline) {
-        const { error } = await supabase.from("agent_pipelines")
-          .update({ name: pipelineName, description: pipelineDesc || null, steps: steps as any, schedule_config: schedConfig as any } as any)
-          .eq("id", editingPipeline.id);
-        if (error) throw error;
-        toast({ title: "Pipeline Updated" });
-      } else {
-        const { error } = await supabase.from("agent_pipelines").insert({
-          user_id: user.id, name: pipelineName, description: pipelineDesc || null,
-          steps: steps as any, schedule_config: schedConfig as any,
-        } as any);
-        if (error) throw error;
-        toast({ title: "Pipeline Created", description: `${steps.length} agent${steps.length > 1 ? "s" : ""} connected` });
-      }
+      const schedConfig = getScheduleConfigPayload();
+      await savePipeline(schedConfig, user.id);
       resetForm(); setCreateOpen(false); loadData();
     } catch (e: any) {
       toast({ title: "Error", description: e.message, variant: "destructive" });
@@ -161,7 +189,7 @@ export default function AgentWorkflows() {
   const openEdit = (pipeline: Pipeline) => {
     setEditingPipeline(pipeline);
     setPipelineName(pipeline.name);
-    setPipelineDesc(pipeline.description || "");
+    setPipelineDesc(pipeline.description ?? "");
     setSteps(pipeline.steps);
     setScheduleConfig(pipeline.schedule_config || { enabled: false, type: "recurring" });
     if (pipeline.schedule_config?.cron_expression) setCronPreset(pipeline.schedule_config.cron_expression);
@@ -215,7 +243,15 @@ export default function AgentWorkflows() {
         </div>
 
         {/* Pipeline Builder Dialog */}
-        <Dialog open={createOpen} onOpenChange={(v) => { if (!v) resetForm(); setCreateOpen(v); }}>
+        <Dialog
+          open={createOpen}
+          onOpenChange={(v) => {
+            if (!v) {
+              resetForm();
+            }
+            setCreateOpen(v);
+          }}
+        >
           <DialogContent className="sm:max-w-3xl max-h-[90vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle>{editingPipeline ? "Edit Pipeline" : "Create Agent Pipeline"}</DialogTitle>
@@ -284,7 +320,7 @@ export default function AgentWorkflows() {
                             {idx < steps.length - 1 && (
                               <div className="flex items-center justify-between pt-2 border-t border-border/50">
                                 <Label className="text-xs flex items-center gap-1"><Link2 className="h-3 w-3" /> Pass output to next agent</Label>
-                                <Switch checked={step.pass_output} onCheckedChange={v => setSteps(prev => prev.map((s, i) => i === idx ? { ...s, pass_output: v } : s))} />
+                                <Switch checked={step.pass_output} onCheckedChange={(v) => onStepPassOutputChange(idx, v)} />
                               </div>
                             )}
                           </CardContent>
@@ -414,8 +450,8 @@ export default function AgentWorkflows() {
                       <span className="flex items-center gap-1">
                         <Clock className="h-3 w-3" />
                         {pipeline.schedule_config.type === "recurring"
-                          ? CRON_PRESETS.find(p => p.value === pipeline.schedule_config?.cron_expression)?.label || pipeline.schedule_config.cron_expression
-                          : pipeline.schedule_config.scheduled_at ? format(new Date(pipeline.schedule_config.scheduled_at), "MMM d, yyyy h:mm a") : "—"
+                          ? (CRON_PRESETS.find(p => p.value === pipeline.schedule_config?.cron_expression)?.label ?? pipeline.schedule_config.cron_expression)
+                          : (pipeline.schedule_config.scheduled_at ? format(new Date(pipeline.schedule_config.scheduled_at), "MMM d, yyyy h:mm a") : "—")
                         }
                       </span>
                     )}

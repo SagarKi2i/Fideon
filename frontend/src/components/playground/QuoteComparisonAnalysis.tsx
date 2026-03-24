@@ -30,8 +30,7 @@ interface CarrierQuote {
 }
 
 interface QuoteComparisonAnalysisProps {
-  quotes: CarrierQuote[];
-  insuranceType: string;
+  readonly quotes: CarrierQuote[];
 }
 
 export default function QuoteComparisonAnalysis({ quotes }: QuoteComparisonAnalysisProps) {

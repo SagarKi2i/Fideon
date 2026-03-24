@@ -14,9 +14,9 @@ import { Badge } from "@/components/ui/badge";
 import MarkdownRenderer from "./MarkdownRenderer";
 
 interface ClaimsAdjudicationUIProps {
-  onRun: (data: any) => void;
-  isRunning: boolean;
-  result: string;
+  readonly onRun: (data: any) => void;
+  readonly isRunning: boolean;
+  readonly result: string;
 }
 
 interface ParsedClaim {
@@ -318,8 +318,8 @@ export default function ClaimsAdjudicationUI({ onRun, isRunning, result }: Claim
                   </CardHeader>
                   <CardContent>
                     <div className="space-y-3">
-                      {parsedResult.coverageAnalysis.map((cov, idx) => (
-                        <div key={idx} className={`flex items-center justify-between p-3 rounded-lg ${cov.applicable ? 'bg-green-500/5 border border-green-500/20' : 'bg-muted/50'}`}>
+                      {parsedResult.coverageAnalysis.map((cov) => (
+                        <div key={`${cov.coverage}-${cov.limit}`} className={`flex items-center justify-between p-3 rounded-lg ${cov.applicable ? 'bg-green-500/5 border border-green-500/20' : 'bg-muted/50'}`}>
                           <div className="flex items-center gap-3">
                             {cov.applicable ? (
                               <CheckCircle2 className="h-5 w-5 text-green-500" />
@@ -352,8 +352,8 @@ export default function ClaimsAdjudicationUI({ onRun, isRunning, result }: Claim
                   </CardHeader>
                   <CardContent>
                     <div className="space-y-3">
-                      {parsedResult.reserveRecommendation.map((res, idx) => (
-                        <div key={idx} className="flex items-center justify-between p-3 rounded-lg bg-muted/30">
+                      {parsedResult.reserveRecommendation.map((res) => (
+                        <div key={`${res.category}-${res.amount}`} className="flex items-center justify-between p-3 rounded-lg bg-muted/30">
                           <div className="flex items-center gap-3">
                             <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
                               {res.change === "up" && <TrendingUp className="h-4 w-4 text-amber-500" />}
@@ -389,8 +389,8 @@ export default function ClaimsAdjudicationUI({ onRun, isRunning, result }: Claim
                   </CardHeader>
                   <CardContent>
                     <div className="space-y-2">
-                      {parsedResult.fraudIndicators.map((fraud, idx) => (
-                        <div key={idx} className="flex items-center justify-between p-3 rounded-lg bg-muted/30">
+                      {parsedResult.fraudIndicators.map((fraud) => (
+                        <div key={`${fraud.indicator}-${fraud.severity}`} className="flex items-center justify-between p-3 rounded-lg bg-muted/30">
                           <span className="text-sm">{fraud.indicator}</span>
                           <Badge className={getSeverityColor(fraud.severity)}>
                             {fraud.severity.toUpperCase()}
@@ -412,8 +412,8 @@ export default function ClaimsAdjudicationUI({ onRun, isRunning, result }: Claim
                   <CardContent>
                     <div className="relative pl-6 space-y-4">
                       <div className="absolute left-2 top-2 bottom-2 w-0.5 bg-border" />
-                      {parsedResult.timeline.map((event, idx) => (
-                        <div key={idx} className="relative">
+                      {parsedResult.timeline.map((event) => (
+                        <div key={`${event.date}-${event.event}`} className="relative">
                           <div className="absolute -left-4 w-3 h-3 rounded-full bg-primary border-2 border-background" />
                           <div>
                             <p className="text-xs text-muted-foreground">{event.date}</p>
@@ -440,7 +440,7 @@ export default function ClaimsAdjudicationUI({ onRun, isRunning, result }: Claim
                 <CardContent className="pt-4">
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                     {parsedResult.nextSteps.map((step, idx) => (
-                      <div key={idx} className="flex items-start gap-3 p-3 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors">
+                      <div key={`${idx + 1}-${step}`} className="flex items-start gap-3 p-3 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors">
                         <div className="w-6 h-6 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
                           <span className="text-xs font-bold text-primary">{idx + 1}</span>
                         </div>

@@ -26,6 +26,7 @@ from app.core.supabase import (
 log = structlog.get_logger("device")
 router = APIRouter()
 DEVICE_TOKEN_REQUIRED_DETAIL = "Device token is required"
+UTC_OFFSET_SUFFIX = "+00:00"
 
 
 def _require_legacy_device_apis_enabled() -> None:
@@ -55,6 +56,10 @@ def _extract_magic_link_payload(body: dict, user_email: str) -> tuple[Optional[s
     return None, None, None, "No action_link or email_otp returned from Supabase generate_link API"
 
 
+def _parse_utc_iso(raw: Any) -> datetime:
+    return datetime.fromisoformat(str(raw).replace("Z", UTC_OFFSET_SUFFIX))
+
+
 async def _generate_magic_login_link(
     user_email: str, redirect_to: str
 ) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
@@ -73,6 +78,85 @@ async def _generate_magic_login_link(
         return None, None, None, resp.text
     body = resp.json()
     return _extract_magic_link_payload(body, user_email)
+
+
+async def _resolve_device_from_bearer(authorization: Optional[str]) -> tuple[str, dict[str, Any]]:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Device JWT required")
+    claims = _verify_device_jwt(authorization.split(" ", 1)[1])
+    device_id = claims.get("device_id")
+    if not device_id:
+        raise HTTPException(status_code=401, detail="Invalid device JWT claims")
+    return str(device_id), claims
+
+
+async def _load_active_device_row(device_id: str) -> dict[str, Any]:
+    rows = await postgrest_get(
+        "devices",
+        f"select=id,is_active,jwt_issued_after&id=eq.{quote(device_id, safe='')}&limit=1",
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Device not found")
+    device_row = rows[0]
+    if not device_row.get("is_active", False):
+        raise HTTPException(status_code=403, detail="Device is deactivated")
+    return device_row
+
+
+def _enforce_not_revoked(claims: dict[str, Any], jwt_issued_after_raw: Any) -> None:
+    if not jwt_issued_after_raw:
+        return
+    try:
+        issued_after_ts = _parse_utc_iso(jwt_issued_after_raw).timestamp()
+    except ValueError:
+        issued_after_ts = 0
+    if claims.get("iat", 0) < issued_after_ts:
+        raise HTTPException(status_code=401, detail="Device token has been revoked — please re-register")
+
+
+async def _sync_local_models(device_id: str, local_models: Any, now: datetime) -> None:
+    if not isinstance(local_models, list):
+        return
+    for local_model in local_models:
+        if not isinstance(local_model, dict):
+            continue
+        model_id = str(local_model.get("model_id") or "").strip()
+        is_downloaded = bool(local_model.get("is_downloaded"))
+        if not model_id:
+            continue
+        await postgrest_patch(
+            "device_models",
+            f"device_id=eq.{quote(device_id, safe='')}&model_id=eq.{quote(model_id, safe='')}",
+            {"is_downloaded": is_downloaded, "last_synced_at": now.isoformat()},
+        )
+
+
+async def _get_pending_pairing_or_fail(pairing_id: str) -> dict[str, Any]:
+    rows = await postgrest_get(
+        "device_pairings",
+        f"select=*&id=eq.{quote(pairing_id, safe='')}&limit=1",
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Pairing session not found")
+    pairing = rows[0]
+    now = datetime.now(timezone.utc)
+    expires_at = _parse_utc_iso(pairing["expires_at"])
+    if pairing.get("status") != "pending":
+        raise HTTPException(status_code=400, detail="Pairing session is not pending")
+    if expires_at < now:
+        await postgrest_patch(
+            "device_pairings",
+            f"id=eq.{quote(pairing_id, safe='')}",
+            {"status": "expired"},
+        )
+        raise HTTPException(status_code=400, detail="Pairing session expired")
+    return pairing
+
+
+def _validate_pairing_code(pairing_code: str, expected_hash: Any) -> None:
+    received_hash = hashlib.sha256(pairing_code.encode("utf-8")).hexdigest()
+    if not expected_hash or received_hash != expected_hash:
+        raise HTTPException(status_code=401, detail="Invalid pairing code")
 
 
 def _parse_registration_payload(body: dict[str, Any]) -> tuple[str, str, Any, Any, dict[str, Any], datetime, Optional[str]]:
@@ -377,34 +461,9 @@ async def device_heartbeat(request: Request, authorization: Optional[str] = Head
     Rate limit: 5/minute per IP (a healthy device sends 1/minute; 5x headroom
     for retries while still blocking floods).
     """
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Device JWT required")
-    claims = _verify_device_jwt(authorization.split(" ", 1)[1])
-    device_id = claims.get("device_id")
-    if not device_id:
-        raise HTTPException(status_code=401, detail="Invalid device JWT claims")
-
-    # Verify the device still exists and is not deactivated. Also fetch
-    # jwt_issued_after to check whether this token has been revoked.
-    rows = await postgrest_get(
-        "devices",
-        f"select=id,is_active,jwt_issued_after&id=eq.{quote(device_id, safe='')}&limit=1",
-    )
-    if not rows:
-        raise HTTPException(status_code=404, detail="Device not found")
-    device_row = rows[0]
-    if not device_row.get("is_active", False):
-        raise HTTPException(status_code=403, detail="Device is deactivated")
-
-    # Revocation check: reject JWTs issued before jwt_issued_after.
-    jwt_issued_after_raw = device_row.get("jwt_issued_after")
-    if jwt_issued_after_raw:
-        try:
-            issued_after_ts = datetime.fromisoformat(jwt_issued_after_raw.replace("Z", "+00:00")).timestamp()
-        except ValueError:
-            issued_after_ts = 0
-        if claims.get("iat", 0) < issued_after_ts:
-            raise HTTPException(status_code=401, detail="Device token has been revoked — please re-register")
+    device_id, claims = await _resolve_device_from_bearer(authorization)
+    device_row = await _load_active_device_row(device_id)
+    _enforce_not_revoked(claims, device_row.get("jwt_issued_after"))
 
     body: dict[str, Any] = {}
     try:
@@ -421,19 +480,7 @@ async def device_heartbeat(request: Request, authorization: Optional[str] = Head
         {"status": "online", "last_seen_at": now.isoformat()},
     )
 
-    if isinstance(local_models, list):
-        for local_model in local_models:
-            if not isinstance(local_model, dict):
-                continue
-            model_id = str(local_model.get("model_id") or "").strip()
-            is_downloaded = bool(local_model.get("is_downloaded"))
-            if not model_id:
-                continue
-            await postgrest_patch(
-                "device_models",
-                f"device_id=eq.{quote(device_id, safe='')}&model_id=eq.{quote(model_id, safe='')}",
-                {"is_downloaded": is_downloaded, "last_synced_at": now.isoformat()},
-            )
+    await _sync_local_models(device_id, local_models, now)
     log.debug("device.heartbeat", device_id=device_id)
     return {"success": True, "device_id": device_id, "last_seen_at": now.isoformat()}
 
@@ -551,7 +598,7 @@ async def get_device_pairing_status(
 
     pairing = rows[0]
     now = datetime.now(timezone.utc)
-    expires_at = datetime.fromisoformat(str(pairing["expires_at"]).replace("Z", "+00:00"))
+    expires_at = _parse_utc_iso(pairing["expires_at"])
     if pairing["status"] == "pending" and expires_at < now:
         await postgrest_patch(
             "device_pairings",
@@ -571,30 +618,9 @@ async def confirm_device_pairing(request: Request):
     if not pairing_id or not pairing_code:
         raise HTTPException(status_code=400, detail="pairing_id and pairing_code are required")
 
-    rows = await postgrest_get(
-        "device_pairings",
-        f"select=*&id=eq.{quote(pairing_id, safe='')}&limit=1",
-    )
-    if not rows:
-        raise HTTPException(status_code=404, detail="Pairing session not found")
-
-    pairing = rows[0]
+    pairing = await _get_pending_pairing_or_fail(pairing_id)
     now = datetime.now(timezone.utc)
-    expires_at = datetime.fromisoformat(str(pairing["expires_at"]).replace("Z", "+00:00"))
-    if pairing.get("status") != "pending":
-        raise HTTPException(status_code=400, detail="Pairing session is not pending")
-    if expires_at < now:
-        await postgrest_patch(
-            "device_pairings",
-            f"id=eq.{quote(pairing_id, safe='')}",
-            {"status": "expired"},
-        )
-        raise HTTPException(status_code=400, detail="Pairing session expired")
-
-    expected_hash = pairing.get("pairing_code_hash")
-    received_hash = hashlib.sha256(pairing_code.encode("utf-8")).hexdigest()
-    if not expected_hash or received_hash != expected_hash:
-        raise HTTPException(status_code=401, detail="Invalid pairing code")
+    _validate_pairing_code(pairing_code, pairing.get("pairing_code_hash"))
 
     confirmed_profile = body.get("confirmed_device_profile")
     if not isinstance(confirmed_profile, dict):

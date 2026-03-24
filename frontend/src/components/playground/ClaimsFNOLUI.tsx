@@ -8,9 +8,9 @@ import { Upload, AlertCircle, Loader2, FileCheck } from "lucide-react";
 import MarkdownRenderer from "./MarkdownRenderer";
 
 interface ClaimsFNOLUIProps {
-  onRun: (data: any) => void;
-  isRunning: boolean;
-  result: string;
+  readonly onRun: (data: any) => void;
+  readonly isRunning: boolean;
+  readonly result: string;
 }
 
 export default function ClaimsFNOLUI({ onRun, isRunning, result }: ClaimsFNOLUIProps) {

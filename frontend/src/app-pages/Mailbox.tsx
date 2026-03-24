@@ -320,6 +320,15 @@ export default function Mailbox() {
                 <div
                   key={email.id}
                   onClick={() => openEmail(email)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      openEmail(email);
+                    }
+                  }}
+                  role="button"
+                  tabIndex={0}
+                  aria-pressed={selectedEmail?.id === email.id}
                   className={`px-4 py-3 cursor-pointer border-b border-border transition-colors hover:bg-muted/50 ${
                     selectedEmail?.id === email.id ? "bg-primary/5 border-l-2 border-l-primary" : ""
                   } ${!email.read ? "bg-primary/[0.03]" : ""}`}

@@ -2,7 +2,7 @@ import { CheckCircle2, AlertTriangle, XCircle } from "lucide-react";
 import { ParsedSubmission } from "./types";
 
 interface RiskFactorsListProps {
-  factors: ParsedSubmission["riskFactors"];
+  readonly factors: ParsedSubmission["riskFactors"];
 }
 
 export default function RiskFactorsList({ factors }: RiskFactorsListProps) {
@@ -45,13 +45,13 @@ export default function RiskFactorsList({ factors }: RiskFactorsListProps) {
 
   return (
     <div className="space-y-2">
-      {factors.map((factor, idx) => {
+      {factors.map((factor) => {
         const config = getStatusConfig(factor.status);
         const Icon = config.icon;
 
         return (
           <div
-            key={idx}
+            key={`${factor.label}-${factor.status}`}
             className={`
               flex items-center gap-3 p-3 rounded-lg border transition-all duration-200
               ${config.bgColor} ${config.borderColor}

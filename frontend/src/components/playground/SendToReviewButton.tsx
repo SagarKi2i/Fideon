@@ -18,11 +18,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { createDecisionReview } from "@/lib/reviewQueueApi";
 
 interface SendToReviewProps {
-  podModelId: string;
-  podModelName: string;
-  domain: string;
-  result: string;
-  inputData?: Record<string, any>;
+  readonly podModelId: string;
+  readonly podModelName: string;
+  readonly domain: string;
+  readonly result: string;
+  readonly inputData?: Record<string, any>;
 }
 
 const DECISION_TYPES = [
