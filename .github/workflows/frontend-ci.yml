@@ -14,14 +14,6 @@ on:
       - 'frontend/**'
       - '.github/workflows/**'
 
-  pull_request:
-    branches:
-      - 'v*-dev'
-      - 'v*-staging'
-      - 'v1'
-    paths:
-      - 'frontend/**'
-
 concurrency:
   group: frontend-ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
