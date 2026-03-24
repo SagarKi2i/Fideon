@@ -9,8 +9,8 @@ import { Upload, Inbox, Loader2, FileUp, Sparkles } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 
 interface SubmissionFormProps {
-  onSubmit: (data: { file: File | null; details: string; lineOfBusiness: string }) => void;
-  isRunning: boolean;
+  readonly onSubmit: (data: { file: File | null; details: string; lineOfBusiness: string }) => void;
+  readonly isRunning: boolean;
 }
 
 const lineOfBusinessOptions = [
@@ -48,6 +48,11 @@ export default function SubmissionForm({ onSubmit, isRunning }: SubmissionFormPr
     setIsDragOver(false);
     const droppedFile = e.dataTransfer.files?.[0];
     if (droppedFile) setFile(droppedFile);
+  };
+  const getDropzoneClasses = () => {
+    if (isDragOver) return "border-primary bg-primary/5 scale-[1.02]";
+    if (file) return "border-green-500/50 bg-green-500/5";
+    return "border-border hover:border-primary/50 hover:bg-muted/50";
   };
 
   return (
@@ -97,16 +102,19 @@ export default function SubmissionForm({ onSubmit, isRunning }: SubmissionFormPr
           <div className="space-y-2">
             <Label className="text-sm font-medium">Submission Documents</Label>
             <div
-              className={`relative border-2 border-dashed rounded-xl p-4 transition-all duration-200 cursor-pointer ${
-                isDragOver 
-                  ? "border-primary bg-primary/5 scale-[1.02]" 
-                  : file 
-                    ? "border-green-500/50 bg-green-500/5" 
-                    : "border-border hover:border-primary/50 hover:bg-muted/50"
-              }`}
+              className={`relative border-2 border-dashed rounded-xl p-4 transition-all duration-200 cursor-pointer ${getDropzoneClasses()}`}
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
               onDrop={handleDrop}
+              role="button"
+              tabIndex={0}
+              aria-label="Upload submission documents"
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  document.getElementById("submission-file")?.click();
+                }
+              }}
             >
               <Input
                 id="submission-file"

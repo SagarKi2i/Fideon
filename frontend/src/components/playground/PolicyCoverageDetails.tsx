@@ -21,7 +21,7 @@ import {
 import { getInsuranceCoverage, type CoverageSection } from "./insuranceCoverageData";
 
 interface PolicyCoverageDetailsProps {
-  insuranceType: string;
+  readonly insuranceType: string;
 }
 
 const ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -49,7 +49,7 @@ export default function PolicyCoverageDetails({
   }
 
   const renderSection = (section: CoverageSection) => {
-    const IconComponent = ICON_MAP[section.icon] || Shield;
+    const IconComponent = ICON_MAP[section.icon] ?? Shield;
 
     return (
       <div key={section.title} className="space-y-3">

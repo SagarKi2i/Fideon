@@ -83,7 +83,7 @@ function ModelBadge({ modelId }: Readonly<{ modelId?: string | null }>) {
 }
 
 /** Shows top SHAP factors inline next to the reasoning text. */
-function ShapFactors({ shapValues }: { shapValues?: Record<string, number> | null }) {
+function ShapFactors({ shapValues }: Readonly<{ shapValues?: Record<string, number> | null }>) {
   if (!shapValues) return null;
   const top = Object.entries(shapValues)
     .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
@@ -107,9 +107,17 @@ function ShapFactors({ shapValues }: { shapValues?: Record<string, number> | nul
   );
 }
 
-function OutcomeBadge({ code }: { code?: number | null }) {
+function getOutcomeLabel(code: number): string {
+  if (code === 0) return "Success";
+  if (code === 4) return "Minor";
+  if (code === 8) return "Serious";
+  if (code === 12) return "Major";
+  return String(code);
+}
+
+function OutcomeBadge({ code }: Readonly<{ code?: number | null }>) {
   if (typeof code !== "number") return <span className="text-xs text-muted-foreground">-</span>;
-  const label = code === 0 ? "Success" : code === 4 ? "Minor" : code === 8 ? "Serious" : code === 12 ? "Major" : String(code);
+  const label = getOutcomeLabel(code);
   return (
     <Badge variant={code === 0 ? "default" : "destructive"} className="text-xs">
       {label}
@@ -122,12 +130,12 @@ function Pagination({
   hasMore,
   onPrev,
   onNext,
-}: {
+}: Readonly<{
   page: number;
   hasMore: boolean;
   onPrev: () => void;
   onNext: () => void;
-}) {
+}>) {
   return (
     <div className="flex items-center justify-between pt-2">
       <Button variant="outline" size="sm" disabled={page === 0} onClick={onPrev}>
@@ -502,7 +510,7 @@ function SystemEventsTab() {
                       {row.details ? JSON.stringify(row.details) : "-"}
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
-                      {row.ip_address || "-"}
+                      {row.ip_address ?? "-"}
                     </TableCell>
                   </TableRow>
                 ))}

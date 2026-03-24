@@ -36,7 +36,6 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { formatDistanceToNow, format } from "date-fns";
-import { performDeviceCheckin } from "@/lib/deviceApi";
 
 interface Device {
   id: string;
@@ -320,18 +319,9 @@ export default function DeviceDetails() {
   const handleTriggerSync = async () => {
     if (!device) return;
     try {
-      const localModels = allocatedModels.map((m) => ({
-        model_id: m.model_id,
-        is_downloaded: !!m.is_downloaded,
-      }));
       // V1 device heartbeat requires a device JWT. Triggering sync from the admin UI
       // can no longer be done using the legacy device_token once legacy endpoints are disabled.
       throw new Error("Sync trigger requires device JWT (v1). Use Device Setup on the device.");
-      toast({
-        title: "Sync requested",
-        description: "The device will pull allocated models on next check-in.",
-      });
-      loadDeviceData();
     } catch (error: any) {
       console.error("Error triggering sync:", error);
       toast({

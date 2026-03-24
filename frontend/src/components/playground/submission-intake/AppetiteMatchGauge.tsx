@@ -2,13 +2,15 @@ import { TrendingUp, TrendingDown, Minus } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 
 interface AppetiteMatchGaugeProps {
-  score: number;
+  readonly score: number;
 }
 
 export default function AppetiteMatchGauge({ score }: AppetiteMatchGaugeProps) {
+  const isStrong = score >= 80;
+  const isModerate = score >= 60 && score < 80;
   const getScoreColor = () => {
-    if (score >= 80) return { bg: "from-green-500 to-emerald-500", text: "text-green-500", shadow: "shadow-green-500/30" };
-    if (score >= 60) return { bg: "from-amber-500 to-orange-500", text: "text-amber-500", shadow: "shadow-amber-500/30" };
+    if (isStrong) return { bg: "from-green-500 to-emerald-500", text: "text-green-500", shadow: "shadow-green-500/30" };
+    if (isModerate) return { bg: "from-amber-500 to-orange-500", text: "text-amber-500", shadow: "shadow-amber-500/30" };
     return { bg: "from-red-500 to-rose-500", text: "text-red-500", shadow: "shadow-red-500/30" };
   };
 
@@ -21,6 +23,12 @@ export default function AppetiteMatchGauge({ score }: AppetiteMatchGaugeProps) {
   const colors = getScoreColor();
   const scoreInfo = getScoreLabel();
   const ScoreIcon = scoreInfo.icon;
+  const getGradientClasses = () => {
+    if (isStrong) return { start: "text-green-500", end: "text-emerald-400" };
+    if (isModerate) return { start: "text-amber-500", end: "text-orange-400" };
+    return { start: "text-red-500", end: "text-rose-400" };
+  };
+  const gradientClasses = getGradientClasses();
 
   // Calculate the arc for the gauge
   const radius = 60;
@@ -52,8 +60,8 @@ export default function AppetiteMatchGauge({ score }: AppetiteMatchGaugeProps) {
           />
           <defs>
             <linearGradient id="gaugeGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" className={score >= 80 ? "text-green-500" : score >= 60 ? "text-amber-500" : "text-red-500"} stopColor="currentColor" />
-              <stop offset="100%" className={score >= 80 ? "text-emerald-400" : score >= 60 ? "text-orange-400" : "text-rose-400"} stopColor="currentColor" />
+              <stop offset="0%" className={gradientClasses.start} stopColor="currentColor" />
+              <stop offset="100%" className={gradientClasses.end} stopColor="currentColor" />
             </linearGradient>
           </defs>
         </svg>

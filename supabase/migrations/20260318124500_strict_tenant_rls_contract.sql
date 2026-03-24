@@ -126,6 +126,7 @@ DROP POLICY IF EXISTS "Admins can update devices in own tenant" ON public.device
 DROP POLICY IF EXISTS "Admins can delete devices in own tenant" ON public.devices;
 DROP POLICY IF EXISTS "Global admins can manage all devices" ON public.devices;
 
+DROP POLICY IF EXISTS "tenant_admins_view_devices" ON public.devices;
 CREATE POLICY "tenant_admins_view_devices"
   ON public.devices
   FOR SELECT
@@ -137,6 +138,7 @@ CREATE POLICY "tenant_admins_view_devices"
     )
   );
 
+DROP POLICY IF EXISTS "tenant_admins_insert_devices" ON public.devices;
 CREATE POLICY "tenant_admins_insert_devices"
   ON public.devices
   FOR INSERT
@@ -148,6 +150,7 @@ CREATE POLICY "tenant_admins_insert_devices"
     )
   );
 
+DROP POLICY IF EXISTS "tenant_admins_update_devices" ON public.devices;
 CREATE POLICY "tenant_admins_update_devices"
   ON public.devices
   FOR UPDATE
@@ -166,6 +169,7 @@ CREATE POLICY "tenant_admins_update_devices"
     )
   );
 
+DROP POLICY IF EXISTS "tenant_admins_delete_devices" ON public.devices;
 CREATE POLICY "tenant_admins_delete_devices"
   ON public.devices
   FOR DELETE
@@ -191,17 +195,20 @@ DROP POLICY IF EXISTS "Global admins can manage all app users" ON public.app_use
 DROP POLICY IF EXISTS "Admins can view app users in own tenant" ON public.app_users;
 DROP POLICY IF EXISTS "Admins can manage app users in own tenant" ON public.app_users;
 
+DROP POLICY IF EXISTS "app_users_self_select" ON public.app_users;
 CREATE POLICY "app_users_self_select"
   ON public.app_users
   FOR SELECT
   USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "app_users_self_update" ON public.app_users;
 CREATE POLICY "app_users_self_update"
   ON public.app_users
   FOR UPDATE
   USING (auth.uid() = user_id)
   WITH CHECK (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "app_users_tenant_admin_select" ON public.app_users;
 CREATE POLICY "app_users_tenant_admin_select"
   ON public.app_users
   FOR SELECT
@@ -213,6 +220,7 @@ CREATE POLICY "app_users_tenant_admin_select"
     )
   );
 
+DROP POLICY IF EXISTS "app_users_tenant_admin_manage" ON public.app_users;
 CREATE POLICY "app_users_tenant_admin_manage"
   ON public.app_users
   FOR ALL
@@ -244,11 +252,13 @@ DROP POLICY IF EXISTS "Admins can update user roles" ON public.user_roles;
 DROP POLICY IF EXISTS "Admins can delete user roles" ON public.user_roles;
 DROP POLICY IF EXISTS "Global admins can manage all user roles" ON public.user_roles;
 
+DROP POLICY IF EXISTS "user_roles_self_select" ON public.user_roles;
 CREATE POLICY "user_roles_self_select"
   ON public.user_roles
   FOR SELECT
   USING (auth.uid() = user_id);
 
+DROP POLICY IF EXISTS "user_roles_tenant_admin_select" ON public.user_roles;
 CREATE POLICY "user_roles_tenant_admin_select"
   ON public.user_roles
   FOR SELECT
@@ -260,6 +270,7 @@ CREATE POLICY "user_roles_tenant_admin_select"
     )
   );
 
+DROP POLICY IF EXISTS "user_roles_tenant_admin_insert" ON public.user_roles;
 CREATE POLICY "user_roles_tenant_admin_insert"
   ON public.user_roles
   FOR INSERT
@@ -271,6 +282,7 @@ CREATE POLICY "user_roles_tenant_admin_insert"
     )
   );
 
+DROP POLICY IF EXISTS "user_roles_tenant_admin_update" ON public.user_roles;
 CREATE POLICY "user_roles_tenant_admin_update"
   ON public.user_roles
   FOR UPDATE
@@ -289,6 +301,7 @@ CREATE POLICY "user_roles_tenant_admin_update"
     )
   );
 
+DROP POLICY IF EXISTS "user_roles_tenant_admin_delete" ON public.user_roles;
 CREATE POLICY "user_roles_tenant_admin_delete"
   ON public.user_roles
   FOR DELETE
@@ -308,11 +321,13 @@ ALTER TABLE public.roles ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "Authenticated users can view role metadata" ON public.roles;
 DROP POLICY IF EXISTS "Admins can manage role metadata" ON public.roles;
 
+DROP POLICY IF EXISTS "tenant_admins_view_roles_metadata" ON public.roles;
 CREATE POLICY "tenant_admins_view_roles_metadata"
   ON public.roles
   FOR SELECT
   USING (public.has_role(auth.uid(), 'admin'::public.app_role));
 
+DROP POLICY IF EXISTS "admins_manage_roles_metadata" ON public.roles;
 CREATE POLICY "admins_manage_roles_metadata"
   ON public.roles
   FOR ALL
@@ -366,6 +381,7 @@ DROP POLICY IF EXISTS "Users can view their own audit logs" ON public.audit_logs
 DROP POLICY IF EXISTS "Authenticated users can insert own audit logs" ON public.audit_logs;
 DROP POLICY IF EXISTS "System can insert audit logs" ON public.audit_logs;
 
+DROP POLICY IF EXISTS "tenant_admins_read_audit_logs" ON public.audit_logs;
 CREATE POLICY "tenant_admins_read_audit_logs"
   ON public.audit_logs
   FOR SELECT
@@ -377,6 +393,7 @@ CREATE POLICY "tenant_admins_read_audit_logs"
     )
   );
 
+DROP POLICY IF EXISTS "system_write_only_audit_logs" ON public.audit_logs;
 -- Backend/service role writes logs; authenticated client writes are blocked.
 CREATE POLICY "system_write_only_audit_logs"
   ON public.audit_logs

@@ -59,6 +59,8 @@ interface ModelCard {
   category?: string;
 }
 
+const LOADING_SKELETON_IDS = ["mk-1", "mk-2", "mk-3", "mk-4", "mk-5", "mk-6", "mk-7", "mk-8"];
+
 function getModelVersion(modelId: string): string {
   const versionMap: Record<string, string> = {
     "quote-generation": "v2.1",
@@ -390,7 +392,7 @@ export default function Marketplace() {
   const getGroupLabel = (key: string) => {
     if (key.startsWith("insurance-")) {
       const segment = key.replace("insurance-", "");
-      return insuranceSegments[segment]?.label || segment;
+      return insuranceSegments[segment]?.label ?? segment;
     }
       return domainLabels[key] ?? key;
   };
@@ -398,9 +400,43 @@ export default function Marketplace() {
   const getGroupIcon = (key: string) => {
     if (key.startsWith("insurance-")) {
       const segment = key.replace("insurance-", "");
-      return insuranceSegments[segment]?.icon || Shield;
+      return insuranceSegments[segment]?.icon ?? Shield;
     }
-    return domainIcons[key] || Shield;
+    return domainIcons[key] ?? Shield;
+  };
+
+  const getModelCardClassName = (isActivated: boolean, isPending: boolean): string => {
+    if (isActivated) return "ring-2 ring-primary/50 shadow-elevated bg-card/90 border-primary/30";
+    if (isPending) return "ring-2 ring-amber-500/30 shadow-elevated bg-card/90 border-amber-500/20";
+    return "hover:border-primary/50 bg-card/80 border-border/50";
+  };
+
+  const getActivationButtonVariant = (
+    isActivated: boolean,
+    isPending: boolean,
+  ): "outline" | "secondary" | "default" => {
+    if (isActivated) return "outline";
+    if (isPending) return "secondary";
+    return "default";
+  };
+
+  const getActionButtonContent = (isActivated: boolean, isPending: boolean, actionBlockedByRole: boolean) => {
+    if (isActivated) {
+      return {
+        icon: <CheckCircle2 className="h-3.5 w-3.5 md:h-4 md:w-4 mr-1.5 md:mr-2" />,
+        label: "Activated",
+      };
+    }
+    if (isPending) {
+      return {
+        icon: <ClockIcon className="h-3.5 w-3.5 md:h-4 md:w-4 mr-1.5 md:mr-2" />,
+        label: "Request Pending",
+      };
+    }
+    return {
+      icon: <SendHorizontal className="h-3.5 w-3.5 md:h-4 md:w-4 mr-1.5 md:mr-2" />,
+      label: actionBlockedByRole ? "View Only" : "Request Activation",
+    };
   };
 
   const renderModelCard = (model: ModelCard, index: number) => {
@@ -409,18 +445,13 @@ export default function Marketplace() {
     const Icon = model.icon;
     const isActivated = activatedModelIds.has(model.id);
     const isPending = pendingRequestIds.has(model.id);
+    const actionButtonContent = getActionButtonContent(isActivated, isPending, actionBlockedByRole);
 
     return (
       <Card 
         key={model.id} 
         style={{ animationDelay: `${index * 50}ms` }}
-        className={`group relative overflow-hidden flex flex-col h-full min-h-[280px] md:min-h-[340px] transition-all duration-500 hover:shadow-premium hover:-translate-y-1 md:hover:-translate-y-2 animate-scale-in border backdrop-blur-sm touch-manipulation ${
-          isActivated 
-            ? "ring-2 ring-primary/50 shadow-elevated bg-card/90 border-primary/30" 
-            : isPending
-            ? "ring-2 ring-amber-500/30 shadow-elevated bg-card/90 border-amber-500/20"
-            : "hover:border-primary/50 bg-card/80 border-border/50"
-        }`}
+        className={`group relative overflow-hidden flex flex-col h-full min-h-[280px] md:min-h-[340px] transition-all duration-500 hover:shadow-premium hover:-translate-y-1 md:hover:-translate-y-2 animate-scale-in border backdrop-blur-sm touch-manipulation ${getModelCardClassName(isActivated, isPending)}`}
       >
         {/* Enhanced Background Gradient Effect */}
         <div className="absolute inset-0 bg-gradient-primary opacity-0 group-hover:opacity-5 transition-opacity duration-300 pointer-events-none" />
@@ -481,24 +512,10 @@ export default function Marketplace() {
             disabled={isActivated || isPending || loading || actionBlockedByRole}
             className="w-full font-semibold text-xs md:text-sm tracking-normal transition-all duration-500 h-10 md:h-11 group-hover:scale-105 touch-manipulation"
             size="default"
-            variant={isActivated ? "outline" : isPending ? "secondary" : "default"}
+            variant={getActivationButtonVariant(isActivated, isPending)}
           >
-            {isActivated ? (
-              <>
-                <CheckCircle2 className="h-3.5 w-3.5 md:h-4 md:w-4 mr-1.5 md:mr-2" />
-                Activated
-              </>
-            ) : isPending ? (
-              <>
-                <ClockIcon className="h-3.5 w-3.5 md:h-4 md:w-4 mr-1.5 md:mr-2" />
-                Request Pending
-              </>
-            ) : (
-              <>
-                <SendHorizontal className="h-3.5 w-3.5 md:h-4 md:w-4 mr-1.5 md:mr-2" />
-                {actionBlockedByRole ? "View Only" : "Request Activation"}
-              </>
-            )}
+            {actionButtonContent.icon}
+            {actionButtonContent.label}
           </Button>
         </CardContent>
       </Card>
@@ -605,8 +622,8 @@ export default function Marketplace() {
         <div className="space-y-6 md:space-y-12">
           {loading ? (
             <div className="grid gap-3 md:gap-5 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-              {Array.from({ length: 8 }).map((_, i) => (
-                <Skeleton key={i} className="h-[280px] md:h-[340px] w-full rounded-xl" />
+              {LOADING_SKELETON_IDS.map((id) => (
+                <Skeleton key={id} className="h-[280px] md:h-[340px] w-full rounded-xl" />
               ))}
             </div>
           ) : Object.entries(groupedModels).map(([key, models]) => (

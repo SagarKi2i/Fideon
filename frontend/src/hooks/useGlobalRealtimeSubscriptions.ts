@@ -52,15 +52,7 @@ function shouldEmitPodRequestEvent(payload: any, currentUserId: string, currentR
 }
 
 function shouldReceivePodRequestNotification(payload: any, currentUserId: string, currentRole: string | null): boolean {
-  const ownerId = payload?.new?.user_id || payload?.old?.user_id;
-  if (payload.eventType === "INSERT") {
-    return isAdminRole(currentRole);
-  }
-  const nextStatus = payload?.new?.status;
-  if (nextStatus === "approved" || nextStatus === "rejected") {
-    return ownerId === currentUserId;
-  }
-  return false;
+  return shouldEmitPodRequestEvent(payload, currentUserId, currentRole);
 }
 
 function shouldEmitDecisionReviewEvent(payload: any, currentUserId: string, currentRole: string | null): boolean {
@@ -79,15 +71,7 @@ function shouldEmitDecisionReviewEvent(payload: any, currentUserId: string, curr
 }
 
 function shouldReceiveDecisionReviewNotification(payload: any, currentUserId: string, currentRole: string | null): boolean {
-  const ownerId = payload?.new?.user_id || payload?.old?.user_id;
-  if (payload.eventType === "INSERT") {
-    return isAdminRole(currentRole);
-  }
-  const nextStatus = payload?.new?.status;
-  if (nextStatus === "approved" || nextStatus === "rejected") {
-    return ownerId === currentUserId;
-  }
-  return false;
+  return shouldEmitDecisionReviewEvent(payload, currentUserId, currentRole);
 }
 
 function getDecisionReviewMessage(eventType: string, payload: any, requesterLabel?: string): string {
@@ -109,6 +93,120 @@ function getDecisionReviewTargetPath(payload: any): string {
   return `/review-queue?tab=${tab}&reviewId=${encodeURIComponent(String(reviewId))}`;
 }
 
+type BacklogNotificationDetail = {
+  eventType: "INSERT" | "UPDATE";
+  table: "pod_activation_requests" | "decision_reviews";
+  payload: any;
+  message: string;
+  targetPath: string;
+};
+
+async function fetchRecentAdminBacklog(recentIso: string) {
+  return Promise.all([
+    supabase
+      .from("pod_activation_requests")
+      .select("id,user_id,model_name,status,requested_at")
+      .gte("requested_at", recentIso)
+      .order("requested_at", { ascending: false })
+      .limit(20),
+    supabase
+      .from("decision_reviews")
+      .select("id,user_id,title,status,created_at")
+      .gte("created_at", recentIso)
+      .order("created_at", { ascending: false })
+      .limit(20),
+  ]);
+}
+
+async function fetchRecentUserOutcomes(userId: string) {
+  return Promise.all([
+    supabase
+      .from("pod_activation_requests")
+      .select("id,user_id,model_name,status,reviewed_at")
+      .eq("user_id", userId)
+      .in("status", ["approved", "rejected"])
+      .order("reviewed_at", { ascending: false })
+      .limit(20),
+    supabase
+      .from("decision_reviews")
+      .select("id,user_id,title,status,reviewed_at")
+      .eq("user_id", userId)
+      .in("status", ["approved", "rejected"])
+      .order("reviewed_at", { ascending: false })
+      .limit(20),
+  ]);
+}
+
+async function buildAdminBacklogNotifications(
+  userId: string,
+  role: string | null,
+  resolveRequesterLabel: (userId: string | null | undefined) => Promise<string>
+): Promise<BacklogNotificationDetail[]> {
+  const recentIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const [{ data: recentPodRequests, error: podError }, { data: recentReviews, error: reviewError }] =
+    await fetchRecentAdminBacklog(recentIso);
+
+  const notifications: BacklogNotificationDetail[] = [];
+  if (!podError && Array.isArray(recentPodRequests)) {
+    for (const row of recentPodRequests) {
+      const requesterLabel = await resolveRequesterLabel(row.user_id);
+      const payload = { eventType: "INSERT", new: row, old: null };
+      notifications.push({
+        eventType: "INSERT",
+        table: "pod_activation_requests",
+        payload,
+        message: getPodRequestMessage("INSERT", payload, requesterLabel),
+        targetPath: getPodRequestTargetPath(payload, userId, role),
+      });
+    }
+  }
+  if (!reviewError && Array.isArray(recentReviews)) {
+    for (const row of recentReviews) {
+      const requesterLabel = await resolveRequesterLabel(row.user_id);
+      const payload = { eventType: "INSERT", new: row, old: null };
+      notifications.push({
+        eventType: "INSERT",
+        table: "decision_reviews",
+        payload,
+        message: getDecisionReviewMessage("INSERT", payload, requesterLabel),
+        targetPath: getDecisionReviewTargetPath(payload),
+      });
+    }
+  }
+  return notifications;
+}
+
+async function buildUserOutcomeNotifications(userId: string): Promise<BacklogNotificationDetail[]> {
+  const [{ data: myPodOutcomes, error: myPodError }, { data: myReviewOutcomes, error: myReviewError }] =
+    await fetchRecentUserOutcomes(userId);
+  const notifications: BacklogNotificationDetail[] = [];
+  if (!myPodError && Array.isArray(myPodOutcomes)) {
+    for (const row of myPodOutcomes) {
+      const payload = { eventType: "UPDATE", new: row, old: { status: "pending", user_id: userId } };
+      notifications.push({
+        eventType: "UPDATE",
+        table: "pod_activation_requests",
+        payload,
+        message: getPodRequestMessage("UPDATE", payload),
+        targetPath: getPodRequestTargetPath(payload, userId, null),
+      });
+    }
+  }
+  if (!myReviewError && Array.isArray(myReviewOutcomes)) {
+    for (const row of myReviewOutcomes) {
+      const payload = { eventType: "UPDATE", new: row, old: { status: "pending", user_id: userId } };
+      notifications.push({
+        eventType: "UPDATE",
+        table: "decision_reviews",
+        payload,
+        message: getDecisionReviewMessage("UPDATE", payload),
+        targetPath: getDecisionReviewTargetPath(payload),
+      });
+    }
+  }
+  return notifications;
+}
+
 export function useGlobalRealtimeSubscriptions() {
   const { toast } = useToast();
   const channelsRef = useRef<RealtimeChannel[]>([]);
@@ -116,6 +214,35 @@ export function useGlobalRealtimeSubscriptions() {
   const currentRoleRef = useRef<string | null>(null);
   const requesterLabelCacheRef = useRef<Record<string, string>>({});
   const realtimeEnabled = process.env.NEXT_PUBLIC_ENABLE_GLOBAL_REALTIME !== "false";
+
+  const persistNotification = useCallback(async (userId: string, detail: {
+    eventType: "INSERT" | "UPDATE" | "DELETE";
+    table: "pod_activation_requests" | "device_sync_logs" | "decision_reviews";
+    message: string;
+    targetPath?: string;
+    fingerprint: string;
+  }) => {
+    const dedupeSince = new Date(Date.now() - 20_000).toISOString();
+    const { data: existing } = await supabase
+      .from("user_notifications")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("source_fingerprint", detail.fingerprint)
+      .gte("created_at", dedupeSince)
+      .limit(1);
+    if (Array.isArray(existing) && existing.length > 0) return;
+
+    await supabase
+      .from("user_notifications")
+      .insert({
+        user_id: userId,
+        table_name: detail.table,
+        event_type: detail.eventType,
+        message: detail.message,
+        target_path: detail.targetPath ?? null,
+        source_fingerprint: detail.fingerprint,
+      });
+  }, []);
 
   const cleanupChannels = useCallback(() => {
     for (const channel of channelsRef.current) {
@@ -153,103 +280,15 @@ export function useGlobalRealtimeSubscriptions() {
 
   const syncNotificationBacklog = useCallback(async (userId: string, role: string | null) => {
     if (typeof window === "undefined") return;
-    const markerKey = `nb:notifications-backlog-synced:${userId}:${role || "none"}`;
+    const markerKey = `nb:notifications-backlog-synced:${userId}:${role ?? "none"}`;
     if (window.sessionStorage.getItem(markerKey) === "1") return;
 
     try {
-      if (isAdminRole(role)) {
-        const recentIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-        const [{ data: recentPodRequests, error: podError }, { data: recentReviews, error: reviewError }] =
-          await Promise.all([
-            supabase
-              .from("pod_activation_requests")
-              .select("id,user_id,model_name,status,requested_at")
-              .gte("requested_at", recentIso)
-              .order("requested_at", { ascending: false })
-              .limit(20),
-            supabase
-              .from("decision_reviews")
-              .select("id,user_id,title,status,created_at")
-              .gte("created_at", recentIso)
-              .order("created_at", { ascending: false })
-              .limit(20),
-          ]);
-
-        if (!podError && Array.isArray(recentPodRequests)) {
-          for (const row of recentPodRequests) {
-            const requesterLabel = await resolveRequesterLabel(row.user_id);
-            const payload = { eventType: "INSERT", new: row, old: null };
-            const detail = {
-              eventType: "INSERT" as const,
-              table: "pod_activation_requests" as const,
-              payload,
-              message: getPodRequestMessage("INSERT", payload, requesterLabel),
-              targetPath: getPodRequestTargetPath(payload, userId, role),
-            };
-            pushRealtimeNotification(detail);
-          }
-        }
-
-        if (!reviewError && Array.isArray(recentReviews)) {
-          for (const row of recentReviews) {
-            const requesterLabel = await resolveRequesterLabel(row.user_id);
-            const payload = { eventType: "INSERT", new: row, old: null };
-            const detail = {
-              eventType: "INSERT" as const,
-              table: "decision_reviews" as const,
-              payload,
-              message: getDecisionReviewMessage("INSERT", payload, requesterLabel),
-              targetPath: getDecisionReviewTargetPath(payload),
-            };
-            pushRealtimeNotification(detail);
-          }
-        }
-      } else {
-        const [{ data: myPodOutcomes, error: myPodError }, { data: myReviewOutcomes, error: myReviewError }] =
-          await Promise.all([
-            supabase
-              .from("pod_activation_requests")
-              .select("id,user_id,model_name,status,reviewed_at")
-              .eq("user_id", userId)
-              .in("status", ["approved", "rejected"])
-              .order("reviewed_at", { ascending: false })
-              .limit(20),
-            supabase
-              .from("decision_reviews")
-              .select("id,user_id,title,status,reviewed_at")
-              .eq("user_id", userId)
-              .in("status", ["approved", "rejected"])
-              .order("reviewed_at", { ascending: false })
-              .limit(20),
-          ]);
-
-        if (!myPodError && Array.isArray(myPodOutcomes)) {
-          for (const row of myPodOutcomes) {
-            const payload = { eventType: "UPDATE", new: row, old: { status: "pending", user_id: userId } };
-            const detail = {
-              eventType: "UPDATE" as const,
-              table: "pod_activation_requests" as const,
-              payload,
-              message: getPodRequestMessage("UPDATE", payload),
-              targetPath: getPodRequestTargetPath(payload, userId, role),
-            };
-            pushRealtimeNotification(detail);
-          }
-        }
-
-        if (!myReviewError && Array.isArray(myReviewOutcomes)) {
-          for (const row of myReviewOutcomes) {
-            const payload = { eventType: "UPDATE", new: row, old: { status: "pending", user_id: userId } };
-            const detail = {
-              eventType: "UPDATE" as const,
-              table: "decision_reviews" as const,
-              payload,
-              message: getDecisionReviewMessage("UPDATE", payload),
-              targetPath: getDecisionReviewTargetPath(payload),
-            };
-            pushRealtimeNotification(detail);
-          }
-        }
+      const backlogNotifications = isAdminRole(role)
+        ? await buildAdminBacklogNotifications(userId, role, resolveRequesterLabel)
+        : await buildUserOutcomeNotifications(userId);
+      for (const notification of backlogNotifications) {
+        pushRealtimeNotification(notification);
       }
     } finally {
       // Avoid duplicating backlog notifications on every refresh in the same session.
@@ -285,7 +324,7 @@ export function useGlobalRealtimeSubscriptions() {
       currentRoleRef.current = null;
     }
 
-    await syncNotificationBacklog(userId, currentRoleRef.current);
+    // Notifications are now persisted in DB per user, so we avoid synthetic backlog replay.
 
     const deviceChannel = supabase
       .channel("global-device-status-live")
@@ -333,7 +372,15 @@ export function useGlobalRealtimeSubscriptions() {
             targetPath: getPodRequestTargetPath(payload, uid, role),
           };
           emitNotificationRealtime(detail);
-          if (pushRealtimeNotification(detail)) {
+          const pushed = pushRealtimeNotification(detail);
+          if (pushed) {
+            void persistNotification(uid, {
+              eventType: detail.eventType,
+              table: detail.table,
+              message: detail.message,
+              targetPath: detail.targetPath,
+              fingerprint: pushed.fingerprint,
+            });
             toast({ title: "Notification", description: message });
           }
         },
@@ -359,7 +406,15 @@ export function useGlobalRealtimeSubscriptions() {
             targetPath: getDecisionReviewTargetPath(payload),
           };
           emitNotificationRealtime(detail);
-          if (pushRealtimeNotification(detail)) {
+          const pushed = pushRealtimeNotification(detail);
+          if (pushed) {
+            void persistNotification(uid, {
+              eventType: detail.eventType,
+              table: detail.table,
+              message: detail.message,
+              targetPath: detail.targetPath,
+              fingerprint: pushed.fingerprint,
+            });
             toast({ title: "Notification", description: message });
           }
         },
@@ -382,7 +437,15 @@ export function useGlobalRealtimeSubscriptions() {
             targetPath: "/devices",
           };
           emitNotificationRealtime(detail);
-          if (pushRealtimeNotification(detail)) {
+          const pushed = pushRealtimeNotification(detail);
+          if (pushed && currentUserIdRef.current) {
+            void persistNotification(currentUserIdRef.current, {
+              eventType: detail.eventType,
+              table: detail.table,
+              message: detail.message,
+              targetPath: detail.targetPath,
+              fingerprint: pushed.fingerprint,
+            });
             toast({ title: "Sync Alert", description: message, variant: "destructive" });
           }
         },
@@ -396,7 +459,7 @@ export function useGlobalRealtimeSubscriptions() {
       });
 
     channelsRef.current = [deviceChannel, notificationsChannel];
-  }, [cleanupChannels, resolveRequesterLabel, syncNotificationBacklog, toast]);
+  }, [cleanupChannels, persistNotification, resolveRequesterLabel, toast]);
 
   useEffect(() => {
     if (!realtimeEnabled) {

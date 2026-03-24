@@ -16,6 +16,7 @@ from app.core.supabase import (
 )
 
 router = APIRouter()
+USER_PROFILE_NOT_FOUND = "User profile not found"
 
 
 def _normalize_preferences(metadata: dict) -> dict:
@@ -53,7 +54,7 @@ async def get_profile(authorization: Optional[str] = Header(default=None)):
         f"select=user_id,email,full_name,metadata&user_id=eq.{quote(user_id, safe='')}&limit=1",
     )
     if not rows:
-        raise HTTPException(status_code=404, detail="User profile not found")
+        raise HTTPException(status_code=404, detail=USER_PROFILE_NOT_FOUND)
 
     profile = rows[0]
     metadata = profile.get("metadata") if isinstance(profile.get("metadata"), dict) else {}
@@ -91,7 +92,7 @@ async def update_profile(request: Request, authorization: Optional[str] = Header
         f"select=full_name,metadata&user_id=eq.{quote(user_id, safe='')}&limit=1",
     )
     if not rows:
-        raise HTTPException(status_code=404, detail="User profile not found")
+        raise HTTPException(status_code=404, detail=USER_PROFILE_NOT_FOUND)
 
     before = rows[0]
     metadata = before.get("metadata") if isinstance(before.get("metadata"), dict) else {}
@@ -146,7 +147,7 @@ async def mark_password_changed(request: Request, authorization: Optional[str] =
         f"select=metadata&user_id=eq.{quote(user_id, safe='')}&limit=1",
     )
     if not rows:
-        raise HTTPException(status_code=404, detail="User profile not found")
+        raise HTTPException(status_code=404, detail=USER_PROFILE_NOT_FOUND)
 
     existing_metadata = rows[0].get("metadata")
     if not isinstance(existing_metadata, dict):

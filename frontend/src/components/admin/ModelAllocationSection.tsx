@@ -4,6 +4,7 @@ import { apiUrl } from '@/lib/apiBaseUrl';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { useToast } from '@/hooks/use-toast';
@@ -33,6 +34,12 @@ const allModels = [
 ];
 
 export function ModelAllocationSection() {
+  const getAllocationDateText = (activatedAt: string | null) => {
+    if (!activatedAt) return '—';
+    const date = new Date(activatedAt);
+    if (!Number.isFinite(date.getTime())) return '—';
+    return date.toLocaleDateString();
+  };
   const { toast } = useToast();
   const [users, setUsers] = useState<UserInfo[]>([]);
   const [selectedUserId, setSelectedUserId] = useState<string>('');
@@ -226,9 +233,9 @@ export function ModelAllocationSection() {
         {/* User Selector */}
         <div className="flex flex-col sm:flex-row gap-4">
           <div className="flex-1">
-            <label className="text-sm font-medium mb-2 block">Select User</label>
+            <Label htmlFor="allocation-user-select" className="text-sm font-medium mb-2 block">Select User</Label>
             <Select value={selectedUserId} onValueChange={setSelectedUserId}>
-              <SelectTrigger>
+              <SelectTrigger id="allocation-user-select">
                 <SelectValue placeholder={loadingUsers ? "Loading users..." : "Choose a user"} />
               </SelectTrigger>
               <SelectContent>
@@ -246,10 +253,10 @@ export function ModelAllocationSection() {
 
           {selectedUserId && (
             <div className="flex-1">
-              <label className="text-sm font-medium mb-2 block">Allocate Model</label>
+              <Label htmlFor="allocation-model-select" className="text-sm font-medium mb-2 block">Allocate Model</Label>
               <div className="flex gap-2">
                 <Select value={selectedModelId} onValueChange={setSelectedModelId}>
-                  <SelectTrigger className="flex-1">
+                  <SelectTrigger id="allocation-model-select" className="flex-1">
                     <SelectValue placeholder="Choose a model" />
                   </SelectTrigger>
                   <SelectContent>
@@ -310,7 +317,7 @@ export function ModelAllocationSection() {
                         <Badge variant="outline">{model.domain}</Badge>
                       </TableCell>
                       <TableCell className="text-muted-foreground text-sm">
-                        {new Date(model.activated_at || '').toLocaleDateString()}
+                        {getAllocationDateText(model.activated_at)}
                       </TableCell>
                       <TableCell className="text-right">
                         <Button

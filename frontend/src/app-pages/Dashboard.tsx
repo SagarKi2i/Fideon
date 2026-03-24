@@ -81,6 +81,51 @@ const getTimeGreeting = () => {
   return "Good Evening";
 };
 
+const getPodSummaryText = (podCount: number): string =>
+  podCount > 0
+    ? `You have ${podCount} active pod${podCount > 1 ? "s" : ""} running`
+    : "Get started by activating AI pods from the marketplace";
+
+const getSystemsStatusText = (successRate: number | null): string => {
+  if (successRate === null) return "No run data yet";
+  if (successRate >= 99) return "All systems operational";
+  if (successRate >= 95) return "Stable performance";
+  return "Performance degraded";
+};
+
+const getSuccessPerformanceText = (successRate: number | null): string => {
+  if (successRate === null) return "No run data yet";
+  if (successRate >= 99) return "Excellent performance";
+  if (successRate >= 95) return "Good performance";
+  return "Needs attention";
+};
+
+const getSignedPercentText = (value: number | null, suffix: string): string =>
+  value === null ? suffix : `${getSignedPrefix(value)}${value.toFixed(1)}${suffix}`;
+
+const getResponseImprovementText = (value: number | null): string =>
+  value === null
+    ? "No baseline yet"
+    : `${getInvertedSignedPrefix(value)}${Math.abs(value).toFixed(1)}% vs last month`;
+
+const getSignedPrefix = (value: number): string => {
+  if (value >= 0) return "+";
+  return "";
+};
+
+const getInvertedSignedPrefix = (value: number): string => {
+  if (value >= 0) return "-";
+  return "+";
+};
+
+const calculateQueryTrend = (currentMonthQueries: number, previousMonthQueries: number): number => {
+  if (previousMonthQueries > 0) {
+    return ((currentMonthQueries - previousMonthQueries) / previousMonthQueries) * 100;
+  }
+  if (currentMonthQueries > 0) return 100;
+  return 0;
+};
+
 export default function Dashboard() {
   const navigate = useNavigate();
   const [pods, setPods] = useState<ActivatedPod[]>([]);
@@ -167,13 +212,7 @@ export default function Dashboard() {
       setPodQueryCounts(queryCountByModel);
       setPodLastActivity(lastActivityByModel);
       setTotalQueries(conversationQueryTotal);
-      if (previousMonthQueries > 0) {
-        setQueryTrendPct(((currentMonthQueries - previousMonthQueries) / previousMonthQueries) * 100);
-      } else if (currentMonthQueries > 0) {
-        setQueryTrendPct(100);
-      } else {
-        setQueryTrendPct(0);
-      }
+      setQueryTrendPct(calculateQueryTrend(currentMonthQueries, previousMonthQueries));
 
       const { data: runs } = await supabase
         .from("workflow_runs")
@@ -331,10 +370,7 @@ export default function Dashboard() {
                 {getTimeGreeting()}, {displayName}
               </h1>
               <p className="text-muted-foreground mt-1 md:mt-2 text-sm md:text-lg">
-                {pods.length > 0 
-                  ? `You have ${pods.length} active pod${pods.length > 1 ? 's' : ''} running`
-                  : 'Get started by activating AI pods from the marketplace'
-                }
+                {getPodSummaryText(pods.length)}
               </p>
             </div>
             {pods.length === 0 && (
@@ -382,13 +418,7 @@ export default function Dashboard() {
                 <CardContent className="p-3 md:p-6 pt-0">
                   <div className="text-2xl md:text-3xl font-bold text-foreground">{pods.length}</div>
                   <p className="text-xs text-primary mt-1">
-                    {avgSuccessRate === null
-                      ? "No run data yet"
-                      : avgSuccessRate >= 99
-                        ? "All systems operational"
-                        : avgSuccessRate >= 95
-                          ? "Stable performance"
-                          : "Performance degraded"}
+                    {getSystemsStatusText(avgSuccessRate)}
                   </p>
                 </CardContent>
               </Card>
@@ -404,9 +434,7 @@ export default function Dashboard() {
                 <CardContent className="p-3 md:p-6 pt-0">
                   <div className="text-2xl md:text-3xl font-bold text-foreground">{totalQueries.toLocaleString()}</div>
                   <p className="text-xs text-primary mt-1">
-                    {queryTrendPct === null
-                      ? "No trend data yet"
-                      : `${queryTrendPct >= 0 ? "+" : ""}${queryTrendPct.toFixed(1)}% vs last month`}
+                    {getSignedPercentText(queryTrendPct, "% vs last month")}
                   </p>
                 </CardContent>
               </Card>
@@ -424,13 +452,7 @@ export default function Dashboard() {
                     {avgSuccessRate === null ? "--" : `${avgSuccessRate.toFixed(1)}%`}
                   </div>
                   <p className="text-xs text-primary mt-1">
-                    {avgSuccessRate === null
-                      ? "No run data yet"
-                      : avgSuccessRate >= 99
-                        ? "Excellent performance"
-                        : avgSuccessRate >= 95
-                          ? "Good performance"
-                          : "Needs attention"}
+                    {getSuccessPerformanceText(avgSuccessRate)}
                   </p>
                 </CardContent>
               </Card>
@@ -448,9 +470,7 @@ export default function Dashboard() {
                     {avgResponseSeconds === null ? "--" : `${avgResponseSeconds.toFixed(1)}s`}
                   </div>
                   <p className="text-xs text-primary mt-1">
-                    {responseImprovementPct === null
-                      ? "No baseline yet"
-                      : `${responseImprovementPct >= 0 ? "-" : "+"}${Math.abs(responseImprovementPct).toFixed(1)}% vs last month`}
+                    {getResponseImprovementText(responseImprovementPct)}
                   </p>
                 </CardContent>
               </Card>

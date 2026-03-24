@@ -6,6 +6,7 @@
 DROP POLICY IF EXISTS "Admins can view all app users" ON public.app_users;
 DROP POLICY IF EXISTS "Admins can manage app users" ON public.app_users;
 
+DROP POLICY IF EXISTS "Admins can view app users in own tenant" ON public.app_users;
 CREATE POLICY "Admins can view app users in own tenant"
   ON public.app_users
   FOR SELECT
@@ -20,6 +21,7 @@ CREATE POLICY "Admins can view app users in own tenant"
     )
   );
 
+DROP POLICY IF EXISTS "Admins can manage app users in own tenant" ON public.app_users;
 CREATE POLICY "Admins can manage app users in own tenant"
   ON public.app_users
   FOR ALL
@@ -44,6 +46,7 @@ CREATE POLICY "Admins can manage app users in own tenant"
     )
   );
 
+DROP POLICY IF EXISTS "Global admins can manage all app users" ON public.app_users;
 CREATE POLICY "Global admins can manage all app users"
   ON public.app_users
   FOR ALL
@@ -53,6 +56,7 @@ CREATE POLICY "Global admins can manage all app users"
 -- tenants: global_admin can manage all; admin can only manage own tenant row
 DROP POLICY IF EXISTS "Admins can manage all tenants" ON public.tenants;
 
+DROP POLICY IF EXISTS "Admins can manage own tenant" ON public.tenants;
 CREATE POLICY "Admins can manage own tenant"
   ON public.tenants
   FOR ALL
@@ -75,6 +79,7 @@ CREATE POLICY "Admins can manage own tenant"
     )
   );
 
+DROP POLICY IF EXISTS "Global admins can manage all tenants" ON public.tenants;
 CREATE POLICY "Global admins can manage all tenants"
   ON public.tenants
   FOR ALL
@@ -87,6 +92,7 @@ DROP POLICY IF EXISTS "Admins can insert user roles" ON public.user_roles;
 DROP POLICY IF EXISTS "Admins can update user roles" ON public.user_roles;
 DROP POLICY IF EXISTS "Admins can delete user roles" ON public.user_roles;
 
+DROP POLICY IF EXISTS "Admins can view user roles in own tenant" ON public.user_roles;
 CREATE POLICY "Admins can view user roles in own tenant"
   ON public.user_roles
   FOR SELECT
@@ -102,6 +108,7 @@ CREATE POLICY "Admins can view user roles in own tenant"
     )
   );
 
+DROP POLICY IF EXISTS "Admins can insert user roles in own tenant" ON public.user_roles;
 CREATE POLICY "Admins can insert user roles in own tenant"
   ON public.user_roles
   FOR INSERT
@@ -117,6 +124,7 @@ CREATE POLICY "Admins can insert user roles in own tenant"
     )
   );
 
+DROP POLICY IF EXISTS "Admins can update user roles in own tenant" ON public.user_roles;
 CREATE POLICY "Admins can update user roles in own tenant"
   ON public.user_roles
   FOR UPDATE
@@ -143,6 +151,7 @@ CREATE POLICY "Admins can update user roles in own tenant"
     )
   );
 
+DROP POLICY IF EXISTS "Admins can delete user roles in own tenant" ON public.user_roles;
 CREATE POLICY "Admins can delete user roles in own tenant"
   ON public.user_roles
   FOR DELETE
@@ -158,6 +167,7 @@ CREATE POLICY "Admins can delete user roles in own tenant"
     )
   );
 
+DROP POLICY IF EXISTS "Global admins can manage all user roles" ON public.user_roles;
 CREATE POLICY "Global admins can manage all user roles"
   ON public.user_roles
   FOR ALL
@@ -170,6 +180,7 @@ DROP POLICY IF EXISTS "Admins can insert devices" ON public.devices;
 DROP POLICY IF EXISTS "Admins can update devices" ON public.devices;
 DROP POLICY IF EXISTS "Admins can delete devices" ON public.devices;
 
+DROP POLICY IF EXISTS "Admins can view devices in own tenant" ON public.devices;
 CREATE POLICY "Admins can view devices in own tenant"
   ON public.devices
   FOR SELECT
@@ -185,6 +196,7 @@ CREATE POLICY "Admins can view devices in own tenant"
     )
   );
 
+DROP POLICY IF EXISTS "Admins can insert devices in own tenant" ON public.devices;
 CREATE POLICY "Admins can insert devices in own tenant"
   ON public.devices
   FOR INSERT
@@ -200,6 +212,7 @@ CREATE POLICY "Admins can insert devices in own tenant"
     )
   );
 
+DROP POLICY IF EXISTS "Admins can update devices in own tenant" ON public.devices;
 CREATE POLICY "Admins can update devices in own tenant"
   ON public.devices
   FOR UPDATE
@@ -226,6 +239,7 @@ CREATE POLICY "Admins can update devices in own tenant"
     )
   );
 
+DROP POLICY IF EXISTS "Admins can delete devices in own tenant" ON public.devices;
 CREATE POLICY "Admins can delete devices in own tenant"
   ON public.devices
   FOR DELETE
@@ -241,6 +255,7 @@ CREATE POLICY "Admins can delete devices in own tenant"
     )
   );
 
+DROP POLICY IF EXISTS "Global admins can manage all devices" ON public.devices;
 CREATE POLICY "Global admins can manage all devices"
   ON public.devices
   FOR ALL

@@ -15,7 +15,7 @@ type FormFieldContextValue<
   name: TName;
 };
 
-const FormFieldContext = React.createContext<FormFieldContextValue>({} as FormFieldContextValue);
+const FormFieldContext = React.createContext<FormFieldContextValue | null>(null);
 
 const FormField = <
   TFieldValues extends FieldValues = FieldValues,
@@ -23,8 +23,9 @@ const FormField = <
 >({
   ...props
 }: ControllerProps<TFieldValues, TName>) => {
+  const contextValue = React.useMemo<FormFieldContextValue>(() => ({ name: props.name }), [props.name]);
   return (
-    <FormFieldContext.Provider value={{ name: props.name }}>
+    <FormFieldContext.Provider value={contextValue}>
       <Controller {...props} />
     </FormFieldContext.Provider>
   );
@@ -35,12 +36,10 @@ const useFormField = () => {
   const itemContext = React.useContext(FormItemContext);
   const { getFieldState, formState } = useFormContext();
 
-  const fieldState = getFieldState(fieldContext.name, formState);
-
-  if (!fieldContext) {
+  if (!fieldContext || !itemContext) {
     throw new Error("useFormField should be used within <FormField>");
   }
-
+  const fieldState = getFieldState(fieldContext.name, formState);
   const { id } = itemContext;
 
   return {
@@ -57,14 +56,15 @@ type FormItemContextValue = {
   id: string;
 };
 
-const FormItemContext = React.createContext<FormItemContextValue>({} as FormItemContextValue);
+const FormItemContext = React.createContext<FormItemContextValue | null>(null);
 
 const FormItem = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
   ({ className, ...props }, ref) => {
     const id = React.useId();
+    const contextValue = React.useMemo<FormItemContextValue>(() => ({ id }), [id]);
 
     return (
-      <FormItemContext.Provider value={{ id }}>
+      <FormItemContext.Provider value={contextValue}>
         <div ref={ref} className={cn("space-y-2", className)} {...props} />
       </FormItemContext.Provider>
     );

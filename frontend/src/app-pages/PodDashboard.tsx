@@ -149,7 +149,53 @@ const getPodStats = (modelId: string) => {
   }
 };
 
-function PodSpecificTable({ modelId }: { modelId: string }) {
+function PodSpecificTable({ modelId }: Readonly<{ modelId: string }>) {
+  const statusClassForDocRetrieval = (status: string): string => {
+    if (status === "success") return "text-green-600 border-green-600";
+    if (status === "warning") return "text-amber-600 border-amber-600";
+    return "text-destructive border-destructive";
+  };
+
+  const statusClassForQuote = (status: string): string =>
+    status === "completed" ? "text-green-600 border-green-600" : "text-amber-600 border-amber-600";
+
+  const statusClassForClaims = (status: string): string => {
+    if (status === "completed") return "text-green-600 border-green-600";
+    if (status === "submitted") return "text-blue-600 border-blue-600";
+    return "text-amber-600 border-amber-600";
+  };
+
+  const appetiteClass = (score: number): string => {
+    if (score >= 80) return "bg-green-500";
+    if (score >= 60) return "bg-amber-500";
+    return "bg-red-500";
+  };
+
+  const appetiteTextClass = (score: number): string => {
+    if (score >= 80) return "text-green-600";
+    if (score >= 60) return "text-amber-600";
+    return "text-red-600";
+  };
+
+  const submissionStatusClass = (status: string): string => {
+    if (status === "quoted") return "text-green-600 border-green-600";
+    if (status === "assigned") return "text-blue-600 border-blue-600";
+    if (status === "triaged") return "text-amber-600 border-amber-600";
+    return "text-destructive border-destructive";
+  };
+
+  const fraudBadgeClass = (score: string): string => {
+    if (score === "Low") return "text-green-600 border-green-600 bg-green-500/10";
+    if (score === "Medium") return "text-amber-600 border-amber-600 bg-amber-500/10";
+    return "text-red-600 border-red-600 bg-red-500/10";
+  };
+
+  const adjudicationStatusClass = (status: string): string => {
+    if (status === "paid") return "text-green-600 border-green-600";
+    if (status === "approved") return "text-blue-600 border-blue-600";
+    return "text-amber-600 border-amber-600";
+  };
+
   switch (modelId) {
     case "document-retrieval":
     case "document-search":
@@ -166,8 +212,8 @@ function PodSpecificTable({ modelId }: { modelId: string }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {documentRetrievalLogs.map((log, i) => (
-              <TableRow key={i}>
+            {documentRetrievalLogs.map((log) => (
+              <TableRow key={`${log.date}-${log.carrier}-${log.documents}`}>
                 <TableCell className="font-medium">{log.date}</TableCell>
                 <TableCell>
                   <div className="flex items-center gap-2">
@@ -184,11 +230,7 @@ function PodSpecificTable({ modelId }: { modelId: string }) {
                 </TableCell>
                 <TableCell>{log.errors}</TableCell>
                 <TableCell>
-                  <Badge variant="outline" className={
-                    log.status === "success" ? "text-green-600 border-green-600" :
-                    log.status === "warning" ? "text-amber-600 border-amber-600" :
-                    "text-destructive border-destructive"
-                  }>
+                  <Badge variant="outline" className={statusClassForDocRetrieval(log.status)}>
                     {log.status === "success" && <CheckCircle2 className="h-3 w-3 mr-1" />}
                     {log.status === "warning" && <AlertCircle className="h-3 w-3 mr-1" />}
                     {log.status === "error" && <XCircle className="h-3 w-3 mr-1" />}
@@ -214,8 +256,8 @@ function PodSpecificTable({ modelId }: { modelId: string }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {quoteGenerationLogs.map((log, i) => (
-              <TableRow key={i}>
+            {quoteGenerationLogs.map((log) => (
+              <TableRow key={`${log.date}-${log.type}-${log.carrier}`}>
                 <TableCell className="font-medium">{log.date}</TableCell>
                 <TableCell>{log.type}</TableCell>
                 <TableCell>
@@ -226,10 +268,7 @@ function PodSpecificTable({ modelId }: { modelId: string }) {
                 </TableCell>
                 <TableCell className="font-semibold">{log.premium}</TableCell>
                 <TableCell>
-                  <Badge variant="outline" className={
-                    log.status === "completed" ? "text-green-600 border-green-600" :
-                    "text-amber-600 border-amber-600"
-                  }>
+                  <Badge variant="outline" className={statusClassForQuote(log.status)}>
                     {log.status === "completed" && <CheckCircle2 className="h-3 w-3 mr-1" />}
                     {log.status === "pending" && <Clock className="h-3 w-3 mr-1" />}
                     {log.status}
@@ -254,8 +293,8 @@ function PodSpecificTable({ modelId }: { modelId: string }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {policyComparisonLogs.map((log, i) => (
-              <TableRow key={i}>
+            {policyComparisonLogs.map((log) => (
+              <TableRow key={`${log.date}-${log.policies}`}>
                 <TableCell className="font-medium">{log.date}</TableCell>
                 <TableCell>
                   <div className="flex items-center gap-2">
@@ -287,8 +326,8 @@ function PodSpecificTable({ modelId }: { modelId: string }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {claimsFnolLogs.map((log, i) => (
-              <TableRow key={i}>
+            {claimsFnolLogs.map((log) => (
+              <TableRow key={`${log.date}-${log.claimId}`}>
                 <TableCell className="font-medium">{log.date}</TableCell>
                 <TableCell>
                   <code className="bg-muted px-2 py-1 rounded text-sm">{log.claimId}</code>
@@ -301,11 +340,7 @@ function PodSpecificTable({ modelId }: { modelId: string }) {
                   </div>
                 </TableCell>
                 <TableCell>
-                  <Badge variant="outline" className={
-                    log.status === "completed" ? "text-green-600 border-green-600" :
-                    log.status === "submitted" ? "text-blue-600 border-blue-600" :
-                    "text-amber-600 border-amber-600"
-                  }>
+                  <Badge variant="outline" className={statusClassForClaims(log.status)}>
                     {log.status}
                   </Badge>
                 </TableCell>
@@ -328,8 +363,8 @@ function PodSpecificTable({ modelId }: { modelId: string }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {multiDocumentLogs.map((log, i) => (
-              <TableRow key={i}>
+            {multiDocumentLogs.map((log) => (
+              <TableRow key={`${log.date}-${log.analysis}`}>
                 <TableCell className="font-medium">{log.date}</TableCell>
                 <TableCell>
                   <div className="flex items-center gap-2">
@@ -368,8 +403,8 @@ function PodSpecificTable({ modelId }: { modelId: string }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {submissionIntakeLogs.map((log, i) => (
-              <TableRow key={i}>
+            {submissionIntakeLogs.map((log) => (
+              <TableRow key={`${log.date}-${log.submissionId}`}>
                 <TableCell className="font-medium">{log.date}</TableCell>
                 <TableCell>
                   <code className="bg-muted px-2 py-1 rounded text-sm">{log.submissionId}</code>
@@ -383,14 +418,8 @@ function PodSpecificTable({ modelId }: { modelId: string }) {
                 <TableCell>{log.lob}</TableCell>
                 <TableCell>
                   <div className="flex items-center gap-2">
-                    <div className={`w-2 h-2 rounded-full ${
-                      log.appetiteMatch >= 80 ? "bg-green-500" :
-                      log.appetiteMatch >= 60 ? "bg-amber-500" : "bg-red-500"
-                    }`} />
-                    <span className={
-                      log.appetiteMatch >= 80 ? "text-green-600" :
-                      log.appetiteMatch >= 60 ? "text-amber-600" : "text-red-600"
-                    }>{log.appetiteMatch}%</span>
+                    <div className={`w-2 h-2 rounded-full ${appetiteClass(log.appetiteMatch)}`} />
+                    <span className={appetiteTextClass(log.appetiteMatch)}>{log.appetiteMatch}%</span>
                   </div>
                 </TableCell>
                 <TableCell>
@@ -404,12 +433,7 @@ function PodSpecificTable({ modelId }: { modelId: string }) {
                   )}
                 </TableCell>
                 <TableCell>
-                  <Badge variant="outline" className={
-                    log.status === "quoted" ? "text-green-600 border-green-600" :
-                    log.status === "assigned" ? "text-blue-600 border-blue-600" :
-                    log.status === "triaged" ? "text-amber-600 border-amber-600" :
-                    "text-destructive border-destructive"
-                  }>
+                  <Badge variant="outline" className={submissionStatusClass(log.status)}>
                     {log.status === "quoted" && <CheckCircle2 className="h-3 w-3 mr-1" />}
                     {log.status === "declined" && <XCircle className="h-3 w-3 mr-1" />}
                     {log.status}
@@ -436,8 +460,8 @@ function PodSpecificTable({ modelId }: { modelId: string }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {claimsAdjudicationLogs.map((log, i) => (
-              <TableRow key={i}>
+            {claimsAdjudicationLogs.map((log) => (
+              <TableRow key={`${log.date}-${log.claimId}`}>
                 <TableCell className="font-medium">{log.date}</TableCell>
                 <TableCell>
                   <code className="bg-muted px-2 py-1 rounded text-sm">{log.claimId}</code>
@@ -456,21 +480,13 @@ function PodSpecificTable({ modelId }: { modelId: string }) {
                   </div>
                 </TableCell>
                 <TableCell>
-                  <Badge variant="outline" className={
-                    log.fraudScore === "Low" ? "text-green-600 border-green-600 bg-green-500/10" :
-                    log.fraudScore === "Medium" ? "text-amber-600 border-amber-600 bg-amber-500/10" :
-                    "text-red-600 border-red-600 bg-red-500/10"
-                  }>
+                  <Badge variant="outline" className={fraudBadgeClass(log.fraudScore)}>
                     {log.fraudScore === "High" && <AlertTriangle className="h-3 w-3 mr-1" />}
                     {log.fraudScore}
                   </Badge>
                 </TableCell>
                 <TableCell>
-                  <Badge variant="outline" className={
-                    log.status === "paid" ? "text-green-600 border-green-600" :
-                    log.status === "approved" ? "text-blue-600 border-blue-600" :
-                    "text-amber-600 border-amber-600"
-                  }>
+                  <Badge variant="outline" className={adjudicationStatusClass(log.status)}>
                     {log.status === "paid" && <CheckCircle2 className="h-3 w-3 mr-1" />}
                     {log.status}
                   </Badge>

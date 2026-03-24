@@ -101,6 +101,30 @@ const STAT_CARDS_TEMPLATE: Record<string, {
   },
 };
 
+const LOADING_SKELETON_IDS = [
+  "stats-1", "stats-2", "stats-3", "stats-4",
+  "stats-5", "stats-6", "stats-7", "stats-8",
+];
+
+function getUsageTrendText(usageToday: number, usageYesterday: number): string {
+  if (usageYesterday > 0) {
+    return `${Math.round(((usageToday - usageYesterday) / usageYesterday) * 100)}% vs yesterday`;
+  }
+  if (usageToday > 0) return "Active today";
+  return "No usage yet";
+}
+
+function getSystemHealthText(syncFailures: number, onlineDevices: number): string {
+  if (syncFailures > 0) return "Sync failures detected";
+  if (onlineDevices > 0) return "Healthy and online";
+  return "No online devices";
+}
+
+function toPercent(value: number, total: number): number {
+  if (total <= 0) return 0;
+  return (value / total) * 100;
+}
+
 export default function AdminDashboard() {
   const { isAdmin } = useUserRole();
   const [isLoading, setIsLoading] = useState(true);
@@ -165,21 +189,13 @@ export default function AdminDashboard() {
       const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
       const usageToday = usageTodayCount ?? 0;
       const usageYesterday = usageYesterdayCount ?? 0;
-      const usageTrend = usageYesterday > 0
-        ? `${Math.round(((usageToday - usageYesterday) / usageYesterday) * 100)}% vs yesterday`
-        : usageToday > 0
-          ? "Active today"
-          : "No usage yet";
-      const systemHealthText =
-        (syncLogs?.length ?? 0) > 0
-          ? "Sync failures detected"
-          : ((devices?.filter(d => d.status === 'online').length ?? 0) > 0
-            ? "Healthy and online"
-            : "No online devices");
+      const onlineDevices = devices?.filter(d => d.status === 'online').length ?? 0;
+      const usageTrend = getUsageTrendText(usageToday, usageYesterday);
+      const systemHealthText = getSystemHealthText(syncLogs?.length ?? 0, onlineDevices);
 
       setStats({
         totalDevices: devices?.length ?? 0,
-        onlineDevices: devices?.filter(d => d.status === 'online').length ?? 0,
+        onlineDevices,
         offlineDevices: devices?.filter(d => d.status === 'offline').length ?? 0,
         pendingApprovals: pendingPodRequestsCount ?? 0,
         expiringSoon: licenses?.filter(l => l.expires_at && new Date(l.expires_at) <= thirtyDaysFromNow).length ?? 0,
@@ -298,8 +314,8 @@ export default function AdminDashboard() {
         <Skeleton className="h-10 w-72" />
         <Skeleton className="h-5 w-96" />
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          {Array.from({ length: 8 }).map((_, i) => (
-            <Skeleton key={i} className="h-36 w-full" />
+          {LOADING_SKELETON_IDS.map((id) => (
+            <Skeleton key={id} className="h-36 w-full" />
           ))}
         </div>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -370,18 +386,11 @@ export default function AdminDashboard() {
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm font-medium">Online</span>
                   <span className="text-sm text-muted-foreground">
-                    {stats.totalDevices > 0
-                      ? Math.round((stats.onlineDevices / stats.totalDevices) * 100)
-                      : 0}
-                    %
+                    {Math.round(toPercent(stats.onlineDevices, stats.totalDevices))}%
                   </span>
                 </div>
                 <Progress
-                  value={
-                    stats.totalDevices > 0
-                      ? (stats.onlineDevices / stats.totalDevices) * 100
-                      : 0
-                  }
+                  value={toPercent(stats.onlineDevices, stats.totalDevices)}
                   className="h-2"
                 />
               </div>
@@ -389,18 +398,11 @@ export default function AdminDashboard() {
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm font-medium">Offline</span>
                   <span className="text-sm text-muted-foreground">
-                    {stats.totalDevices > 0
-                      ? Math.round((stats.offlineDevices / stats.totalDevices) * 100)
-                      : 0}
-                    %
+                    {Math.round(toPercent(stats.offlineDevices, stats.totalDevices))}%
                   </span>
                 </div>
                 <Progress
-                  value={
-                    stats.totalDevices > 0
-                      ? (stats.offlineDevices / stats.totalDevices) * 100
-                      : 0
-                  }
+                  value={toPercent(stats.offlineDevices, stats.totalDevices)}
                   className="h-2"
                 />
               </div>
@@ -469,25 +471,25 @@ export default function AdminDashboard() {
             <CardDescription>Live status for QR link sessions</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
-            {!pairingDbReady ? (
+            {!pairingDbReady && (
               <div className="text-sm text-muted-foreground">
                 `device_pairings` table not found yet. Apply latest Supabase migrations to enable this view.
               </div>
-            ) : pairings.length === 0 ? (
-              <div className="text-sm text-muted-foreground">No pairing sessions yet.</div>
-            ) : (
-              pairings.map((p) => (
-                <div key={p.id} className="rounded-lg border border-border/60 p-3 flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium truncate">{p.primary_device_label ?? 'Primary session'}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {new Date(p.created_at).toLocaleString()} - expires {new Date(p.expires_at).toLocaleTimeString()}
-                    </p>
-                  </div>
-                  <Badge variant={p.status === 'confirmed' ? 'default' : 'outline'}>{p.status}</Badge>
-                </div>
-              ))
             )}
+            {pairingDbReady && pairings.length === 0 && (
+              <div className="text-sm text-muted-foreground">No pairing sessions yet.</div>
+            )}
+            {pairingDbReady && pairings.length > 0 && pairings.map((p) => (
+              <div key={p.id} className="rounded-lg border border-border/60 p-3 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium truncate">{p.primary_device_label ?? 'Primary session'}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {new Date(p.created_at).toLocaleString()} - expires {new Date(p.expires_at).toLocaleTimeString()}
+                  </p>
+                </div>
+                <Badge variant={p.status === 'confirmed' ? 'default' : 'outline'}>{p.status}</Badge>
+              </div>
+            ))}
           </CardContent>
         </Card>
 

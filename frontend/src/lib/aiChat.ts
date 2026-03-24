@@ -12,6 +12,62 @@ interface StreamChatParams {
   onError?: (error: string) => void;
 }
 
+function parseSseDelta(jsonStr: string): string | null {
+  try {
+    const parsed = JSON.parse(jsonStr);
+    return (parsed.choices?.[0]?.delta?.content as string | undefined) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeSseLine(line: string): string | null {
+  const normalizedLine = line.endsWith("\r") ? line.slice(0, -1) : line;
+  if (normalizedLine.startsWith(":") || normalizedLine.trim() === "") return null;
+  if (!normalizedLine.startsWith("data: ")) return null;
+  return normalizedLine.slice(6).trim();
+}
+
+function flushBuffer(buffer: string, onDelta: (deltaText: string) => void): void {
+  if (!buffer.trim()) return;
+  const lines = buffer.split("\n");
+  for (const rawLine of lines) {
+    const jsonStr = normalizeSseLine(rawLine);
+    if (!jsonStr || jsonStr === "[DONE]") continue;
+    const content = parseSseDelta(jsonStr);
+    if (content) onDelta(content);
+  }
+}
+
+function processChunkBuffer(
+  textBuffer: string,
+  onDelta: (deltaText: string) => void
+): { textBuffer: string; streamDone: boolean } {
+  let buffer = textBuffer;
+  let streamDone = false;
+
+  let newlineIndex: number;
+  while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
+    const rawLine = buffer.slice(0, newlineIndex);
+    buffer = buffer.slice(newlineIndex + 1);
+    const jsonStr = normalizeSseLine(rawLine);
+    if (!jsonStr) continue;
+    if (jsonStr === "[DONE]") {
+      streamDone = true;
+      break;
+    }
+
+    const content = parseSseDelta(jsonStr);
+    if (content === null) {
+      buffer = `${rawLine}\n${buffer}`;
+      break;
+    }
+    onDelta(content);
+  }
+
+  return { textBuffer: buffer, streamDone };
+}
+
 export async function streamChat({
   messages,
   conversationId,
@@ -26,7 +82,7 @@ export async function streamChat({
       throw notAuthenticatedError();
     }
 
-    const configuredApiUrl = (process.env.NEXT_PUBLIC_API_URL || "").trim();
+    const configuredApiUrl = (process.env.NEXT_PUBLIC_API_URL ?? "").trim();
     const vmHostApiUrl =
       typeof window !== "undefined"
         ? `${window.location.protocol}//${window.location.hostname}:8080`
@@ -87,51 +143,14 @@ export async function streamChat({
     while (!streamDone) {
       const { done, value } = await reader.read();
       if (done) break;
-      
+
       textBuffer += decoder.decode(value, { stream: true });
-
-      let newlineIndex: number;
-      while ((newlineIndex = textBuffer.indexOf("\n")) !== -1) {
-        let line = textBuffer.slice(0, newlineIndex);
-        textBuffer = textBuffer.slice(newlineIndex + 1);
-
-        if (line.endsWith("\r")) line = line.slice(0, -1);
-        if (line.startsWith(":") || line.trim() === "") continue;
-        if (!line.startsWith("data: ")) continue;
-
-        const jsonStr = line.slice(6).trim();
-        if (jsonStr === "[DONE]") {
-          streamDone = true;
-          break;
-        }
-
-        try {
-          const parsed = JSON.parse(jsonStr);
-          const content = parsed.choices?.[0]?.delta?.content as string | undefined;
-          if (content) onDelta(content);
-        } catch {
-          textBuffer = line + "\n" + textBuffer;
-          break;
-        }
-      }
+      const chunkResult = processChunkBuffer(textBuffer, onDelta);
+      textBuffer = chunkResult.textBuffer;
+      streamDone = chunkResult.streamDone;
     }
 
-    // Final flush
-    if (textBuffer.trim()) {
-      for (let raw of textBuffer.split("\n")) {
-        if (!raw) continue;
-        if (raw.endsWith("\r")) raw = raw.slice(0, -1);
-        if (raw.startsWith(":") || raw.trim() === "") continue;
-        if (!raw.startsWith("data: ")) continue;
-        const jsonStr = raw.slice(6).trim();
-        if (jsonStr === "[DONE]") continue;
-        try {
-          const parsed = JSON.parse(jsonStr);
-          const content = parsed.choices?.[0]?.delta?.content as string | undefined;
-          if (content) onDelta(content);
-        } catch {}
-      }
-    }
+    flushBuffer(textBuffer, onDelta);
 
     onDone();
   } catch (e) {

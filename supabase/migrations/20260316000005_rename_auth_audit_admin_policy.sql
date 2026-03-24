@@ -11,6 +11,7 @@
 DROP POLICY IF EXISTS "Admins see user+admin auth audit" ON public.auth_audit;
 
 -- Recreate with accurate name
+DROP POLICY IF EXISTS "Admins see all except global_admin auth audit" ON public.auth_audit;
 CREATE POLICY "Admins see all except global_admin auth audit"
 ON public.auth_audit
 FOR SELECT

@@ -8,6 +8,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 
 interface Message {
+  id: string;
   role: "user" | "assistant";
   content: string;
 }
@@ -19,8 +20,66 @@ const QUICK_PROMPTS = [
   { label: "Is my data secure?", icon: ArrowRight },
 ];
 
+function parseSseDelta(jsonStr: string): string | null {
+  try {
+    const parsed = JSON.parse(jsonStr);
+    return (parsed.choices?.[0]?.delta?.content as string | undefined) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeSseLine(line: string): string | null {
+  const normalizedLine = line.endsWith("\r") ? line.slice(0, -1) : line;
+  if (normalizedLine.startsWith(":") || normalizedLine.trim() === "") return null;
+  if (!normalizedLine.startsWith("data: ")) return null;
+  return normalizedLine.slice(6).trim();
+}
+
+function getHelpAssistantUrls(configuredApiUrl: string, vmHostApiUrl: string): string[] {
+  return Array.from(
+    new Set([
+      configuredApiUrl ? `${configuredApiUrl}/api/help-assistant` : "",
+      vmHostApiUrl ? `${vmHostApiUrl}/api/help-assistant` : "",
+      "/api/help-assistant",
+      "http://localhost:8080/api/help-assistant",
+      "http://127.0.0.1:8080/api/help-assistant",
+      "http://localhost:8001/api/help-assistant",
+      "http://127.0.0.1:8001/api/help-assistant",
+    ].filter(Boolean))
+  );
+}
+
+async function tryHelpRequest(
+  url: string,
+  requestBody: string,
+  bearerToken: string,
+  toast: ReturnType<typeof useToast>["toast"]
+): Promise<Response> {
+  const candidateResp = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${bearerToken}`,
+    },
+    body: requestBody,
+  });
+
+  if (candidateResp.ok) return candidateResp;
+  if (candidateResp.status === 429) {
+    toast({ title: "Rate limit exceeded", description: "Please try again in a moment.", variant: "destructive" });
+    throw new Error("Rate limited");
+  }
+  if (candidateResp.status === 402) {
+    toast({ title: "Credits required", description: "Please add credits to continue.", variant: "destructive" });
+    throw new Error("Payment required");
+  }
+  throw new Error(`Help assistant endpoint failed (${candidateResp.status}) at ${url}`);
+}
+
 export function HelpAssistant() {
   const [messages, setMessages] = useState<Message[]>([]);
+  const createMessageId = () => `${Date.now()}-${crypto.randomUUID()}`;
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -35,7 +94,7 @@ export function HelpAssistant() {
   const sendMessage = async (messageText: string) => {
     if (!messageText.trim() || isLoading) return;
 
-    const userMessage: Message = { role: "user", content: messageText };
+    const userMessage: Message = { id: createMessageId(), role: "user", content: messageText };
     setMessages(prev => [...prev, userMessage]);
     setInput("");
     setIsLoading(true);
@@ -43,24 +102,19 @@ export function HelpAssistant() {
     let assistantContent = "";
 
     try {
-      const configuredApiUrl = (process.env.NEXT_PUBLIC_API_URL || "").trim();
+      const configuredApiUrl = (process.env.NEXT_PUBLIC_API_URL ?? "").trim();
       const vmHostApiUrl =
         typeof window !== "undefined"
           ? `${window.location.protocol}//${window.location.hostname}:8080`
           : "";
-      const candidateUrls = Array.from(
-        new Set([
-          configuredApiUrl ? `${configuredApiUrl}/api/help-assistant` : "",
-          vmHostApiUrl ? `${vmHostApiUrl}/api/help-assistant` : "",
-          "/api/help-assistant",
-          "http://localhost:8080/api/help-assistant",
-          "http://127.0.0.1:8080/api/help-assistant",
-          "http://localhost:8001/api/help-assistant",
-          "http://127.0.0.1:8001/api/help-assistant",
-        ].filter(Boolean))
-      );
-      
+      const candidateUrls = getHelpAssistantUrls(configuredApiUrl, vmHostApiUrl);
+
       const { data: { session } } = await supabase.auth.getSession();
+      const bearerToken =
+        session?.access_token ??
+        process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ??
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ??
+        "";
 
       const requestBody = JSON.stringify({
         messages: [...messages, userMessage].map(m => ({ role: m.role, content: m.content })),
@@ -70,30 +124,9 @@ export function HelpAssistant() {
       let lastError: unknown = null;
       for (const url of candidateUrls) {
         try {
-          const candidateResp = await fetch(url, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${session?.access_token || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY}`,
-            },
-            body: requestBody,
-          });
-
-          if (candidateResp.ok) {
-            resp = candidateResp;
-            break;
-          }
-
-          if (candidateResp.status === 429) {
-            toast({ title: "Rate limit exceeded", description: "Please try again in a moment.", variant: "destructive" });
-            throw new Error("Rate limited");
-          }
-          if (candidateResp.status === 402) {
-            toast({ title: "Credits required", description: "Please add credits to continue.", variant: "destructive" });
-            throw new Error("Payment required");
-          }
-
-          lastError = new Error(`Help assistant endpoint failed (${candidateResp.status}) at ${url}`);
+          const candidateResp = await tryHelpRequest(url, requestBody, bearerToken, toast);
+          resp = candidateResp;
+          break;
         } catch (fetchError) {
           lastError = fetchError;
         }
@@ -110,7 +143,8 @@ export function HelpAssistant() {
       let textBuffer = "";
 
       // Add empty assistant message to update
-      setMessages(prev => [...prev, { role: "assistant", content: "" }]);
+      const assistantMessageId = createMessageId();
+      setMessages(prev => [...prev, { id: assistantMessageId, role: "assistant", content: "" }]);
 
       while (true) {
         const { done, value } = await reader.read();
@@ -120,31 +154,22 @@ export function HelpAssistant() {
 
         let newlineIndex: number;
         while ((newlineIndex = textBuffer.indexOf("\n")) !== -1) {
-          let line = textBuffer.slice(0, newlineIndex);
+          const line = textBuffer.slice(0, newlineIndex);
           textBuffer = textBuffer.slice(newlineIndex + 1);
-
-          if (line.endsWith("\r")) line = line.slice(0, -1);
-          if (line.startsWith(":") || line.trim() === "") continue;
-          if (!line.startsWith("data: ")) continue;
-
-          const jsonStr = line.slice(6).trim();
+          const jsonStr = normalizeSseLine(line);
+          if (!jsonStr) continue;
           if (jsonStr === "[DONE]") break;
-
-          try {
-            const parsed = JSON.parse(jsonStr);
-            const content = parsed.choices?.[0]?.delta?.content as string | undefined;
-            if (content) {
-              assistantContent += content;
-              setMessages(prev => {
-                const updated = [...prev];
-                updated[updated.length - 1] = { role: "assistant", content: assistantContent };
-                return updated;
-              });
-            }
-          } catch {
+          const content = parseSseDelta(jsonStr);
+          if (content === null) {
             textBuffer = line + "\n" + textBuffer;
             break;
           }
+          assistantContent += content;
+          setMessages(prev => {
+            const updated = [...prev];
+            updated[updated.length - 1] = { id: assistantMessageId, role: "assistant", content: assistantContent };
+            return updated;
+          });
         }
       }
     } catch (error) {
@@ -187,9 +212,9 @@ export function HelpAssistant() {
       {messages.length > 0 && (
         <ScrollArea className="h-[180px] pr-2" ref={scrollRef}>
           <div className="space-y-2">
-            {messages.map((message, index) => (
+            {messages.map((message) => (
               <div
-                key={index}
+                key={message.id}
                 className={cn(
                   "flex gap-1.5",
                   message.role === "user" ? "justify-end" : "justify-start"

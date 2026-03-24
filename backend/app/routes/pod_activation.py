@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import quote
@@ -309,6 +310,85 @@ async def deallocate_model(
         resource_id=allocation_id,
         details={"model_id": allocation_rows[0].get("model_id"), "target_user_id": allocation_rows[0].get("user_id")},
         previous_value={"model_id": allocation_rows[0].get("model_id"), "domain": allocation_rows[0].get("domain")},
+        new_value=None,
+    )
+    return {"success": True}
+
+
+@router.delete("/api/pod-activation/my-models/{model_id}")
+async def delete_my_model_data(
+    model_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Delete a model allocation and related user-scoped data for this user."""
+    requester = await verify_user(authorization)
+    user_id = requester["id"]
+    normalized_model_id = (model_id or "").strip()
+    if not normalized_model_id:
+        raise HTTPException(status_code=400, detail="model_id is required")
+
+    quoted_user_id = quote(user_id, safe="")
+    quoted_model_id = quote(normalized_model_id, safe="")
+
+    # Remove chat messages for this user's conversations for this model first.
+    conversations = await postgrest_get(
+        "chat_conversations",
+        (
+            "select=id"
+            f"&user_id=eq.{quoted_user_id}"
+            f"&model_id=eq.{quoted_model_id}"
+        ),
+    )
+    conversation_ids = [str(row.get("id")) for row in conversations if row.get("id")]
+    if conversation_ids:
+        encoded_ids = ",".join(quote(cid, safe="") for cid in conversation_ids)
+        await postgrest_delete(
+            "chat_messages",
+            f"conversation_id=in.({encoded_ids})",
+        )
+
+    # Remove known user-scoped records tied to this model.
+    # Run independent deletions in parallel to reduce end-user wait time.
+    await asyncio.gather(
+        postgrest_delete(
+            "chat_conversations",
+            (
+                f"user_id=eq.{quoted_user_id}"
+                f"&model_id=eq.{quoted_model_id}"
+            ),
+        ),
+        postgrest_delete(
+            "agent_schedules",
+            (
+                f"user_id=eq.{quoted_user_id}"
+                f"&model_id=eq.{quoted_model_id}"
+            ),
+        ),
+        postgrest_delete(
+            "pod_activation_requests",
+            (
+                f"user_id=eq.{quoted_user_id}"
+                f"&model_id=eq.{quoted_model_id}"
+            ),
+        ),
+        postgrest_delete(
+            "activated_models",
+            (
+                f"user_id=eq.{quoted_user_id}"
+                f"&model_id=eq.{quoted_model_id}"
+            ),
+        ),
+    )
+
+    await insert_audit_log(
+        request=request,
+        user_id=user_id,
+        action="delete_my_model_data",
+        resource_type="activated_model",
+        resource_id=normalized_model_id,
+        details={"model_id": normalized_model_id},
+        previous_value={"model_id": normalized_model_id},
         new_value=None,
     )
     return {"success": True}

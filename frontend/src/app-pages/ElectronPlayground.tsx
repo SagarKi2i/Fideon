@@ -213,6 +213,15 @@ export default function ElectronPlayground() {
                     : 'hover:bg-muted'
                 }`}
                 onClick={() => setSelectedModel(model.name)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    setSelectedModel(model.name);
+                  }
+                }}
+                role="button"
+                tabIndex={0}
+                aria-pressed={selectedModel === model.name}
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1 min-w-0">
@@ -335,7 +344,7 @@ export default function ElectronPlayground() {
                 <div className="space-y-3">
                   {popularModels.map((model) => {
                     const isPulling = pullingModels.has(model.name);
-                    const progress = pullProgress[model.name] || 0;
+                    const progress = pullProgress[model.name] ?? 0;
                     const isInstalled = models.some(m => m.name === model.name);
 
                     return (

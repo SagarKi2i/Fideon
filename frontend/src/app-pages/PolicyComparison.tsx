@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Label } from "@/components/ui/label";
 import { Shield, ArrowLeftRight, AlertCircle } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
@@ -11,6 +12,18 @@ interface Document {
   id: string;
   filename: string;
   file_type: string;
+}
+
+function getCoverageStatusBadge(status: string): { variant: "default" | "secondary"; label: string; className: string } {
+  if (status === "increased") {
+    return { variant: "default", label: "Changed", className: "bg-yellow-500/10 text-yellow-500 border-yellow-500/20" };
+  }
+  return { variant: "secondary", label: "Same", className: "" };
+}
+
+function getExclusionStatusBadge(status: string): { variant: "destructive" | "secondary"; label: string } {
+  if (status === "removed") return { variant: "destructive", label: "Added Exclusion" };
+  return { variant: "secondary", label: "No Change" };
 }
 
 export default function PolicyComparison() {
@@ -33,7 +46,7 @@ export default function PolicyComparison() {
         .or("file_type.eq.application/pdf,file_type.ilike.%word%");
 
       if (error) throw error;
-      setDocuments(data || []);
+      setDocuments(data ?? []);
     } catch (error) {
       console.error("Error loading documents:", error);
     }
@@ -113,9 +126,9 @@ export default function PolicyComparison() {
         <CardContent>
           <div className="grid gap-6 md:grid-cols-2">
             <div className="space-y-2">
-              <label className="text-sm font-medium text-foreground">Policy A</label>
+              <Label htmlFor="policy-a-select" className="text-sm font-medium text-foreground">Policy A</Label>
               <Select value={policyA} onValueChange={setPolicyA}>
-                <SelectTrigger>
+                <SelectTrigger id="policy-a-select">
                   <SelectValue placeholder="Select first policy" />
                 </SelectTrigger>
                 <SelectContent>
@@ -129,9 +142,9 @@ export default function PolicyComparison() {
             </div>
 
             <div className="space-y-2">
-              <label className="text-sm font-medium text-foreground">Policy B</label>
+              <Label htmlFor="policy-b-select" className="text-sm font-medium text-foreground">Policy B</Label>
               <Select value={policyB} onValueChange={setPolicyB}>
-                <SelectTrigger>
+                <SelectTrigger id="policy-b-select">
                   <SelectValue placeholder="Select second policy" />
                 </SelectTrigger>
                 <SelectContent>
@@ -167,8 +180,10 @@ export default function PolicyComparison() {
             </CardHeader>
             <CardContent>
               <div className="space-y-3">
-                {comparisonResult.coverage_differences.map((item: any, index: number) => (
-                  <div key={index} className="flex items-center justify-between p-3 rounded-lg border border-border">
+                {comparisonResult.coverage_differences.map((item: any) => {
+                  const badge = getCoverageStatusBadge(item.status);
+                  return (
+                  <div key={`${item.item}-${item.policyA}-${item.policyB}`} className="flex items-center justify-between p-3 rounded-lg border border-border">
                     <div className="flex-1">
                       <p className="font-medium text-foreground">{item.item}</p>
                       <div className="flex items-center gap-4 mt-1">
@@ -178,13 +193,13 @@ export default function PolicyComparison() {
                       </div>
                     </div>
                     <Badge
-                      variant={item.status === "increased" ? "default" : "secondary"}
-                      className={item.status === "increased" ? "bg-yellow-500/10 text-yellow-500 border-yellow-500/20" : ""}
+                      variant={badge.variant}
+                      className={badge.className}
                     >
-                      {item.status === "increased" ? "Changed" : "Same"}
+                      {badge.label}
                     </Badge>
                   </div>
-                ))}
+                )})}
               </div>
             </CardContent>
           </Card>
@@ -197,8 +212,10 @@ export default function PolicyComparison() {
             </CardHeader>
             <CardContent>
               <div className="space-y-3">
-                {comparisonResult.exclusions.map((item: any, index: number) => (
-                  <div key={index} className="flex items-center justify-between p-3 rounded-lg border border-border">
+                {comparisonResult.exclusions.map((item: any) => {
+                  const badge = getExclusionStatusBadge(item.status);
+                  return (
+                  <div key={`${item.item}-${item.policyA}-${item.policyB}`} className="flex items-center justify-between p-3 rounded-lg border border-border">
                     <div className="flex-1">
                       <p className="font-medium text-foreground">{item.item}</p>
                       <div className="flex items-center gap-4 mt-1">
@@ -212,12 +229,12 @@ export default function PolicyComparison() {
                       </div>
                     </div>
                     <Badge
-                      variant={item.status === "removed" ? "destructive" : "secondary"}
+                      variant={badge.variant}
                     >
-                      {item.status === "removed" ? "Added Exclusion" : "No Change"}
+                      {badge.label}
                     </Badge>
                   </div>
-                ))}
+                )})}
               </div>
             </CardContent>
           </Card>
@@ -234,7 +251,7 @@ export default function PolicyComparison() {
             <CardContent>
               <ul className="space-y-2">
                 {comparisonResult.key_changes.map((change: string, index: number) => (
-                  <li key={index} className="flex items-start gap-2">
+                  <li key={`${change}-${index}`} className="flex items-start gap-2">
                     <span className="h-1.5 w-1.5 rounded-full bg-primary mt-2 flex-shrink-0" />
                     <p className="text-sm text-foreground">{change}</p>
                   </li>

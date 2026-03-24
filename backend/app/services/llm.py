@@ -425,6 +425,17 @@ async def _recorded_attempt(label: str, errors: list[str], func):
         return None
 
 
+async def _first_successful_attempt(
+    attempts: list[tuple[str, Any]],
+    errors: list[str],
+) -> tuple[int, dict[str, str], AsyncGenerator[bytes, None]] | None:
+    for label, attempt_fn in attempts:
+        result = await _recorded_attempt(label, errors, attempt_fn)
+        if result:
+            return result
+    return None
+
+
 async def _attempt_primary_chain(
     payload: dict[str, Any],
     stream_payload: dict[str, Any],
@@ -438,20 +449,28 @@ async def _attempt_primary_chain(
             return result
 
     if runpod_token and RUNPOD_GENERATE_URL:
-        for model, label in ((RUNPOD_MODEL_LLAMA, "runpod-generate-llama"), (RUNPOD_MODEL_MISTRAL, "runpod-generate-mistral")):
-            result = await _recorded_attempt(label, errors, lambda m=model: _try_runpod_generate_stream(payload, m))
-            if result:
-                return result
+        runpod_generate_attempts = [
+            ("runpod-generate-llama", lambda: _try_runpod_generate_stream(payload, RUNPOD_MODEL_LLAMA)),
+            ("runpod-generate-mistral", lambda: _try_runpod_generate_stream(payload, RUNPOD_MODEL_MISTRAL)),
+        ]
+        result = await _first_successful_attempt(runpod_generate_attempts, errors)
+        if result:
+            return result
 
     if runpod_token and RUNPOD_OPENAI_COMPAT_URL:
-        for model, label in ((RUNPOD_MODEL_LLAMA, "runpod-llama"), (RUNPOD_MODEL_MISTRAL, "runpod-mistral")):
-            result = await _recorded_attempt(
-                label,
-                errors,
-                lambda m=model: _try_runpod_openai_compat_stream(stream_payload, runpod_token, m),
-            )
-            if result:
-                return result
+        runpod_compat_attempts = [
+            (
+                "runpod-llama",
+                lambda: _try_runpod_openai_compat_stream(stream_payload, runpod_token, RUNPOD_MODEL_LLAMA),
+            ),
+            (
+                "runpod-mistral",
+                lambda: _try_runpod_openai_compat_stream(stream_payload, runpod_token, RUNPOD_MODEL_MISTRAL),
+            ),
+        ]
+        result = await _first_successful_attempt(runpod_compat_attempts, errors)
+        if result:
+            return result
 
     if str(OFFLINE_LLM_FALLBACK_ENABLED).strip().lower() in {"1", "true", "yes", "on"}:
         result = await _recorded_attempt("offline-llm", errors, lambda: _try_offline_stream(payload))

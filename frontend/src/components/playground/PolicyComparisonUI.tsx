@@ -28,10 +28,10 @@ import { useWorkflowSettings } from "@/hooks/useWorkflowSettings";
 import OutputCorrection from "./OutputCorrection";
 
 interface PolicyComparisonUIProps {
-  modelId?: string;
-  onRun: (data: any) => void;
-  isRunning: boolean;
-  result: string;
+  readonly modelId?: string;
+  readonly onRun: (data: any) => void;
+  readonly isRunning: boolean;
+  readonly result: string;
 }
 
 interface ComparisonResult {
@@ -120,9 +120,25 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
   };
 
   const parsedResult = parseComparisonResult(result);
-  const showQuoteRecommendation = workflowSettings.enableSmartRecommendations && parsedResult && 
-    (parsedResult.policyA.premium > workflowSettings.policyComparisonPremiumThreshold || 
-     parsedResult.policyB.premium > workflowSettings.policyComparisonPremiumThreshold);
+  const showQuoteRecommendation = workflowSettings.enableSmartRecommendations && parsedResult &&
+    (parsedResult.policyA.premium > workflowSettings.policyComparisonPremiumThreshold ||
+      parsedResult.policyB.premium > workflowSettings.policyComparisonPremiumThreshold);
+
+  const getPremiumTrend = () => {
+    if (!parsedResult) return { isHigher: false, diff: 0, pct: 0 };
+    const diff = Math.abs(parsedResult.policyB.premium - parsedResult.policyA.premium);
+    const isHigher = parsedResult.policyB.premium > parsedResult.policyA.premium;
+    const pct = Math.round((diff / parsedResult.policyA.premium) * 100);
+    return { isHigher, diff, pct };
+  };
+
+  const renderCoverageIcon = (covered: boolean) =>
+    covered ? (
+      <CheckCircle2 className="h-5 w-5 text-green-600 mx-auto" />
+    ) : (
+      <XCircle className="h-5 w-5 text-destructive mx-auto" />
+    );
+  const openFilePicker = (inputId: string) => document.getElementById(inputId)?.click();
 
   const calculateSavingsPotential = () => {
     if (!parsedResult) return 0;
@@ -158,13 +174,22 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
                 className={`border-2 border-dashed rounded-lg p-6 text-center transition-all cursor-pointer hover:border-primary/50 hover:bg-muted/30 ${
                   policyA ? "border-primary bg-primary/5" : "border-border"
                 }`}
-                onClick={() => document.getElementById("policy-a-input")?.click()}
+                onClick={() => openFilePicker("policy-a-input")}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    openFilePicker("policy-a-input");
+                  }
+                }}
+                role="button"
+                tabIndex={0}
+                aria-label="Upload policy A document"
               >
                 <Input
                   id="policy-a-input"
                   type="file"
                   accept=".pdf,.docx"
-                  onChange={(e) => setPolicyA(e.target.files?.[0] || null)}
+                  onChange={(e) => setPolicyA(e.target.files?.[0] ?? null)}
                   className="hidden"
                 />
                 {policyA ? (
@@ -199,13 +224,22 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
                 className={`border-2 border-dashed rounded-lg p-6 text-center transition-all cursor-pointer hover:border-primary/50 hover:bg-muted/30 ${
                   policyB ? "border-primary bg-primary/5" : "border-border"
                 }`}
-                onClick={() => document.getElementById("policy-b-input")?.click()}
+                onClick={() => openFilePicker("policy-b-input")}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    openFilePicker("policy-b-input");
+                  }
+                }}
+                role="button"
+                tabIndex={0}
+                aria-label="Upload policy B document"
               >
                 <Input
                   id="policy-b-input"
                   type="file"
                   accept=".pdf,.docx"
-                  onChange={(e) => setPolicyB(e.target.files?.[0] || null)}
+                  onChange={(e) => setPolicyB(e.target.files?.[0] ?? null)}
                   className="hidden"
                 />
                 {policyB ? (
@@ -253,6 +287,9 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
       {/* Results Section */}
       {result && parsedResult && (
         <OutputCorrection modelId={modelId ?? "policy-comparison"} prompt={lastPrompt} output={result}>
+        {(() => {
+          const trend = getPremiumTrend();
+          return (
         <div className="space-y-6 animate-fade-in">
           {/* Summary Cards */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -262,15 +299,15 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
                   <div>
                     <p className="text-xs text-muted-foreground">Premium Difference</p>
                     <p className="text-2xl font-bold text-foreground">
-                      ${Math.abs(parsedResult.policyB.premium - parsedResult.policyA.premium).toLocaleString()}
+                      ${trend.diff.toLocaleString()}
                     </p>
                   </div>
                   <div className={`h-10 w-10 rounded-full flex items-center justify-center ${
-                    parsedResult.policyB.premium > parsedResult.policyA.premium 
+                    trend.isHigher
                       ? "bg-amber-500/10" 
                       : "bg-green-500/10"
                   }`}>
-                    {parsedResult.policyB.premium > parsedResult.policyA.premium ? (
+                    {trend.isHigher ? (
                       <TrendingUp className="h-5 w-5 text-amber-600" />
                     ) : (
                       <TrendingDown className="h-5 w-5 text-green-600" />
@@ -278,8 +315,7 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
                   </div>
                 </div>
                 <p className="text-xs text-muted-foreground mt-2">
-                  Policy B is {parsedResult.policyB.premium > parsedResult.policyA.premium ? "higher" : "lower"} by{" "}
-                  {Math.round(Math.abs(parsedResult.policyB.premium - parsedResult.policyA.premium) / parsedResult.policyA.premium * 100)}%
+                  Policy B is {trend.isHigher ? "higher" : "lower"} by {trend.pct}%
                 </p>
               </CardContent>
             </Card>
@@ -379,52 +415,28 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
                 {/* Cyber Coverage Row */}
                 <div className="p-4 border-t border-border font-medium">Cyber Liability</div>
                 <div className="p-4 border-t border-border text-center">
-                  {parsedResult.policyA.cyberCoverage ? (
-                    <CheckCircle2 className="h-5 w-5 text-green-600 mx-auto" />
-                  ) : (
-                    <XCircle className="h-5 w-5 text-destructive mx-auto" />
-                  )}
+                  {renderCoverageIcon(parsedResult.policyA.cyberCoverage)}
                 </div>
                 <div className="p-4 border-t border-border text-center">
-                  {parsedResult.policyB.cyberCoverage ? (
-                    <CheckCircle2 className="h-5 w-5 text-green-600 mx-auto" />
-                  ) : (
-                    <XCircle className="h-5 w-5 text-destructive mx-auto" />
-                  )}
+                  {renderCoverageIcon(parsedResult.policyB.cyberCoverage)}
                 </div>
 
                 {/* EPL Coverage Row */}
                 <div className="p-4 border-t border-border font-medium">Employment Practices</div>
                 <div className="p-4 border-t border-border text-center">
-                  {parsedResult.policyA.eplCoverage ? (
-                    <CheckCircle2 className="h-5 w-5 text-green-600 mx-auto" />
-                  ) : (
-                    <XCircle className="h-5 w-5 text-destructive mx-auto" />
-                  )}
+                  {renderCoverageIcon(parsedResult.policyA.eplCoverage)}
                 </div>
                 <div className="p-4 border-t border-border text-center">
-                  {parsedResult.policyB.eplCoverage ? (
-                    <CheckCircle2 className="h-5 w-5 text-green-600 mx-auto" />
-                  ) : (
-                    <XCircle className="h-5 w-5 text-destructive mx-auto" />
-                  )}
+                  {renderCoverageIcon(parsedResult.policyB.eplCoverage)}
                 </div>
 
                 {/* Water Damage Row */}
                 <div className="p-4 border-t border-border font-medium">Water Damage</div>
                 <div className="p-4 border-t border-border text-center">
-                  {parsedResult.policyA.waterDamage ? (
-                    <CheckCircle2 className="h-5 w-5 text-green-600 mx-auto" />
-                  ) : (
-                    <XCircle className="h-5 w-5 text-destructive mx-auto" />
-                  )}
+                  {renderCoverageIcon(parsedResult.policyA.waterDamage)}
                 </div>
                 <div className="p-4 border-t border-border text-center">
-                  {parsedResult.policyB.waterDamage ? (
-                    <CheckCircle2 className="h-5 w-5 text-green-600 mx-auto" />
-                  ) : (
-                    <XCircle className="h-5 w-5 text-destructive mx-auto" />
-                  )}
+                  {renderCoverageIcon(parsedResult.policyB.waterDamage)}
                 </div>
               </div>
             </CardContent>
@@ -543,6 +555,8 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
             </Alert>
           )}
         </div>
+          );
+        })()}
         </OutputCorrection>
       )}
     </div>

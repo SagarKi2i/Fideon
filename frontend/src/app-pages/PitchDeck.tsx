@@ -758,15 +758,15 @@ const slides = [
             { icon: <Cloud className="w-10 h-10 text-primary" />, label: "Cloud Platform", desc: "Auth, model registry, sync orchestration, analytics" },
             { icon: <ArrowRight className="w-6 h-6 text-muted-foreground" />, label: "", desc: "" },
             { icon: <MonitorSmartphone className="w-10 h-10 text-primary" />, label: "Edge Devices", desc: "Electron app + Ollama for local AI inference" },
-          ].map((item, i) => (
+          ].map((item, index) => (
             item.label ? (
-              <Card key={i} className="p-4 border-primary/20 text-center h-full flex flex-col justify-center">
+              <Card key={`node-${item.label}`} className="p-4 border-primary/20 text-center h-full flex flex-col justify-center">
                 <div className="flex justify-center mb-2">{item.icon}</div>
                 <h4 className="font-bold text-sm mb-1">{item.label}</h4>
                 <p className="text-xs text-muted-foreground">{item.desc}</p>
               </Card>
             ) : (
-              <div key={i} className="flex justify-center">{item.icon}</div>
+              <div key={`connector-${index}`} className="flex justify-center">{item.icon}</div>
             )
           ))}
         </div>
@@ -1268,8 +1268,8 @@ const slides = [
                     <p className="text-[9px] font-bold text-muted-foreground uppercase tracking-wide">Education</p>
                   </div>
                   <ul className="space-y-0.5">
-                    {role.education.map((e, i) => (
-                      <li key={i} className="text-[9px] text-muted-foreground flex items-start gap-1">
+                    {role.education.map((e) => (
+                      <li key={e} className="text-[9px] text-muted-foreground flex items-start gap-1">
                         <span className={`${c.accent} mt-0.5 shrink-0`}>▸</span><span>{e}</span>
                       </li>
                     ))}
@@ -1283,8 +1283,8 @@ const slides = [
                     <p className="text-[9px] font-bold text-muted-foreground uppercase tracking-wide">Experience</p>
                   </div>
                   <ul className="space-y-0.5">
-                    {role.experience.map((e, i) => (
-                      <li key={i} className="text-[9px] text-muted-foreground flex items-start gap-1">
+                    {role.experience.map((e) => (
+                      <li key={e} className="text-[9px] text-muted-foreground flex items-start gap-1">
                         <span className={`${c.accent} mt-0.5 shrink-0`}>▸</span><span>{e}</span>
                       </li>
                     ))}
@@ -1298,8 +1298,8 @@ const slides = [
                     <p className="text-[9px] font-bold text-muted-foreground uppercase tracking-wide">Required Skills</p>
                   </div>
                   <ul className="space-y-0.5">
-                    {role.skills.map((s, i) => (
-                      <li key={i} className="text-[9px] text-muted-foreground flex items-start gap-1">
+                    {role.skills.map((s) => (
+                      <li key={s} className="text-[9px] text-muted-foreground flex items-start gap-1">
                         <span className={`${c.accent} mt-0.5 shrink-0`}>▸</span><span>{s}</span>
                       </li>
                     ))}
@@ -1313,8 +1313,8 @@ const slides = [
                     <p className="text-[9px] font-bold text-muted-foreground uppercase tracking-wide">Key Responsibilities</p>
                   </div>
                   <ul className="space-y-0.5">
-                    {role.responsibilities.map((r, i) => (
-                      <li key={i} className="text-[9px] text-muted-foreground flex items-start gap-1">
+                    {role.responsibilities.map((r) => (
+                      <li key={r} className="text-[9px] text-muted-foreground flex items-start gap-1">
                         <span className={`${c.accent} mt-0.5 shrink-0`}>▸</span><span>{r}</span>
                       </li>
                     ))}
@@ -1645,6 +1645,10 @@ export default function PitchDeck() {
   const goToSlide = (index: number) => {
     setCurrentSlide(index);
   };
+  const getSlideDotClassName = (isActive: boolean): string => {
+    if (isActive) return "w-3 h-3 rounded-full transition-all bg-primary w-8";
+    return "w-3 h-3 rounded-full transition-all bg-muted-foreground/30 hover:bg-muted-foreground/50";
+  };
 
   const exportJDtoPDF = async () => {
     const { default: jsPDF } = await import("jspdf");
@@ -1899,6 +1903,21 @@ export default function PitchDeck() {
     };
 
     const totalPages = jdRoles.length;
+    const addPdfBulletLines = (items: string[], startY: number) => {
+      let nextY = startY;
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(9.5);
+      doc.setTextColor(40, 40, 60);
+      items.forEach((item) => {
+        const lines = doc.splitTextToSize(`•  ${item}`, contentW - 6);
+        lines.forEach((line: string) => {
+          doc.text(line, marginL + 4, nextY);
+          nextY += 5.2;
+        });
+        nextY += 1;
+      });
+      return nextY;
+    };
 
     jdRoles.forEach((role, roleIdx) => {
       if (roleIdx > 0) doc.addPage();
@@ -1944,17 +1963,7 @@ export default function PitchDeck() {
         y += 9;
 
         // Items
-        doc.setFont("helvetica", "normal");
-        doc.setFontSize(9.5);
-        doc.setTextColor(40, 40, 60);
-        sec.items.forEach((item) => {
-          const lines = doc.splitTextToSize(`•  ${item}`, contentW - 6);
-          lines.forEach((line: string) => {
-            doc.text(line, marginL + 4, y);
-            y += 5.2;
-          });
-          y += 1;
-        });
+        y = addPdfBulletLines(sec.items, y);
         y += 4;
       });
     });
@@ -2026,9 +2035,526 @@ export default function PitchDeck() {
       slide.addShape(pptx.ShapeType.roundRect, {
         x, y, w, h,
         rectRadius: 0.1,
-        fill: { color: opts?.fill || COLORS.white },
+        fill: { color: opts?.fill ?? COLORS.white },
         shadow: { type: "outer", blur: 6, offset: 2, color: "CCCCCC", opacity: 0.3 },
         line: opts?.border ? { color: opts.border, width: 1 } : undefined,
+      });
+    };
+    const addPptxBulletedTextRows = (
+      slide: any,
+      items: string[],
+      options: { x: number; y: number; step: number; width: number; fontSize: number; color: string },
+    ) => {
+      items.forEach((item, itemIndex) => {
+        slide.addText(item, {
+          x: options.x,
+          y: options.y + itemIndex * options.step,
+          w: options.width,
+          h: 0.2,
+          fontSize: options.fontSize,
+          color: options.color,
+          bullet: { code: "2022" },
+        });
+      });
+    };
+    const addPptxBulletList = (
+      slide: any,
+      items: string[],
+      x: number,
+      y: number,
+      step: number,
+      fontSize: number,
+      color: string = COLORS.darkText,
+    ) => {
+      items.forEach((item, index) => {
+        slide.addText(`•  ${item}`, {
+          x,
+          y: y + index * step,
+          w: 5.2,
+          h: 0.35,
+          fontSize,
+          color,
+        });
+      });
+    };
+    const addPptxColumnsWithBullets = (
+      slide: any,
+      columns: Array<{ title: string; items: string[] }>,
+      options: {
+        startX: number;
+        startY: number;
+        gapX: number;
+        cardW: number;
+        cardH: number;
+        fill: string;
+        border: string;
+        titleFontSize: number;
+        bulletStartY: number;
+        bulletStep: number;
+        bulletFontSize: number;
+        titleColor?: string;
+        bulletColor?: string;
+      },
+    ) => {
+      columns.forEach((col, index) => {
+        const x = options.startX + index * options.gapX;
+        addCard(slide, x, options.startY, options.cardW, options.cardH, { fill: options.fill, border: options.border });
+        slide.addText(col.title, {
+          x: x + 0.3,
+          y: options.startY + 0.1,
+          w: options.cardW - 0.6,
+          h: 0.4,
+          fontSize: options.titleFontSize,
+          bold: true,
+          color: options.titleColor ?? COLORS.primary,
+        });
+        addPptxBulletList(slide, col.items, x + 0.3, options.bulletStartY, options.bulletStep, options.bulletFontSize, options.bulletColor ?? COLORS.darkText);
+      });
+    };
+    const addPptxGridColumnsWithBullets = (
+      slide: any,
+      columns: Array<{ title: string; items: string[] }>,
+      options: {
+        cols: number;
+        startX: number;
+        startY: number;
+        gapX: number;
+        gapY: number;
+        cardW: number;
+        cardH: number;
+        fill: string;
+        border: string;
+        titleFontSize: number;
+        bulletStartOffsetY: number;
+        bulletStep: number;
+        bulletFontSize: number;
+      },
+    ) => {
+      columns.forEach((col, index) => {
+        const columnIndex = index % options.cols;
+        const rowIndex = Math.floor(index / options.cols);
+        const x = options.startX + columnIndex * options.gapX;
+        const y = options.startY + rowIndex * options.gapY;
+        addCard(slide, x, y, options.cardW, options.cardH, { fill: options.fill, border: options.border });
+        slide.addText(col.title, {
+          x: x + 0.3,
+          y: y + 0.2,
+          w: options.cardW - 0.6,
+          h: 0.4,
+          fontSize: options.titleFontSize,
+          bold: true,
+          color: COLORS.primary,
+        });
+        addPptxBulletList(
+          slide,
+          col.items,
+          x + 0.3,
+          y + options.bulletStartOffsetY,
+          options.bulletStep,
+          options.bulletFontSize,
+        );
+      });
+    };
+    const addPptxMetricCards = (
+      slide: any,
+      metrics: Array<{ value: string; label: string; sub?: string; desc?: string }>,
+      options: {
+        startX: number;
+        startY: number;
+        gapX: number;
+        cardW: number;
+        cardH: number;
+        fill: string;
+      },
+    ) => {
+      metrics.forEach((metric, index) => {
+        const x = options.startX + index * options.gapX;
+        addCard(slide, x, options.startY, options.cardW, options.cardH, { fill: options.fill });
+        slide.addText(metric.value, {
+          x,
+          y: options.startY + 0.1,
+          w: options.cardW,
+          h: 0.7,
+          fontSize: 28,
+          bold: true,
+          color: COLORS.primary,
+          align: "center",
+        });
+        slide.addText(metric.label, {
+          x,
+          y: options.startY + 0.8,
+          w: options.cardW,
+          h: 0.4,
+          fontSize: 13,
+          bold: true,
+          color: COLORS.darkText,
+          align: "center",
+        });
+        if (metric.desc) {
+          slide.addText(metric.desc, {
+            x,
+            y: options.startY + 1.2,
+            w: options.cardW,
+            h: 0.4,
+            fontSize: 10,
+            color: COLORS.muted,
+            align: "center",
+          });
+        }
+        if (metric.sub) {
+          slide.addText(metric.sub, {
+            x,
+            y: options.startY + 0.95,
+            w: options.cardW,
+            h: 0.3,
+            fontSize: 10,
+            color: COLORS.muted,
+            align: "center",
+          });
+        }
+      });
+    };
+    const addPptxGridCards = (
+      slide: any,
+      items: Array<{ title: string; desc: string; accent?: string }>,
+      options: {
+        cols: number;
+        startX: number;
+        startY: number;
+        gapX: number;
+        gapY: number;
+        cardW: number;
+        cardH: number;
+        fill: string;
+        border: string;
+        titleFontSize: number;
+        descFontSize: number;
+      },
+    ) => {
+      items.forEach((item, index) => {
+        const col = index % options.cols;
+        const row = Math.floor(index / options.cols);
+        const x = options.startX + col * options.gapX;
+        const y = options.startY + row * options.gapY;
+        addCard(slide, x, y, options.cardW, options.cardH, { fill: options.fill, border: options.border });
+        slide.addText(item.title, {
+          x: x + 0.3,
+          y: y + 0.15,
+          w: options.cardW - 0.6,
+          h: 0.4,
+          fontSize: options.titleFontSize,
+          bold: true,
+          color: item.accent ?? COLORS.primary,
+        });
+        slide.addText(item.desc, {
+          x: x + 0.3,
+          y: y + 0.6,
+          w: options.cardW - 0.6,
+          h: options.cardH - 0.8,
+          fontSize: options.descFontSize,
+          color: COLORS.darkText,
+        });
+      });
+    };
+    const addPptxTeamRoleCards = (
+      slide: any,
+      teams: Array<{ title: string; subtitle: string; color: string; items: string[] }>,
+      options: {
+        startX: number;
+        startY: number;
+        gapX: number;
+        cardW: number;
+        cardH: number;
+      },
+    ) => {
+      teams.forEach((team, index) => {
+        const x = options.startX + index * options.gapX;
+        addCard(slide, x, options.startY, options.cardW, options.cardH, { fill: COLORS.white, border: team.color });
+        slide.addText(team.title, {
+          x: x + 0.15,
+          y: options.startY + 0.1,
+          w: options.cardW - 0.3,
+          h: 0.4,
+          fontSize: 13,
+          bold: true,
+          color: team.color,
+        });
+        slide.addText(team.subtitle, {
+          x: x + 0.15,
+          y: options.startY + 0.5,
+          w: options.cardW - 0.3,
+          h: 0.3,
+          fontSize: 9,
+          color: COLORS.muted,
+        });
+        team.items.forEach((item, itemIndex) => {
+          slide.addText(`▸  ${item}`, {
+            x: x + 0.15,
+            y: options.startY + 0.9 + itemIndex * 0.35,
+            w: options.cardW - 0.3,
+            h: 0.3,
+            fontSize: 9,
+            color: COLORS.darkText,
+          });
+        });
+      });
+    };
+    const addPptxSimpleCards = (
+      slide: any,
+      items: Array<{ title: string; desc: string }>,
+      options: {
+        cols: number;
+        startX: number;
+        startY: number;
+        gapX: number;
+        gapY: number;
+        cardW: number;
+        cardH: number;
+        fill: string;
+        border: string;
+        titleColor: string;
+        descColor: string;
+      },
+    ) => {
+      items.forEach((item, index) => {
+        const col = index % options.cols;
+        const row = Math.floor(index / options.cols);
+        const x = options.startX + col * options.gapX;
+        const y = options.startY + row * options.gapY;
+        addCard(slide, x, y, options.cardW, options.cardH, { fill: options.fill, border: options.border });
+        slide.addText(item.title, {
+          x: x + 0.3,
+          y: y + 0.2,
+          w: options.cardW - 0.6,
+          h: 0.5,
+          fontSize: 16,
+          bold: true,
+          color: options.titleColor,
+        });
+        slide.addText(item.desc, {
+          x: x + 0.3,
+          y: y + 0.8,
+          w: options.cardW - 0.6,
+          h: 1.2,
+          fontSize: 12,
+          color: options.descColor,
+          valign: "top",
+        });
+      });
+    };
+    const addPptxTextChips = (
+      slide: any,
+      labels: string[],
+      options: {
+        startX: number;
+        startY: number;
+        gapX: number;
+        chipW: number;
+        chipH: number;
+        fill: string;
+        border: string;
+        textColor: string;
+      },
+    ) => {
+      labels.forEach((label, index) => {
+        const x = options.startX + index * options.gapX;
+        addCard(slide, x, options.startY, options.chipW, options.chipH, { fill: options.fill, border: options.border });
+        slide.addText(label, {
+          x,
+          y: options.startY + 0.05,
+          w: options.chipW,
+          h: options.chipH - 0.1,
+          fontSize: 12,
+          bold: true,
+          color: options.textColor,
+          align: "center",
+        });
+      });
+    };
+    const addPptxSprintColumns = (
+      slide: any,
+      sprints: Array<{
+        s: string;
+        weeks: string;
+        product: string[];
+        ml: string[];
+        qa: string;
+        sync?: boolean;
+      }>,
+      options: {
+        startX: number;
+        startY: number;
+        cardW: number;
+        cardH: number;
+        gapX: number;
+        borderColor: string;
+        sprintColor: string;
+        showSyncBanner?: boolean;
+        productLabel: string;
+        mlLabel: string;
+      },
+    ) => {
+      const addSprintSection = (
+        slide: any,
+        section: { label: string; items: string[]; labelColor: string },
+        options: { x: number; y: number; width: number },
+      ) => {
+        slide.addText(section.label, {
+          x: options.x,
+          y: options.y,
+          w: options.width,
+          h: 0.22,
+          fontSize: 8,
+          bold: true,
+          color: section.labelColor,
+        });
+        addPptxBulletedTextRows(slide, section.items, {
+          x: options.x + 0.2,
+          y: options.y + 0.25,
+          step: 0.22,
+          width: options.width - 0.2,
+          fontSize: 7,
+          color: COLORS.darkText,
+        });
+      };
+
+      sprints.forEach((sp, index) => {
+        const x = options.startX + index * options.gapX;
+        const borderColor = options.showSyncBanner && sp.sync ? "F59E0B" : options.borderColor;
+        addCard(slide, x, options.startY, options.cardW, options.cardH, { fill: COLORS.white, border: borderColor });
+
+        slide.addText(sp.s, {
+          x: x + 0.15,
+          y: options.startY + 0.05,
+          w: 2.0,
+          h: 0.3,
+          fontSize: 11,
+          bold: true,
+          color: options.sprintColor,
+        });
+        slide.addText(sp.weeks, {
+          x: x + 2.2,
+          y: options.startY + 0.05,
+          w: 1.5,
+          h: 0.3,
+          fontSize: 8,
+          color: COLORS.muted,
+          align: "right",
+        });
+
+        if (options.showSyncBanner && sp.sync) {
+          slide.addText(">> SYNC POINT - Teams align on model API contracts", {
+            x: x + 0.15,
+            y: options.startY + 0.35,
+            w: 3.6,
+            h: 0.22,
+            fontSize: 7,
+            bold: true,
+            color: "D97706",
+          });
+        }
+
+        const productY = options.startY + (options.showSyncBanner && sp.sync ? 0.6 : 0.4);
+        addSprintSection(
+          slide,
+          { label: options.productLabel, items: sp.product, labelColor: "8B5CF6" },
+          { x: x + 0.15, y: productY, width: 3.6 },
+        );
+
+        const mlY = productY + 0.25 + sp.product.length * 0.22 + 0.12;
+        addSprintSection(
+          slide,
+          { label: options.mlLabel, items: sp.ml, labelColor: "4F46E5" },
+          { x: x + 0.15, y: mlY, width: 3.6 },
+        );
+
+        const qaY = mlY + 0.25 + sp.ml.length * 0.22 + 0.1;
+        slide.addText(`QA: ${sp.qa}`, {
+          x: x + 0.15,
+          y: qaY,
+          w: 3.6,
+          h: 0.2,
+          fontSize: 7,
+          italic: true,
+          color: COLORS.muted,
+        });
+      });
+    };
+    const addPptxFlowSequence = (
+      slide: any,
+      labels: string[],
+      options: {
+        startX: number;
+        startY: number;
+        gapX: number;
+        cardW: number;
+        cardH: number;
+        cardFill: string;
+        cardBorder: string;
+        nodeFontSize: number;
+        arrowFontSize: number;
+      },
+    ) => {
+      labels.forEach((label, index) => {
+        const x = options.startX + index * options.gapX;
+        if (label === "→") {
+          slide.addText("→", {
+            x,
+            y: options.startY + 0.3,
+            w: 2,
+            h: 0.8,
+            fontSize: options.arrowFontSize,
+            color: COLORS.muted,
+            align: "center",
+          });
+          return;
+        }
+        addCard(slide, x, options.startY, options.cardW, options.cardH, {
+          fill: options.cardFill,
+          border: options.cardBorder,
+        });
+        slide.addText(label, {
+          x,
+          y: options.startY + 0.15,
+          w: options.cardW,
+          h: options.cardH - 0.3,
+          fontSize: options.nodeFontSize,
+          bold: true,
+          color: COLORS.primary,
+          align: "center",
+        });
+      });
+    };
+    const addPptxJDSectionColumn = (
+      slide: any,
+      sections: Array<{ label: string; items: string[] }>,
+      options: { startX: number; startY: number; sectionWidth: number; sectionColor: string },
+    ) => {
+      let curY = options.startY;
+      sections.forEach((sec) => {
+        addCard(slide, options.startX, curY, options.sectionWidth, 0.28, { fill: options.sectionColor, border: options.sectionColor });
+        slide.addText(sec.label.toUpperCase(), {
+          x: options.startX + 0.12,
+          y: curY + 0.04,
+          w: options.sectionWidth - 0.2,
+          h: 0.2,
+          fontSize: 8.5,
+          bold: true,
+          color: COLORS.white,
+        });
+        curY += 0.3;
+        sec.items.forEach((item) => {
+          slide.addText(`   ${item}`, {
+            x: options.startX + 0.12,
+            y: curY,
+            w: options.sectionWidth - 0.2,
+            h: 0.31,
+            fontSize: 9,
+            color: COLORS.darkText,
+          });
+          curY += 0.32;
+        });
+        curY += 0.14;
       });
     };
 
@@ -2061,12 +2587,18 @@ export default function PitchDeck() {
             { title: "High Latency & Costs", desc: "Cloud API calls: $0.01–$0.10/request with unpredictable latency" },
             { title: "Complex Infrastructure", desc: "Local AI deployment requires $200K+ annually in specialized DevOps" },
           ];
-          problems.forEach((p, i) => {
-            const col = i % 2; const row = Math.floor(i / 2);
-            const x = 0.5 + col * 6.2; const y = 1.7 + row * 2.5;
-            addCard(slide, x, y, 5.8, 2.2, { fill: COLORS.warningLight, border: "FFCCCC" });
-            slide.addText(p.title, { x: x + 0.3, y: y + 0.2, w: 5.2, h: 0.5, fontSize: 16, bold: true, color: COLORS.warning });
-            slide.addText(p.desc, { x: x + 0.3, y: y + 0.8, w: 5.2, h: 1.2, fontSize: 12, color: COLORS.darkText, valign: "top" });
+          addPptxSimpleCards(slide, problems, {
+            cols: 2,
+            startX: 0.5,
+            startY: 1.7,
+            gapX: 6.2,
+            gapY: 2.5,
+            cardW: 5.8,
+            cardH: 2.2,
+            fill: COLORS.warningLight,
+            border: "FFCCCC",
+            titleColor: COLORS.warning,
+            descColor: COLORS.darkText,
           });
         },
       },
@@ -2079,11 +2611,18 @@ export default function PitchDeck() {
             { title: "Private Tenant", desc: "Isolated AI infrastructure running on-premise with complete data sovereignty" },
             { title: "Domain Expertise", desc: "Pre-trained models for insurance, healthcare, banking, legal, and travel" },
           ];
-          solutions.forEach((s, i) => {
-            const x = 0.5 + i * 4.2;
-            addCard(slide, x, 1.7, 3.8, 2.8, { fill: COLORS.primaryLight, border: "99CCFF" });
-            slide.addText(s.title, { x: x + 0.3, y: 2.0, w: 3.2, h: 0.5, fontSize: 16, bold: true, color: COLORS.primary, align: "center" });
-            slide.addText(s.desc, { x: x + 0.3, y: 2.6, w: 3.2, h: 1.5, fontSize: 12, color: COLORS.darkText, align: "center", valign: "top" });
+          addPptxGridCards(slide, solutions, {
+            cols: 3,
+            startX: 0.5,
+            startY: 1.7,
+            gapX: 4.2,
+            gapY: 2.8,
+            cardW: 3.8,
+            cardH: 2.8,
+            fill: COLORS.primaryLight,
+            border: "99CCFF",
+            titleFontSize: 16,
+            descFontSize: 12,
           });
           addCard(slide, 1.5, 5.0, 10, 1.2, { fill: COLORS.bgGray });
           slide.addText("One platform to discover, deploy, and manage domain-specific AI models\nwith enterprise-grade security and zero data leakage", { x: 2, y: 5.1, w: 9, h: 1, fontSize: 14, color: COLORS.darkText, align: "center" });
@@ -2093,15 +2632,22 @@ export default function PitchDeck() {
       {
         title: "Private AI Tenant Architecture", subtitle: "Complete Data Sovereignty with Cloud Convenience",
         build: (slide) => {
-          [
+          const architectureColumns = [
             { title: "On-Premise Deployment", items: ["100% data sovereignty and compliance", "Zero latency for real-time inference", "Works with air-gapped networks"], x: 0.5 },
             { title: "Cloud Management", items: ["Automatic model updates and patches", "Device health monitoring and alerts", "Usage analytics and cost tracking"], x: 6.7 },
-          ].forEach((col) => {
-            addCard(slide, col.x, 1.7, 5.8, 3.5, { fill: COLORS.primaryLight, border: "99CCFF" });
-            slide.addText(col.title, { x: col.x + 0.3, y: 1.9, w: 5.2, h: 0.5, fontSize: 18, bold: true, color: COLORS.primary });
-            col.items.forEach((item, i) => {
-              slide.addText(`✓  ${item}`, { x: col.x + 0.3, y: 2.6 + i * 0.5, w: 5.2, h: 0.4, fontSize: 12, color: COLORS.darkText });
-            });
+          ];
+          addPptxColumnsWithBullets(slide, architectureColumns, {
+            startX: 0.5,
+            startY: 1.7,
+            gapX: 6.2,
+            cardW: 5.8,
+            cardH: 3.5,
+            fill: COLORS.primaryLight,
+            border: "99CCFF",
+            titleFontSize: 18,
+            bulletStartY: 2.6,
+            bulletStep: 0.5,
+            bulletFontSize: 12,
           });
           addCard(slide, 2, 5.5, 9, 0.9, { fill: COLORS.accentLight, border: "99DDBB" });
           slide.addText("🔒  Your data stays private. Our platform stays powerful.", { x: 2.5, y: 5.6, w: 8, h: 0.7, fontSize: 16, bold: true, color: COLORS.accent, align: "center" });
@@ -2143,15 +2689,22 @@ export default function PitchDeck() {
             slide.addText(m.value, { x, y: 1.8, w: 3.8, h: 0.8, fontSize: 32, bold: true, color: COLORS.primary, align: "center" });
             slide.addText(m.label, { x, y: 2.6, w: 3.8, h: 0.4, fontSize: 12, color: COLORS.muted, align: "center" });
           });
-          [
+          const dashboardColumns = [
             { title: "Real-Time Monitoring", items: ["Device health metrics", "Inference latency tracking", "Resource utilization", "Automated alerting"], x: 0.5 },
             { title: "Model Management", items: ["Browse 50+ models", "One-click deployment", "Auto version updates", "A/B testing"], x: 6.7 },
-          ].forEach((col) => {
-            addCard(slide, col.x, 3.6, 5.8, 3.0, { fill: COLORS.white, border: "DDDDEE" });
-            slide.addText(col.title, { x: col.x + 0.3, y: 3.8, w: 5.2, h: 0.4, fontSize: 14, bold: true, color: COLORS.primary });
-            col.items.forEach((item, i) => {
-              slide.addText(`•  ${item}`, { x: col.x + 0.3, y: 4.4 + i * 0.45, w: 5.2, h: 0.35, fontSize: 11, color: COLORS.darkText });
-            });
+          ];
+          addPptxColumnsWithBullets(slide, dashboardColumns, {
+            startX: 0.5,
+            startY: 3.6,
+            gapX: 6.2,
+            cardW: 5.8,
+            cardH: 3.0,
+            fill: COLORS.white,
+            border: "DDDDEE",
+            titleFontSize: 14,
+            bulletStartY: 4.4,
+            bulletStep: 0.45,
+            bulletFontSize: 11,
           });
         },
       },
@@ -2166,15 +2719,22 @@ export default function PitchDeck() {
             addCard(slide, 1 + i * 3.8, 2.9, 3.2, 0.8, { fill: COLORS.white });
             slide.addText(t, { x: 1 + i * 3.8, y: 2.95, w: 3.2, h: 0.7, fontSize: 12, bold: true, color: COLORS.primary, align: "center" });
           });
-          [
+          const deviceColumns = [
             { title: "Device Setup Features", items: ["Secure device registration", "Automatic model download", "Background sync", "Offline mode"], x: 0.5 },
             { title: "Model Playground", items: ["Insurance FNOL processing", "Policy comparisons", "ACORD form parsing", "Document Q&A"], x: 6.7 },
-          ].forEach((col) => {
-            addCard(slide, col.x, 4.2, 5.8, 2.8, { fill: COLORS.white, border: "DDDDEE" });
-            slide.addText(col.title, { x: col.x + 0.3, y: 4.4, w: 5.2, h: 0.4, fontSize: 14, bold: true, color: COLORS.primary });
-            col.items.forEach((item, i) => {
-              slide.addText(`•  ${item}`, { x: col.x + 0.3, y: 5.0 + i * 0.45, w: 5.2, h: 0.35, fontSize: 11, color: COLORS.darkText });
-            });
+          ];
+          addPptxColumnsWithBullets(slide, deviceColumns, {
+            startX: 0.5,
+            startY: 4.2,
+            gapX: 6.2,
+            cardW: 5.8,
+            cardH: 2.8,
+            fill: COLORS.white,
+            border: "DDDDEE",
+            titleFontSize: 14,
+            bulletStartY: 5.0,
+            bulletStep: 0.45,
+            bulletFontSize: 11,
           });
         },
       },
@@ -2188,14 +2748,20 @@ export default function PitchDeck() {
             { title: "Infrastructure", items: ["Air-gapped deploy", "VPN support", "On-premise options"] },
             { title: "Audit & Monitoring", items: ["Full audit trail", "Real-time monitoring", "Threat detection"] },
           ];
-          sections.forEach((s, i) => {
-            const col = i % 2; const row = Math.floor(i / 2);
-            const x = 0.5 + col * 6.2; const y = 1.7 + row * 2.6;
-            addCard(slide, x, y, 5.8, 2.3, { fill: COLORS.primaryLight, border: "99CCFF" });
-            slide.addText(s.title, { x: x + 0.3, y: y + 0.2, w: 5.2, h: 0.4, fontSize: 16, bold: true, color: COLORS.primary });
-            s.items.forEach((item, j) => {
-              slide.addText(`✓  ${item}`, { x: x + 0.3, y: y + 0.75 + j * 0.4, w: 5.2, h: 0.35, fontSize: 11, color: COLORS.darkText });
-            });
+          addPptxGridColumnsWithBullets(slide, sections, {
+            cols: 2,
+            startX: 0.5,
+            startY: 1.7,
+            gapX: 6.2,
+            gapY: 2.6,
+            cardW: 5.8,
+            cardH: 2.3,
+            fill: COLORS.primaryLight,
+            border: "99CCFF",
+            titleFontSize: 16,
+            bulletStartOffsetY: 0.75,
+            bulletStep: 0.4,
+            bulletFontSize: 11,
           });
         },
       },
@@ -2210,9 +2776,15 @@ export default function PitchDeck() {
           slide.addText("85%", { x: 6.7, y: 1.8, w: 5.8, h: 0.8, fontSize: 36, bold: true, color: COLORS.primary, align: "center" });
           slide.addText("Fortune 500 adopting AI by 2025", { x: 6.7, y: 2.6, w: 5.8, h: 0.6, fontSize: 12, color: COLORS.muted, align: "center" });
           slide.addText("Target Industries", { x: 0.5, y: 4.2, w: 12, h: 0.5, fontSize: 18, bold: true, color: COLORS.darkText, align: "center" });
-          ["Insurance", "Healthcare", "Banking", "Legal", "Travel"].forEach((ind, i) => {
-            addCard(slide, 0.8 + i * 2.4, 4.9, 2.0, 0.8, { fill: COLORS.white, border: "DDDDEE" });
-            slide.addText(ind, { x: 0.8 + i * 2.4, y: 4.95, w: 2.0, h: 0.7, fontSize: 12, bold: true, color: COLORS.primary, align: "center" });
+          addPptxTextChips(slide, ["Insurance", "Healthcare", "Banking", "Legal", "Travel"], {
+            startX: 0.8,
+            startY: 4.9,
+            gapX: 2.4,
+            chipW: 2.0,
+            chipH: 0.8,
+            fill: COLORS.white,
+            border: "DDDDEE",
+            textColor: COLORS.primary,
           });
           slide.addText("Industries with strict compliance, high-value use cases, and regulatory pressure for data sovereignty", { x: 1, y: 6.0, w: 11, h: 0.5, fontSize: 12, color: COLORS.muted, align: "center" });
         },
@@ -2222,18 +2794,23 @@ export default function PitchDeck() {
         title: "Customer Use Cases", subtitle: "Real-World Applications",
         build: (slide) => {
           const cases = [
-            { icon: "🏥", title: "Healthcare Provider", result: "90% faster, $2M savings", desc: "HIPAA-compliant patient record analysis on-premise" },
-            { icon: "🏦", title: "Regional Bank", result: "75% faster, 40% more accurate", desc: "Private credit risk assessment without cloud exposure" },
-            { icon: "📋", title: "Insurance Company", result: "60% faster, 95% accuracy", desc: "ACORD parsing & FNOL across 50+ branches" },
-            { icon: "⚖️", title: "Law Firm", result: "80% faster review", desc: "Air-gapped legal document analysis" },
+            { title: "🏥  Healthcare Provider", desc: "HIPAA-compliant patient record analysis on-premise\n90% faster, $2M savings", accent: COLORS.accent },
+            { title: "🏦  Regional Bank", desc: "Private credit risk assessment without cloud exposure\n75% faster, 40% more accurate", accent: COLORS.accent },
+            { title: "📋  Insurance Company", desc: "ACORD parsing & FNOL across 50+ branches\n60% faster, 95% accuracy", accent: COLORS.accent },
+            { title: "⚖️  Law Firm", desc: "Air-gapped legal document analysis\n80% faster review", accent: COLORS.accent },
           ];
-          cases.forEach((c, i) => {
-            const col = i % 2; const row = Math.floor(i / 2);
-            const x = 0.5 + col * 6.2; const y = 1.7 + row * 2.6;
-            addCard(slide, x, y, 5.8, 2.3, { fill: COLORS.accentLight, border: "99DDBB" });
-            slide.addText(`${c.icon}  ${c.title}`, { x: x + 0.3, y: y + 0.2, w: 5.2, h: 0.4, fontSize: 14, bold: true, color: COLORS.darkText });
-            slide.addText(c.desc, { x: x + 0.3, y: y + 0.7, w: 5.2, h: 0.6, fontSize: 11, color: COLORS.muted });
-            slide.addText(c.result, { x: x + 0.3, y: y + 1.5, w: 5.2, h: 0.4, fontSize: 13, bold: true, color: COLORS.accent });
+          addPptxGridCards(slide, cases, {
+            cols: 2,
+            startX: 0.5,
+            startY: 1.7,
+            gapX: 6.2,
+            gapY: 2.6,
+            cardW: 5.8,
+            cardH: 2.3,
+            fill: COLORS.accentLight,
+            border: "99DDBB",
+            titleFontSize: 14,
+            descFontSize: 11,
           });
         },
       },
@@ -2249,12 +2826,18 @@ export default function PitchDeck() {
             { title: "Cost Efficiency", desc: "90% less than cloud APIs, $100K+ savings/enterprise" },
             { title: "Simple Management", desc: "Unified dashboard, 70% less DevOps overhead" },
           ];
-          advantages.forEach((a, i) => {
-            const col = i % 2; const row = Math.floor(i / 2);
-            const x = 0.5 + col * 6.2; const y = 1.7 + row * 1.7;
-            addCard(slide, x, y, 5.8, 1.5, { fill: COLORS.primaryLight, border: "99CCFF" });
-            slide.addText(a.title, { x: x + 0.3, y: y + 0.15, w: 5.2, h: 0.4, fontSize: 14, bold: true, color: COLORS.primary });
-            slide.addText(a.desc, { x: x + 0.3, y: y + 0.6, w: 5.2, h: 0.7, fontSize: 11, color: COLORS.darkText });
+          addPptxGridCards(slide, advantages, {
+            cols: 2,
+            startX: 0.5,
+            startY: 1.7,
+            gapX: 6.2,
+            gapY: 1.7,
+            cardW: 5.8,
+            cardH: 1.5,
+            fill: COLORS.primaryLight,
+            border: "99CCFF",
+            titleFontSize: 14,
+            descFontSize: 11,
           });
         },
       },
@@ -2267,25 +2850,39 @@ export default function PitchDeck() {
             { phase: "Phase 2: Q3–Q4", title: "Pilot → Production", items: ["Convert pilots to paid", "Healthcare & banking", "50+ customers"] },
             { phase: "Phase 3: 2026", title: "Global Scale", items: ["EU & APAC", "Model marketplace", "1,000+ customers"] },
           ];
-          phases.forEach((p, i) => {
-            const x = 0.5 + i * 4.2;
-            addCard(slide, x, 1.7, 3.8, 3.0, { fill: COLORS.primaryLight, border: "99CCFF" });
-            slide.addText(p.phase, { x: x + 0.2, y: 1.8, w: 3.4, h: 0.4, fontSize: 12, bold: true, color: COLORS.primary, align: "center" });
-            slide.addText(p.title, { x: x + 0.2, y: 2.2, w: 3.4, h: 0.4, fontSize: 14, bold: true, color: COLORS.darkText, align: "center" });
-            p.items.forEach((item, j) => {
-              slide.addText(`•  ${item}`, { x: x + 0.4, y: 2.8 + j * 0.4, w: 3.2, h: 0.35, fontSize: 11, color: COLORS.darkText });
-            });
+          const phaseColumns = phases.map((phase) => ({
+            title: `${phase.phase} | ${phase.title}`,
+            items: phase.items,
+          }));
+          addPptxColumnsWithBullets(slide, phaseColumns, {
+            startX: 0.5,
+            startY: 1.7,
+            gapX: 4.2,
+            cardW: 3.8,
+            cardH: 3.0,
+            fill: COLORS.primaryLight,
+            border: "99CCFF",
+            titleFontSize: 12,
+            bulletStartY: 2.8,
+            bulletStep: 0.4,
+            bulletFontSize: 11,
           });
-          [
+          const goToMarketColumns = [
             { title: "Sales Channels", items: ["Direct enterprise sales", "SI partnerships (Deloitte, PwC)", "Cloud alliances (AWS, Azure)", "Industry resellers"] },
             { title: "Marketing Strategy", items: ["Conference thought leadership", "Case studies & ROI calculators", "Whitepapers & webinars", "Analyst relations (Gartner)"] },
-          ].forEach((col, i) => {
-            const x = 0.5 + i * 6.2;
-            addCard(slide, x, 5.0, 5.8, 2.2, { fill: COLORS.bgGray });
-            slide.addText(col.title, { x: x + 0.3, y: 5.1, w: 5.2, h: 0.4, fontSize: 13, bold: true, color: COLORS.primary });
-            col.items.forEach((item, j) => {
-              slide.addText(`•  ${item}`, { x: x + 0.3, y: 5.6 + j * 0.35, w: 5.2, h: 0.3, fontSize: 10, color: COLORS.darkText });
-            });
+          ];
+          addPptxColumnsWithBullets(slide, goToMarketColumns, {
+            startX: 0.5,
+            startY: 5.0,
+            gapX: 6.2,
+            cardW: 5.8,
+            cardH: 2.2,
+            fill: COLORS.bgGray,
+            border: COLORS.bgGray,
+            titleFontSize: 13,
+            bulletStartY: 5.6,
+            bulletStep: 0.35,
+            bulletFontSize: 10,
           });
         },
       },
@@ -2298,25 +2895,33 @@ export default function PitchDeck() {
             { title: "Usage-Based", items: ["Cloud inference charges", "Storage fees", "API request volume", "Add-on devices ($50/dev/mo)"] },
             { title: "Premium Services", items: ["Custom training ($50K+)", "24/7 dedicated support", "On-premise deployment", "Professional services ($200/hr)"] },
           ];
-          tiers.forEach((t, i) => {
-            const x = 0.5 + i * 4.2;
-            addCard(slide, x, 1.7, 3.8, 3.0, { fill: COLORS.white, border: "DDDDEE" });
-            slide.addText(t.title, { x: x + 0.2, y: 1.85, w: 3.4, h: 0.4, fontSize: 14, bold: true, color: COLORS.primary, align: "center" });
-            t.items.forEach((item, j) => {
-              slide.addText(`•  ${item}`, { x: x + 0.3, y: 2.5 + j * 0.4, w: 3.2, h: 0.35, fontSize: 11, color: COLORS.darkText });
-            });
+          addPptxColumnsWithBullets(slide, tiers, {
+            startX: 0.5,
+            startY: 1.7,
+            gapX: 4.2,
+            cardW: 3.8,
+            cardH: 3.0,
+            fill: COLORS.white,
+            border: "DDDDEE",
+            titleFontSize: 14,
+            bulletStartY: 2.5,
+            bulletStep: 0.4,
+            bulletFontSize: 11,
           });
           addCard(slide, 0.5, 5.0, 12, 2.0, { fill: COLORS.primaryLight, border: "99CCFF" });
           slide.addText("Revenue Projections", { x: 0.5, y: 5.1, w: 12, h: 0.5, fontSize: 18, bold: true, color: COLORS.primary, align: "center" });
-          [
+          const projectionMetrics = [
             { value: "$3M", label: "Year 1 ARR", sub: "25 customers" },
             { value: "$18M", label: "Year 2 ARR", sub: "150 customers" },
             { value: "$65M", label: "Year 3 ARR", sub: "500+ customers" },
-          ].forEach((m, i) => {
-            const x = 1.5 + i * 3.5;
-            slide.addText(m.value, { x, y: 5.6, w: 3, h: 0.6, fontSize: 28, bold: true, color: COLORS.primary, align: "center" });
-            slide.addText(m.label, { x, y: 6.2, w: 3, h: 0.3, fontSize: 12, color: COLORS.muted, align: "center" });
-            slide.addText(m.sub, { x, y: 6.5, w: 3, h: 0.3, fontSize: 10, color: COLORS.muted, align: "center" });
+          ];
+          addPptxMetricCards(slide, projectionMetrics, {
+            startX: 1.5,
+            startY: 5.45,
+            gapX: 3.5,
+            cardW: 3.0,
+            cardH: 1.3,
+            fill: COLORS.primaryLight,
           });
         },
       },
@@ -2330,14 +2935,39 @@ export default function PitchDeck() {
             { phase: "Phase 3", duration: "Mo 5–7", title: "Scale & Polish", items: ["Federated learning", "Workflow engine", "Doc processing", "Multi-tenant"] },
             { phase: "Phase 4", duration: "Mo 7–9 (Q3)", title: "Enterprise Ready", items: ["Security audit", "Performance opt.", "CI/CD pipeline", "GA launch"] },
           ];
-          phases.forEach((p, i) => {
-            const x = 0.4 + i * 3.15;
-            addCard(slide, x, 1.7, 2.9, 3.5, { fill: i < 2 ? COLORS.primaryLight : COLORS.bgGray, border: "99CCFF" });
-            slide.addText(`${p.phase}  •  ${p.duration}`, { x: x + 0.15, y: 1.8, w: 2.6, h: 0.35, fontSize: 10, bold: true, color: COLORS.primary });
-            slide.addText(p.title, { x: x + 0.15, y: 2.2, w: 2.6, h: 0.4, fontSize: 14, bold: true, color: COLORS.darkText });
-            p.items.forEach((item, j) => {
-              slide.addText(`✓  ${item}`, { x: x + 0.15, y: 2.75 + j * 0.4, w: 2.6, h: 0.35, fontSize: 10, color: COLORS.darkText });
-            });
+          const earlyPhaseColumns = phases.slice(0, 2).map((phase) => ({
+            title: `${phase.phase} • ${phase.duration} | ${phase.title}`,
+            items: phase.items,
+          }));
+          addPptxColumnsWithBullets(slide, earlyPhaseColumns, {
+            startX: 0.4,
+            startY: 1.7,
+            gapX: 3.15,
+            cardW: 2.9,
+            cardH: 3.5,
+            fill: COLORS.primaryLight,
+            border: "99CCFF",
+            titleFontSize: 10,
+            bulletStartY: 2.75,
+            bulletStep: 0.4,
+            bulletFontSize: 10,
+          });
+          const latePhaseColumns = phases.slice(2).map((phase) => ({
+            title: `${phase.phase} • ${phase.duration} | ${phase.title}`,
+            items: phase.items,
+          }));
+          addPptxColumnsWithBullets(slide, latePhaseColumns, {
+            startX: 6.7,
+            startY: 1.7,
+            gapX: 3.15,
+            cardW: 2.9,
+            cardH: 3.5,
+            fill: COLORS.bgGray,
+            border: "99CCFF",
+            titleFontSize: 10,
+            bulletStartY: 2.75,
+            bulletStep: 0.4,
+            bulletFontSize: 10,
           });
           addCard(slide, 1.5, 5.5, 10, 1.0, { fill: COLORS.primaryLight });
           slide.addText("⏱  Enterprise Ready by Q3 (9 Months) with current team of 19", { x: 1.5, y: 5.6, w: 10, h: 0.8, fontSize: 16, bold: true, color: COLORS.primary, align: "center" });
@@ -2403,35 +3033,17 @@ export default function PitchDeck() {
             },
           ];
 
-          sprints.forEach((sp, i) => {
-            const x = 0.4 + i * 4.2;
-            const cardH = 4.6;
-            addCard(slide, x, 2.1, 3.9, cardH, { fill: COLORS.white, border: sp.sync ? "F59E0B" : "3B82F6" });
-
-            // Sprint header
-            slide.addText(sp.s, { x: x + 0.15, y: 2.15, w: 2.0, h: 0.3, fontSize: 11, bold: true, color: "3B82F6" });
-            slide.addText(sp.weeks, { x: x + 2.2, y: 2.15, w: 1.5, h: 0.3, fontSize: 8, color: COLORS.muted, align: "right" });
-            if (sp.sync) {
-              slide.addText(">> SYNC POINT - Teams align on model API contracts", { x: x + 0.15, y: 2.45, w: 3.6, h: 0.22, fontSize: 7, bold: true, color: "D97706" });
-            }
-
-            // Product Team
-            const prodY = sp.sync ? 2.7 : 2.5;
-            slide.addText("PRODUCT TEAM (4 engineers)", { x: x + 0.15, y: prodY, w: 3.6, h: 0.22, fontSize: 8, bold: true, color: "8B5CF6" });
-            sp.product.forEach((item, j) => {
-              slide.addText(item, { x: x + 0.35, y: prodY + 0.25 + j * 0.22, w: 3.4, h: 0.2, fontSize: 7, color: COLORS.darkText, bullet: { code: "2022" } });
-            });
-
-            // ML Team
-            const mlY = prodY + 0.25 + sp.product.length * 0.22 + 0.12;
-            slide.addText("ML TEAM (3 engineers)", { x: x + 0.15, y: mlY, w: 3.6, h: 0.22, fontSize: 8, bold: true, color: "4F46E5" });
-            sp.ml.forEach((item, j) => {
-              slide.addText(item, { x: x + 0.35, y: mlY + 0.25 + j * 0.22, w: 3.4, h: 0.2, fontSize: 7, color: COLORS.darkText, bullet: { code: "2022" } });
-            });
-
-            // QA
-            const qaY = mlY + 0.25 + sp.ml.length * 0.22 + 0.1;
-            slide.addText(`QA: ${sp.qa}`, { x: x + 0.15, y: qaY, w: 3.6, h: 0.2, fontSize: 7, italic: true, color: COLORS.muted });
+          addPptxSprintColumns(slide, sprints, {
+            startX: 0.4,
+            startY: 2.1,
+            cardW: 3.9,
+            cardH: 4.6,
+            gapX: 4.2,
+            borderColor: "3B82F6",
+            sprintColor: "3B82F6",
+            showSyncBanner: true,
+            productLabel: "PRODUCT TEAM (4 engineers)",
+            mlLabel: "ML TEAM (3 engineers)",
           });
 
           // Exit criteria
@@ -2494,27 +3106,16 @@ export default function PitchDeck() {
             },
           ];
 
-          sprints.forEach((sp, i) => {
-            const x = 0.4 + i * 4.2;
-            addCard(slide, x, 1.55, 3.9, 4.8, { fill: COLORS.white, border: "8B5CF6" });
-
-            slide.addText(sp.s, { x: x + 0.15, y: 1.6, w: 2.0, h: 0.3, fontSize: 11, bold: true, color: "8B5CF6" });
-            slide.addText(sp.weeks, { x: x + 2.2, y: 1.6, w: 1.5, h: 0.3, fontSize: 8, color: COLORS.muted, align: "right" });
-
-            const prodY = 1.95;
-            slide.addText("PRODUCT TEAM", { x: x + 0.15, y: prodY, w: 3.6, h: 0.22, fontSize: 8, bold: true, color: "8B5CF6" });
-            sp.product.forEach((item, j) => {
-              slide.addText(item, { x: x + 0.35, y: prodY + 0.25 + j * 0.22, w: 3.4, h: 0.2, fontSize: 7, color: COLORS.darkText, bullet: { code: "2022" } });
-            });
-
-            const mlY = prodY + 0.25 + sp.product.length * 0.22 + 0.12;
-            slide.addText("ML TEAM", { x: x + 0.15, y: mlY, w: 3.6, h: 0.22, fontSize: 8, bold: true, color: "4F46E5" });
-            sp.ml.forEach((item, j) => {
-              slide.addText(item, { x: x + 0.35, y: mlY + 0.25 + j * 0.22, w: 3.4, h: 0.2, fontSize: 7, color: COLORS.darkText, bullet: { code: "2022" } });
-            });
-
-            const qaY = mlY + 0.25 + sp.ml.length * 0.22 + 0.1;
-            slide.addText(`QA: ${sp.qa}`, { x: x + 0.15, y: qaY, w: 3.6, h: 0.2, fontSize: 7, italic: true, color: COLORS.muted });
+          addPptxSprintColumns(slide, sprints, {
+            startX: 0.4,
+            startY: 1.55,
+            cardW: 3.9,
+            cardH: 4.8,
+            gapX: 4.2,
+            borderColor: "8B5CF6",
+            sprintColor: "8B5CF6",
+            productLabel: "PRODUCT TEAM",
+            mlLabel: "ML TEAM",
           });
 
           addCard(slide, 0.5, 6.5, 12, 0.5, { fill: "F3E8FF", border: "C4B5FD" });
@@ -2576,27 +3177,16 @@ export default function PitchDeck() {
             },
           ];
 
-          sprints.forEach((sp, i) => {
-            const x = 0.4 + i * 4.2;
-            addCard(slide, x, 1.55, 3.9, 4.8, { fill: COLORS.white, border: "4F46E5" });
-
-            slide.addText(sp.s, { x: x + 0.15, y: 1.6, w: 2.0, h: 0.3, fontSize: 11, bold: true, color: "4F46E5" });
-            slide.addText(sp.weeks, { x: x + 2.2, y: 1.6, w: 1.5, h: 0.3, fontSize: 8, color: COLORS.muted, align: "right" });
-
-            const prodY = 1.95;
-            slide.addText("PRODUCT TEAM", { x: x + 0.15, y: prodY, w: 3.6, h: 0.22, fontSize: 8, bold: true, color: "8B5CF6" });
-            sp.product.forEach((item, j) => {
-              slide.addText(item, { x: x + 0.35, y: prodY + 0.25 + j * 0.22, w: 3.4, h: 0.2, fontSize: 7, color: COLORS.darkText, bullet: { code: "2022" } });
-            });
-
-            const mlY = prodY + 0.25 + sp.product.length * 0.22 + 0.12;
-            slide.addText("ML TEAM", { x: x + 0.15, y: mlY, w: 3.6, h: 0.22, fontSize: 8, bold: true, color: "4F46E5" });
-            sp.ml.forEach((item, j) => {
-              slide.addText(item, { x: x + 0.35, y: mlY + 0.25 + j * 0.22, w: 3.4, h: 0.2, fontSize: 7, color: COLORS.darkText, bullet: { code: "2022" } });
-            });
-
-            const qaY = mlY + 0.25 + sp.ml.length * 0.22 + 0.1;
-            slide.addText(`QA: ${sp.qa}`, { x: x + 0.15, y: qaY, w: 3.6, h: 0.2, fontSize: 7, italic: true, color: COLORS.muted });
+          addPptxSprintColumns(slide, sprints, {
+            startX: 0.4,
+            startY: 1.55,
+            cardW: 3.9,
+            cardH: 4.8,
+            gapX: 4.2,
+            borderColor: "4F46E5",
+            sprintColor: "4F46E5",
+            productLabel: "PRODUCT TEAM",
+            mlLabel: "ML TEAM",
           });
 
           addCard(slide, 0.5, 6.5, 12, 0.5, { fill: "E0E7FF", border: "A5B4FC" });
@@ -2658,27 +3248,16 @@ export default function PitchDeck() {
             },
           ];
 
-          sprints.forEach((sp, i) => {
-            const x = 0.4 + i * 4.2;
-            addCard(slide, x, 1.55, 3.9, 4.8, { fill: COLORS.white, border: "14B8A6" });
-
-            slide.addText(sp.s, { x: x + 0.15, y: 1.6, w: 2.0, h: 0.3, fontSize: 11, bold: true, color: "14B8A6" });
-            slide.addText(sp.weeks, { x: x + 2.2, y: 1.6, w: 1.5, h: 0.3, fontSize: 8, color: COLORS.muted, align: "right" });
-
-            const prodY = 1.95;
-            slide.addText("PRODUCT TEAM", { x: x + 0.15, y: prodY, w: 3.6, h: 0.22, fontSize: 8, bold: true, color: "8B5CF6" });
-            sp.product.forEach((item, j) => {
-              slide.addText(item, { x: x + 0.35, y: prodY + 0.25 + j * 0.22, w: 3.4, h: 0.2, fontSize: 7, color: COLORS.darkText, bullet: { code: "2022" } });
-            });
-
-            const mlY = prodY + 0.25 + sp.product.length * 0.22 + 0.12;
-            slide.addText("ML TEAM", { x: x + 0.15, y: mlY, w: 3.6, h: 0.22, fontSize: 8, bold: true, color: "4F46E5" });
-            sp.ml.forEach((item, j) => {
-              slide.addText(item, { x: x + 0.35, y: mlY + 0.25 + j * 0.22, w: 3.4, h: 0.2, fontSize: 7, color: COLORS.darkText, bullet: { code: "2022" } });
-            });
-
-            const qaY = mlY + 0.25 + sp.ml.length * 0.22 + 0.1;
-            slide.addText(`QA: ${sp.qa}`, { x: x + 0.15, y: qaY, w: 3.6, h: 0.2, fontSize: 7, italic: true, color: COLORS.muted });
+          addPptxSprintColumns(slide, sprints, {
+            startX: 0.4,
+            startY: 1.55,
+            cardW: 3.9,
+            cardH: 4.8,
+            gapX: 4.2,
+            borderColor: "14B8A6",
+            sprintColor: "14B8A6",
+            productLabel: "PRODUCT TEAM",
+            mlLabel: "ML TEAM",
           });
 
           addCard(slide, 0.5, 6.5, 12, 0.5, { fill: "CCFBF1", border: "5EEAD4" });
@@ -2688,27 +3267,34 @@ export default function PitchDeck() {
       {
         title: "How It Functions", subtitle: "End-to-End Architecture & Flow",
         build: (slide) => {
-          ["Admin Portal", "→", "Cloud Platform", "→", "Edge Devices"].forEach((label, i) => {
-            const x = 0.5 + i * 2.4;
-            if (label === "→") {
-              slide.addText("→", { x, y: 2.0, w: 2, h: 0.8, fontSize: 24, color: COLORS.muted, align: "center" });
-            } else {
-              addCard(slide, x, 1.7, 2.2, 1.2, { fill: COLORS.primaryLight, border: "99CCFF" });
-              slide.addText(label, { x, y: 1.85, w: 2.2, h: 0.9, fontSize: 13, bold: true, color: COLORS.primary, align: "center" });
-            }
+          const flowItems = ["Admin Portal", "→", "Cloud Platform", "→", "Edge Devices"];
+          addPptxFlowSequence(slide, flowItems, {
+            startX: 0.5,
+            startY: 1.7,
+            gapX: 2.4,
+            cardW: 2.2,
+            cardH: 1.2,
+            cardFill: COLORS.primaryLight,
+            cardBorder: "99CCFF",
+            nodeFontSize: 13,
+            arrowFontSize: 24,
           });
-          const cols = [
+          addPptxColumnsWithBullets(slide, [
             { title: "Model Lifecycle", items: ["Discover → Activate → Deploy → Monitor", "Auto-sync to devices", "Version mgmt & rollback"] },
             { title: "Inference Pipeline", items: ["Online: Cloud API + load balancing", "Offline: Local Ollama + failover", "Hybrid: Intelligent routing"] },
             { title: "Security Layer", items: ["Token-based device auth", "RLS on every table", "E2E encryption for sync"] },
-          ];
-          cols.forEach((c, i) => {
-            const x = 0.5 + i * 4.2;
-            addCard(slide, x, 3.3, 3.8, 2.5, { fill: COLORS.white, border: "DDDDEE" });
-            slide.addText(c.title, { x: x + 0.2, y: 3.4, w: 3.4, h: 0.4, fontSize: 13, bold: true, color: COLORS.primary });
-            c.items.forEach((item, j) => {
-              slide.addText(`•  ${item}`, { x: x + 0.2, y: 3.9 + j * 0.4, w: 3.4, h: 0.35, fontSize: 10, color: COLORS.darkText });
-            });
+          ], {
+            startX: 0.5,
+            startY: 3.3,
+            gapX: 4.2,
+            cardW: 3.8,
+            cardH: 2.5,
+            fill: COLORS.white,
+            border: "DDDDEE",
+            titleFontSize: 13,
+            bulletStartY: 3.9,
+            bulletStep: 0.4,
+            bulletFontSize: 10,
           });
           addCard(slide, 1.5, 6.1, 10, 0.8, { fill: COLORS.accentLight });
           slide.addText("Data never leaves customer network  •  Models sync metadata only  •  Zero-knowledge cloud", { x: 1.5, y: 6.2, w: 10, h: 0.6, fontSize: 12, bold: true, color: COLORS.accent, align: "center" });
@@ -2723,23 +3309,29 @@ export default function PitchDeck() {
             { value: "5,000+", label: "Edge Devices", desc: "Auto-sync & health monitoring" },
             { value: "2–3 / Qtr", label: "New Verticals", desc: "Domain packs per quarter" },
           ];
-          metrics.forEach((m, i) => {
-            const x = 0.5 + i * 4.2;
-            addCard(slide, x, 1.7, 3.8, 2.0, { fill: COLORS.primaryLight });
-            slide.addText(m.value, { x, y: 1.8, w: 3.8, h: 0.7, fontSize: 28, bold: true, color: COLORS.primary, align: "center" });
-            slide.addText(m.label, { x, y: 2.5, w: 3.8, h: 0.4, fontSize: 13, bold: true, color: COLORS.darkText, align: "center" });
-            slide.addText(m.desc, { x, y: 2.9, w: 3.8, h: 0.4, fontSize: 10, color: COLORS.muted, align: "center" });
+          addPptxMetricCards(slide, metrics, {
+            startX: 0.5,
+            startY: 1.7,
+            gapX: 4.2,
+            cardW: 3.8,
+            cardH: 2.0,
+            fill: COLORS.primaryLight,
           });
-          [
+          addPptxColumnsWithBullets(slide, [
             { title: "Team (10–12)", items: ["1 CTO / Tech Lead", "1 Product Manager", "2 Frontend (React/TS)", "1 Electron Specialist", "2 Backend/API", "2 ML Engineers", "1 MLOps", "1 QA"] },
             { title: "Scaling Triggers", items: ["100+ tenants → 2 SREs", "10K+ devices → Infra team (3)", "5+ verticals → ML squads", "International → Regional support"] },
-          ].forEach((col, i) => {
-            const x = 0.5 + i * 6.2;
-            addCard(slide, x, 4.0, 5.8, 3.0, { fill: COLORS.bgGray, border: "DDDDEE" });
-            slide.addText(col.title, { x: x + 0.3, y: 4.1, w: 5.2, h: 0.4, fontSize: 14, bold: true, color: COLORS.primary });
-            col.items.forEach((item, j) => {
-              slide.addText(`✓  ${item}`, { x: x + 0.3, y: 4.6 + j * 0.3, w: 5.2, h: 0.25, fontSize: 10, color: COLORS.darkText });
-            });
+          ], {
+            startX: 0.5,
+            startY: 4.0,
+            gapX: 6.2,
+            cardW: 5.8,
+            cardH: 3.0,
+            fill: COLORS.bgGray,
+            border: "DDDDEE",
+            titleFontSize: 14,
+            bulletStartY: 4.6,
+            bulletStep: 0.3,
+            bulletFontSize: 10,
           });
         },
       },
@@ -2755,18 +3347,37 @@ export default function PitchDeck() {
             { pod: "ACORD Parser", revenue: "$15K–$45K/yr", desc: "Per-page parsing volume" },
             { pod: "Custom Workflows", revenue: "$30K–$100K/yr", desc: "Per-execution + seat licensing" },
           ];
-          pods.forEach((p, i) => {
-            const col = i % 2; const row = Math.floor(i / 2);
-            const x = 0.5 + col * 6.2; const y = 1.7 + row * 1.6;
-            addCard(slide, x, y, 5.8, 1.4, { fill: COLORS.white, border: "DDDDEE" });
-            slide.addText(p.pod, { x: x + 0.3, y: y + 0.1, w: 3.5, h: 0.4, fontSize: 13, bold: true, color: COLORS.darkText });
-            slide.addText(p.revenue, { x: x + 3.8, y: y + 0.1, w: 1.7, h: 0.4, fontSize: 11, bold: true, color: COLORS.primary, align: "right" });
-            slide.addText(p.desc, { x: x + 0.3, y: y + 0.6, w: 5.2, h: 0.5, fontSize: 10, color: COLORS.muted });
+          const podCards = pods.map((podItem) => ({
+            title: `${podItem.pod} | ${podItem.revenue}`,
+            desc: podItem.desc,
+            accent: COLORS.darkText,
+          }));
+          addPptxGridCards(slide, podCards, {
+            cols: 2,
+            startX: 0.5,
+            startY: 1.7,
+            gapX: 6.2,
+            gapY: 1.6,
+            cardW: 5.8,
+            cardH: 1.4,
+            fill: COLORS.white,
+            border: "DDDDEE",
+            titleFontSize: 12,
+            descFontSize: 10,
           });
           addCard(slide, 0.5, 6.5, 12, 0.8, { fill: COLORS.primaryLight });
-          const summaries = ["$115K–$375K / tenant / year", "6 → 15+ Pods roadmap", "85%+ Gross Margin"];
-          summaries.forEach((s, i) => {
-            slide.addText(s, { x: 0.8 + i * 4, y: 6.55, w: 3.5, h: 0.7, fontSize: 13, bold: true, color: COLORS.primary, align: "center" });
+          const summaries = [
+            { value: "$115K–$375K / tenant / year", label: "", sub: "" },
+            { value: "6 → 15+ Pods roadmap", label: "", sub: "" },
+            { value: "85%+ Gross Margin", label: "", sub: "" },
+          ];
+          addPptxMetricCards(slide, summaries, {
+            startX: 0.8,
+            startY: 6.45,
+            gapX: 4.0,
+            cardW: 3.5,
+            cardH: 0.7,
+            fill: COLORS.primaryLight,
           });
         },
       },
@@ -2783,14 +3394,12 @@ export default function PitchDeck() {
             { title: "ML Architect", subtitle: "AI Models & Training", color: "4F46E5", items: ["ML Engineer (2) — LoRA fine-tuning", "MLOps (1) — Model CI/CD", "GGUF quantization & packaging", "A/B testing pipelines"] },
             { title: "QA Lead", subtitle: "Quality & Compliance", color: "14B8A6", items: ["Platform QA (1) — E2E testing", "Automated regression suites", "SOC2 security audit coord.", "Performance & load testing"] },
           ];
-          teams.forEach((t, i) => {
-            const x = 0.4 + i * 3.15;
-            addCard(slide, x, 2.6, 2.9, 4.0, { fill: COLORS.white, border: t.color });
-            slide.addText(t.title, { x: x + 0.15, y: 2.7, w: 2.6, h: 0.4, fontSize: 13, bold: true, color: t.color });
-            slide.addText(t.subtitle, { x: x + 0.15, y: 3.1, w: 2.6, h: 0.3, fontSize: 9, color: COLORS.muted });
-            t.items.forEach((item, j) => {
-              slide.addText(`▸  ${item}`, { x: x + 0.15, y: 3.5 + j * 0.35, w: 2.6, h: 0.3, fontSize: 9, color: COLORS.darkText });
-            });
+          addPptxTeamRoleCards(slide, teams, {
+            startX: 0.4,
+            startY: 2.6,
+            gapX: 3.15,
+            cardW: 2.9,
+            cardH: 4.0,
           });
           addCard(slide, 1.5, 6.8, 10, 0.6, { fill: COLORS.accentLight });
           slide.addText("Total Headcount: 19 people — CTO (1) + CIO Team (8) + Product (4) + ML (3) + QA (1) + BA (1) + Support (1)", { x: 1.5, y: 6.85, w: 10, h: 0.5, fontSize: 11, bold: true, color: COLORS.accent, align: "center" });
@@ -2989,22 +3598,18 @@ export default function PitchDeck() {
           addCard(slide, 0.4, 1.25, 4.0, 0.36, { fill: jd.color, border: jd.color });
           slide.addText(jd.dept, { x: 0.55, y: 1.29, w: 3.8, h: 0.28, fontSize: 10, bold: true, color: COLORS.white });
 
-          const renderCol = (sections: typeof leftSections, startX: number) => {
-            let curY = 1.75;
-            sections.forEach((sec) => {
-              addCard(slide, startX, curY, 5.85, 0.28, { fill: jd.color, border: jd.color });
-              slide.addText(sec.label.toUpperCase(), { x: startX + 0.12, y: curY + 0.04, w: 5.65, h: 0.2, fontSize: 8.5, bold: true, color: COLORS.white });
-              curY += 0.3;
-              sec.items.forEach((item) => {
-                slide.addText(`   ${item}`, { x: startX + 0.12, y: curY, w: 5.65, h: 0.31, fontSize: 9, color: COLORS.darkText });
-                curY += 0.32;
-              });
-              curY += 0.14;
-            });
-          };
-
-          renderCol(leftSections, 0.4);
-          renderCol(rightSections, 6.55);
+          addPptxJDSectionColumn(slide, leftSections, {
+            startX: 0.4,
+            startY: 1.75,
+            sectionWidth: 5.85,
+            sectionColor: jd.color,
+          });
+          addPptxJDSectionColumn(slide, rightSections, {
+            startX: 6.55,
+            startY: 1.75,
+            sectionWidth: 5.85,
+            sectionColor: jd.color,
+          });
         },
       })),
       {
@@ -3013,15 +3618,24 @@ export default function PitchDeck() {
           slide.addShape(pptx.ShapeType.rect, { x: 0, y: 0, w: "100%", h: "100%", fill: { color: COLORS.dark } });
           slide.addText("$8M Series A", { x: 1, y: 1.0, w: 11, h: 1.2, fontSize: 48, bold: true, color: COLORS.primary, align: "center" });
           slide.addText("24-month runway to achieve profitability", { x: 1, y: 2.2, w: 11, h: 0.6, fontSize: 18, color: "AAAACC", align: "center" });
-          [
+          const finalColumns = [
             { title: "Use of Funds", items: ["45% Engineering & Product", "30% Sales & Marketing", "15% Infrastructure", "10% G&A"], x: 1.5 },
             { title: "Key Milestones (18 Mo)", items: ["150+ enterprise customers", "15,000+ active devices", "75+ domain models", "$20M ARR"], x: 7 },
-          ].forEach((col) => {
-            addCard(slide, col.x, 3.2, 4.5, 3.0, { fill: "2A2A4E" });
-            slide.addText(col.title, { x: col.x + 0.3, y: 3.3, w: 3.9, h: 0.4, fontSize: 14, bold: true, color: COLORS.white });
-            col.items.forEach((item, j) => {
-              slide.addText(`•  ${item}`, { x: col.x + 0.3, y: 3.9 + j * 0.4, w: 3.9, h: 0.35, fontSize: 12, color: "CCCCDD" });
-            });
+          ];
+          addPptxColumnsWithBullets(slide, finalColumns, {
+            startX: 1.5,
+            startY: 3.2,
+            gapX: 5.5,
+            cardW: 4.5,
+            cardH: 3.0,
+            fill: "2A2A4E",
+            border: "2A2A4E",
+            titleFontSize: 14,
+            bulletStartY: 3.9,
+            bulletStep: 0.4,
+            bulletFontSize: 12,
+            titleColor: COLORS.white,
+            bulletColor: "CCCCDD",
           });
           slide.addText("Join us in building the future of private, compliant enterprise AI", { x: 1, y: 6.5, w: 11, h: 0.5, fontSize: 14, color: "AAAACC", align: "center" });
         },
@@ -3088,15 +3702,11 @@ export default function PitchDeck() {
           </Button>
 
           <div className="flex gap-2">
-            {slides.map((_, index) => (
+            {slides.map((slide, index) => (
               <button
-                key={index}
+                key={slide.id}
                 onClick={() => goToSlide(index)}
-                className={`w-3 h-3 rounded-full transition-all ${
-                  currentSlide === index
-                    ? "bg-primary w-8"
-                    : "bg-muted-foreground/30 hover:bg-muted-foreground/50"
-                }`}
+                className={getSlideDotClassName(currentSlide === index)}
               />
             ))}
           </div>

@@ -27,7 +27,7 @@ from typing import Optional
 from urllib.parse import quote
 
 import httpx
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 import structlog
 
@@ -48,9 +48,26 @@ log = structlog.get_logger("tenants")
 
 _VALID_PLANS = {"starter", "growth", "enterprise"}
 # Custom slug: lowercase, alphanumeric + hyphens, min 3 chars, no leading/trailing hyphen.
-_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{1,}[a-z0-9]$")
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9\-]+[a-z0-9]$")
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9_\-:.]{8,128}$")
+
+
+@router.get("/api/v1/auth/email-availability")
+@limiter.limit("30/minute")
+async def check_email_availability(
+    request: Request,  # required by slowapi
+    email: str = Query(..., min_length=6, max_length=254),
+):
+    normalized_email = email.strip().lower()
+    if not _EMAIL_RE.match(normalized_email):
+        raise HTTPException(status_code=400, detail="'email' is not a valid email address")
+
+    rows = await postgrest_get(
+        "app_users",
+        f"select=user_id&email=eq.{quote(normalized_email, safe='')}&limit=1",
+    )
+    return {"email": normalized_email, "exists": bool(rows)}
 
 
 def _auto_slug(name: str, suffix: str) -> str:
@@ -168,36 +185,7 @@ def _extract_idempotency_key(
     return None
 
 
-async def _find_tenant_by_idempotency_key(key: str) -> Optional[dict]:
-    rows = await postgrest_get(
-        "tenants",
-        (
-            "select=id,slug,name,is_active,created_at,metadata"
-            f"&metadata->>provisioning_idempotency_key=eq.{quote(key, safe='')}&limit=1"
-        ),
-    )
-    return rows[0] if rows else None
-
-
-@router.post("/api/v1/tenants", status_code=201)
-@limiter.limit("5/minute")
-async def create_tenant(
-    request: Request,
-    authorization: Optional[str] = Header(default=None),
-    x_idempotency_key: Optional[str] = Header(default=None),
-):
-    requester_context = await _require_admin(authorization)
-    requester = requester_context["user"]
-    requester_id = requester_context["user_id"]
-    requester_role = requester_context["role"]
-    log.info("tenants.create.start", requester_id=requester_id, requester_role=requester_role)
-
-    try:
-        body = await request.json()
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail="Request body must be valid JSON") from exc
-
-    # ── Field extraction ─────────────────────────────────────────────────────
+def _extract_tenant_input_fields(body: dict) -> tuple[str, str, str, str, str, str, dict]:
     name: str = (body.get("name") or "").strip()
     plan: str = (body.get("plan") or "starter").strip().lower()
     custom_slug: str = (body.get("slug") or "").strip().lower()
@@ -205,8 +193,16 @@ async def create_tenant(
     admin_password: str = body.get("admin_password") or ""
     admin_full_name: str = (body.get("admin_full_name") or "").strip()
     extra_metadata = body.get("metadata") or {}
+    return name, plan, custom_slug, admin_email, admin_password, admin_full_name, extra_metadata
 
-    # ── Validation ───────────────────────────────────────────────────────────
+
+def _validate_tenant_input(
+    name: str,
+    plan: str,
+    admin_email: str,
+    admin_password: str,
+    extra_metadata: dict,
+) -> None:
     if not name:
         raise HTTPException(status_code=400, detail="'name' is required")
     if plan not in _VALID_PLANS:
@@ -226,40 +222,59 @@ async def create_tenant(
         )
     if not isinstance(extra_metadata, dict):
         raise HTTPException(status_code=400, detail="'metadata' must be an object")
-    idempotency_key = _extract_idempotency_key(x_idempotency_key, body, extra_metadata)
-    if idempotency_key:
-        replay_tenant = await _find_tenant_by_idempotency_key(idempotency_key)
-        if replay_tenant:
-            metadata = replay_tenant.get("metadata") or {}
-            if metadata.get("provisioned_by") != requester_id:
-                raise HTTPException(
-                    status_code=409,
-                    detail="Idempotency key already used by another requester",
-                )
-            log.info("tenants.create.idempotent_replay", tenant_id=replay_tenant["id"], requester_id=requester_id)
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "success": True,
-                    "idempotent_replay": True,
-                    "tenant": {
-                        "id": replay_tenant["id"],
-                        "slug": replay_tenant["slug"],
-                        "name": replay_tenant["name"],
-                        "plan": metadata.get("plan", "starter"),
-                        "is_active": replay_tenant.get("is_active", True),
-                        "created_at": replay_tenant.get("created_at"),
-                    },
-                    "admin_user": {
-                        "id": metadata.get("admin_user_id"),
-                        "email": metadata.get("admin_email"),
-                        "full_name": metadata.get("admin_full_name"),
-                        "role": "admin",
-                    },
-                },
-            )
 
-    # ── Slug resolution ──────────────────────────────────────────────────────
+
+async def _find_tenant_by_idempotency_key(key: str) -> Optional[dict]:
+    rows = await postgrest_get(
+        "tenants",
+        (
+            "select=id,slug,name,is_active,created_at,metadata"
+            f"&metadata->>provisioning_idempotency_key=eq.{quote(key, safe='')}&limit=1"
+        ),
+    )
+    return rows[0] if rows else None
+
+
+async def _idempotent_replay_response_or_none(
+    idempotency_key: Optional[str],
+    requester_id: str,
+) -> Optional[JSONResponse]:
+    if not idempotency_key:
+        return None
+    replay_tenant = await _find_tenant_by_idempotency_key(idempotency_key)
+    if not replay_tenant:
+        return None
+    metadata = replay_tenant.get("metadata") or {}
+    if metadata.get("provisioned_by") != requester_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Idempotency key already used by another requester",
+        )
+    log.info("tenants.create.idempotent_replay", tenant_id=replay_tenant["id"], requester_id=requester_id)
+    return JSONResponse(
+        status_code=200,
+        content={
+            "success": True,
+            "idempotent_replay": True,
+            "tenant": {
+                "id": replay_tenant["id"],
+                "slug": replay_tenant["slug"],
+                "name": replay_tenant["name"],
+                "plan": metadata.get("plan", "starter"),
+                "is_active": replay_tenant.get("is_active", True),
+                "created_at": replay_tenant.get("created_at"),
+            },
+            "admin_user": {
+                "id": metadata.get("admin_user_id"),
+                "email": metadata.get("admin_email"),
+                "full_name": metadata.get("admin_full_name"),
+                "role": "admin",
+            },
+        },
+    )
+
+
+def _resolve_slug_or_fail(custom_slug: str, name: str) -> str:
     if custom_slug:
         if not _SLUG_RE.match(custom_slug):
             raise HTTPException(
@@ -267,11 +282,11 @@ async def create_tenant(
                 detail="'slug' must be lowercase alphanumeric with hyphens, min 3 chars, "
                        "no leading/trailing hyphens",
             )
-        slug = custom_slug
-    else:
-        slug = _auto_slug(name, str(uuid.uuid4())[:8])
+        return custom_slug
+    return _auto_slug(name, str(uuid.uuid4())[:8])
 
-    # ── Duplicate-slug check ─────────────────────────────────────────────────
+
+async def _ensure_slug_available(slug: str) -> None:
     existing = await postgrest_get(
         "tenants", f"select=id&slug=eq.{quote(slug, safe='')}&limit=1"
     )
@@ -280,14 +295,8 @@ async def create_tenant(
             status_code=409, detail=f"Tenant slug '{slug}' is already taken"
         )
 
-    # ── 1. Create tenant row ─────────────────────────────────────────────────
-    tenant_metadata = {
-        "plan": plan,
-        "provisioned_by": requester_id,
-        "provisioned_by_role": requester_role,
-        "provisioning_idempotency_key": idempotency_key,
-        **extra_metadata,
-    }
+
+async def _create_tenant_row_or_raise(slug: str, name: str, tenant_metadata: dict) -> dict:
     try:
         rows = await postgrest_insert(
             "tenants",
@@ -305,15 +314,16 @@ async def create_tenant(
                 status_code=409, detail=f"Tenant slug '{slug}' is already taken"
             )
         raise
+    return rows[0]
 
-    tenant = rows[0]
-    tenant_id: str = tenant["id"]
-    admin_user_id: Optional[str] = None
 
-    # ── 2. Create default admin user via Supabase Auth admin API ─────────────
-    # We deliberately omit 'tenant_name' from user_metadata so the DB trigger
-    # (handle_new_app_user) does NOT create a second tenant row.  We link the
-    # user to the already-created tenant explicitly in step 3.
+async def _create_admin_auth_user_or_rollback(
+    tenant_id: str,
+    admin_email: str,
+    admin_password: str,
+    admin_full_name: str,
+    plan: str,
+) -> dict:
     async with httpx.AsyncClient(timeout=30) as client:
         auth_resp = await client.post(
             f"{SUPABASE_URL}/auth/v1/admin/users",
@@ -326,13 +336,11 @@ async def create_tenant(
                     "user_metadata": {
                         "full_name": admin_full_name or "",
                         "requested_role": "admin",
-                        # plan is stored so the DB trigger can persist it on app_users
                         "plan": plan,
                     },
                 }
             ),
         )
-
     if auth_resp.status_code >= 400:
         log.warning("tenants.create.auth_user_failed", tenant_id=tenant_id, status_code=auth_resp.status_code)
         await _rollback_provisioning(tenant_id=tenant_id, admin_user_id=None)
@@ -345,8 +353,58 @@ async def create_tenant(
         raise HTTPException(
             status_code=400, detail=f"Failed to create admin user: {error_body}"
         )
+    return auth_resp.json()
 
-    auth_user: dict = auth_resp.json()
+
+@router.post("/api/v1/tenants", status_code=201)
+@limiter.limit("5/minute")
+async def create_tenant(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+    x_idempotency_key: Optional[str] = Header(default=None),
+):
+    requester_context = await _require_admin(authorization)
+    requester_id = requester_context["user_id"]
+    requester_role = requester_context["role"]
+    log.info("tenants.create.start", requester_id=requester_id, requester_role=requester_role)
+
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="Request body must be valid JSON") from exc
+
+    name, plan, custom_slug, admin_email, admin_password, admin_full_name, extra_metadata = _extract_tenant_input_fields(body)
+    _validate_tenant_input(name, plan, admin_email, admin_password, extra_metadata)
+    idempotency_key = _extract_idempotency_key(x_idempotency_key, body, extra_metadata)
+    replay = await _idempotent_replay_response_or_none(idempotency_key, requester_id)
+    if replay:
+        return replay
+
+    # ── Slug resolution ──────────────────────────────────────────────────────
+    slug = _resolve_slug_or_fail(custom_slug, name)
+
+    # ── Duplicate-slug check ─────────────────────────────────────────────────
+    await _ensure_slug_available(slug)
+
+    # ── 1. Create tenant row ─────────────────────────────────────────────────
+    tenant_metadata = {
+        "plan": plan,
+        "provisioned_by": requester_id,
+        "provisioned_by_role": requester_role,
+        "provisioning_idempotency_key": idempotency_key,
+        **extra_metadata,
+    }
+    tenant = await _create_tenant_row_or_raise(slug, name, tenant_metadata)
+    tenant_id: str = tenant["id"]
+    admin_user_id: Optional[str] = None
+
+    # ── 2. Create default admin user via Supabase Auth admin API ─────────────
+    # We deliberately omit 'tenant_name' from user_metadata so the DB trigger
+    # (handle_new_app_user) does NOT create a second tenant row.  We link the
+    # user to the already-created tenant explicitly in step 3.
+    auth_user = await _create_admin_auth_user_or_rollback(
+        tenant_id, admin_email, admin_password, admin_full_name, plan
+    )
     admin_user_id = auth_user["id"]
 
     # ── 3. Link admin user → tenant in app_users ─────────────────────────────

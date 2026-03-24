@@ -62,13 +62,13 @@ const PII_PATTERNS: PiiPattern[] = [
   // Email addresses (complement to the @ masking below)
   {
     label: "EMAIL_ADDRESS",
-    regex: /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g,
+    regex: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
   },
 
   // IBAN  (e.g. GB29 NWBK 6016 1331 9268 19)
   {
     label: "IBAN_CODE",
-    regex: /\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}(?:[A-Z0-9]?){0,16}\b/g,
+    regex: /\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}[A-Z0-9]{0,16}\b/g,
   },
 ];
 
@@ -83,7 +83,7 @@ function contentScrubString(value: string): string {
   // Email masking first (preserves u***@domain format, cheaper than regex)
   if (result.includes("@")) {
     result = result.replace(
-      /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g,
+      /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
       (match) => {
         const atIdx = match.indexOf("@");
         return `${match[0]}***@${match.slice(atIdx + 1)}`;
@@ -139,7 +139,7 @@ function scrubPayload(
 // ---------------------------------------------------------------------------
 
 export const logger = pino({
-  level: (process.env.NEXT_PUBLIC_LOG_LEVEL || "info") as LogLevel,
+  level: (process.env.NEXT_PUBLIC_LOG_LEVEL ?? "info") as LogLevel,
   timestamp: pino.stdTimeFunctions.isoTime,
   browser: {
     // In the browser we log to console; in Node it goes to stdout.
