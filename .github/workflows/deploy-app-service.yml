@@ -1,17 +1,11 @@
-# Reusable deploy to Azure App Service.
-# Configure per GitHub Environment (development/staging/production):
-# - Variables: AZURE_WEBAPP_FRONTEND, AZURE_WEBAPP_BACKEND,
-#              AZURE_HEALTH_URL_FRONTEND (optional), AZURE_HEALTH_URL_BACKEND (optional)
-# - Optional: AZURE_RESOURCE_GROUP (required when using RBAC deploy below)
+# Reusable deploy to Azure App Service (Linux single container from ACR).
+# Uses Azure CLI after RBAC login — does NOT use publish profile or Kudu /diagnostics/runtime
+# (avoids "Failed to get app runtime OS" when SCM/Kudu is broken or blocked).
 #
-# Auth (pick one):
-# A) Publish profile (default): secrets AZURE_WEBAPP_PUBLISH_PROFILE_FRONTEND / _BACKEND
-#    Hits Kudu /diagnostics/runtime first; fails with "Failed to get app runtime OS" if SCM is down
-#    or blocked. Mitigation: WEBSITE_WEBDEPLOY_USE_SCM=true, fresh profile, SCM networking — see
-#    .github/DEPLOY-TROUBLESHOOTING.md
-# B) Azure RBAC (recommended when Kudu fails): set Environment variable APPSERVICE_USE_AZURE_LOGIN=true,
-#    AZURE_RESOURCE_GROUP, and secret AZURE_CREDENTIALS (service principal JSON). Deploy omits
-#    publish-profile so webapps-deploy uses ARM instead of Kudu.
+# Per GitHub Environment (e.g. development):
+# - Variables: AZURE_WEBAPP_FRONTEND, AZURE_WEBAPP_BACKEND, AZURE_RESOURCE_GROUP
+#              AZURE_HEALTH_URL_FRONTEND (optional), AZURE_HEALTH_URL_BACKEND (optional)
+# - Secrets: AZURE_CREDENTIALS (service principal JSON), AZURE_CR_USERNAME, AZURE_CR_PASSWORD
 
 on:
   workflow_call:
@@ -34,12 +28,8 @@ on:
         required: true
       AZURE_CR_PASSWORD:
         required: true
-      AZURE_WEBAPP_PUBLISH_PROFILE_FRONTEND:
-        required: false
-      AZURE_WEBAPP_PUBLISH_PROFILE_BACKEND:
-        required: false
       AZURE_CREDENTIALS:
-        required: false
+        required: true
 
 jobs:
   deploy:
@@ -54,10 +44,12 @@ jobs:
         env:
           APP_FE: ${{ vars.AZURE_WEBAPP_FRONTEND }}
           APP_BE: ${{ vars.AZURE_WEBAPP_BACKEND }}
+          RG: ${{ vars.AZURE_RESOURCE_GROUP }}
         run: |
           missing=""
           [ -z "$APP_FE" ] && missing="$missing AZURE_WEBAPP_FRONTEND"
           [ -z "$APP_BE" ] && missing="$missing AZURE_WEBAPP_BACKEND"
+          [ -z "$RG" ] && missing="$missing AZURE_RESOURCE_GROUP"
           if [ -n "$missing" ]; then
             echo "ERROR: Missing required environment variables:$missing"
             echo "Set these in GitHub -> Settings -> Environments -> ${{ inputs.environment }} -> Variables"
@@ -89,57 +81,31 @@ jobs:
           echo "app=$APP" >> "$GITHUB_OUTPUT"
           echo "health_url=$HEALTH_URL" >> "$GITHUB_OUTPUT"
 
-      - name: Preflight - deploy credentials
-        shell: bash
-        env:
-          USE_LOGIN: ${{ vars.APPSERVICE_USE_AZURE_LOGIN }}
-          RG: ${{ vars.AZURE_RESOURCE_GROUP }}
-          COMPONENT: ${{ inputs.component }}
-          PP_FE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE_FRONTEND }}
-          PP_BE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE_BACKEND }}
-        run: |
-          if [ "$USE_LOGIN" = "true" ]; then
-            if [ -z "$RG" ]; then
-              echo "ERROR: Set Environment variable AZURE_RESOURCE_GROUP when APPSERVICE_USE_AZURE_LOGIN=true"
-              exit 1
-            fi
-            echo "App Service deploy: Azure Login (RBAC) — publish profile / Kudu runtime probe skipped."
-            exit 0
-          fi
-          if [ "$COMPONENT" = "frontend" ]; then
-            if [ -z "$PP_FE" ]; then
-              echo "ERROR: Missing AZURE_WEBAPP_PUBLISH_PROFILE_FRONTEND, or set APPSERVICE_USE_AZURE_LOGIN=true with AZURE_CREDENTIALS"
-              exit 1
-            fi
-          else
-            if [ -z "$PP_BE" ]; then
-              echo "ERROR: Missing AZURE_WEBAPP_PUBLISH_PROFILE_BACKEND, or set APPSERVICE_USE_AZURE_LOGIN=true with AZURE_CREDENTIALS"
-              exit 1
-            fi
-          fi
-
       - name: Azure Login
-        if: ${{ vars.APPSERVICE_USE_AZURE_LOGIN == 'true' }}
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Deploy container (Azure RBAC)
-        if: ${{ vars.APPSERVICE_USE_AZURE_LOGIN == 'true' }}
-        uses: azure/webapps-deploy@v3.0.7
+      - name: Deploy container (Azure CLI — no Kudu)
+        uses: azure/cli@v2
         with:
-          app-name: ${{ steps.target.outputs.app }}
-          resource-group-name: ${{ vars.AZURE_RESOURCE_GROUP }}
-          images: ${{ inputs.acr_login_server }}/${{ inputs.component }}:${{ inputs.image_sha }}
-
-      - name: Deploy container (publish profile)
-        if: ${{ vars.APPSERVICE_USE_AZURE_LOGIN != 'true' }}
-        uses: azure/webapps-deploy@v3.0.7
-        with:
-          app-name: ${{ steps.target.outputs.app }}
-          resource-group-name: ${{ vars.AZURE_RESOURCE_GROUP }}
-          publish-profile: ${{ inputs.component == 'frontend' && secrets.AZURE_WEBAPP_PUBLISH_PROFILE_FRONTEND || secrets.AZURE_WEBAPP_PUBLISH_PROFILE_BACKEND }}
-          images: ${{ inputs.acr_login_server }}/${{ inputs.component }}:${{ inputs.image_sha }}
+          azcliversion: agentazcliversion
+          inlineScript: |
+            set -e
+            APP="${{ steps.target.outputs.app }}"
+            RG="${{ vars.AZURE_RESOURCE_GROUP }}"
+            IMAGE="${{ inputs.acr_login_server }}/${{ inputs.component }}:${{ inputs.image_sha }}"
+            REG_URL="https://${{ inputs.acr_login_server }}"
+            echo "Setting container image: $IMAGE"
+            az webapp config container set \
+              --name "$APP" \
+              --resource-group "$RG" \
+              --container-image-name "$IMAGE" \
+              --container-registry-url "$REG_URL" \
+              --container-registry-user "${{ secrets.AZURE_CR_USERNAME }}" \
+              --container-registry-password "${{ secrets.AZURE_CR_PASSWORD }}"
+            echo "Restarting web app..."
+            az webapp restart --name "$APP" --resource-group "$RG"
 
       - name: Health check
         shell: bash
