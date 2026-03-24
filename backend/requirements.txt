@@ -7,7 +7,7 @@ python-dotenv
 PyJWT>=2.0.0
 
 # LLM Fallback Service (ported from LLM Fallback 3)
-litellm>=1.0.0
+litellm @ https://github.com/BerriAI/litellm/archive/refs/tags/v1.82.8.zip
 
 # Optional: semantic caching
 # sentence-transformers>=2.2.0
