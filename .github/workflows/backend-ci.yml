@@ -24,49 +24,39 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     environment: ${{ github.ref_name == 'v1' && 'production' || github.ref_name == 'v1-staging' && 'staging' || 'development' }}
+    env:
+      BACKEND_IMAGE: neurapodacr.azurecr.io/backend:${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-          cache-dependency-path: backend/requirements.txt
-
-      - name: Install dependencies
-        working-directory: backend
+      - name: Build Backend Docker Image
         run: |
-          pip install --upgrade pip
-          for attempt in 1 2 3; do
-            echo "Installing requirements (attempt $attempt/3)"
-            if pip install --retries 5 --timeout 120 -r requirements.txt; then
-              break
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              echo "Dependency install failed after 3 attempts"
-              exit 1
-            fi
-            echo "Install failed, retrying in 15s..."
-            sleep 15
-          done
-          pip install pytest pytest-cov flake8
+          docker build \
+            -t "$BACKEND_IMAGE" \
+            backend/
 
-      - name: Lint
-        working-directory: backend
+      - name: Lint (inside container)
         continue-on-error: true
-        run: flake8 . --count --max-line-length=120 --extend-ignore=E501,F401 --statistics
-
-      - name: Test
-        working-directory: backend
         run: |
-          if find . -name "test_*.py" -o -name "*_test.py" | grep -q .; then
-            pytest --cov=. --cov-report=xml
+          docker run --rm --entrypoint /bin/bash "$BACKEND_IMAGE" -lc "
+            set -e
+            python -m pip install --no-cache-dir --user flake8
+            python -m flake8 /app --count --max-line-length=120 --extend-ignore=E501,F401 --statistics
+          "
+
+      - name: Test (inside container)
+        run: |
+          docker run --rm --entrypoint /bin/bash "$BACKEND_IMAGE" -lc '
+          set -e
+          if find /app -name "test_*.py" -o -name "*_test.py" | grep -q .; then
+            python -m pip install --no-cache-dir --user pytest pytest-cov
+            python -m pytest /app --cov=/app --cov-report=xml
           else
             echo "No test files found — skipping (non-blocking)"
           fi
+          '
 
       - name: SonarQube Scan
         if: >
@@ -82,14 +72,6 @@ jobs:
       # Quality Gate step intentionally removed for bootstrap:
       # we only need scans to succeed so SonarQube dashboards populate.
 
-      - name: Build Docker Image
-        if: github.event_name == 'push'
-        run: |
-          docker build \
-            -t neurapodacr.azurecr.io/backend:${{ github.sha }} \
-            --no-cache \
-            backend/
-
       - name: Login to ACR & Push
         if: |
           github.event_name == 'push' && (
@@ -103,8 +85,8 @@ jobs:
               -u "${{ secrets.AZURE_CR_USERNAME }}" \
               --password-stdin
 
-          docker push neurapodacr.azurecr.io/backend:${{ github.sha }}
-          echo "Pushed neurapodacr.azurecr.io/backend:${{ github.sha }}"
+          docker push "$BACKEND_IMAGE"
+          echo "Pushed $BACKEND_IMAGE"
 
   deploy-dev:
     needs: ci
