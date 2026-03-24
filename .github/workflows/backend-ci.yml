@@ -44,8 +44,7 @@ jobs:
         run: |
           docker run --rm --entrypoint /bin/bash "$CI_IMAGE" -lc "
             set -e
-            python -m pip install --no-cache-dir --user flake8
-            python -m flake8 /app --count --max-line-length=120 --extend-ignore=E501,F401 --statistics
+            timeout 8m python -m flake8 /app --count --max-line-length=120 --extend-ignore=E501,F401 --exclude=.git,__pycache__,.pytest_cache,.mypy_cache,logs --statistics
           "
 
       - name: Test (inside container)
@@ -53,8 +52,7 @@ jobs:
           docker run --rm --entrypoint /bin/bash "$CI_IMAGE" -lc '
           set -e
           if find /app -name "test_*.py" -o -name "*_test.py" | grep -q .; then
-            python -m pip install --no-cache-dir --user pytest pytest-cov
-            python -m pytest /app --cov=/app --cov-report=xml
+            timeout 12m python -m pytest /app --cov=/app --cov-report=xml
           else
             echo "No test files found — skipping (non-blocking)"
           fi

@@ -17,7 +17,8 @@ COPY requirements.txt .
 # CI image intentionally avoids large language model downloads
 # to keep lint/test runs fast and stable on hosted runners.
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir flake8 pytest pytest-cov
 
 COPY . .
 
