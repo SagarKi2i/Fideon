@@ -25,22 +25,24 @@ jobs:
     timeout-minutes: 35
     environment: ${{ github.ref_name == 'v1' && 'production' || github.ref_name == 'v1-staging' && 'staging' || 'development' }}
     env:
+      CI_IMAGE: neurapodacr.azurecr.io/backend-ci:${{ github.sha }}
       BACKEND_IMAGE: neurapodacr.azurecr.io/backend:${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Build Backend Docker Image
+      - name: Build Backend CI Image
         run: |
           docker build \
-            -t "$BACKEND_IMAGE" \
+            -f backend/Dockerfile.ci \
+            -t "$CI_IMAGE" \
             backend/
 
       - name: Lint (inside container)
         continue-on-error: true
         run: |
-          docker run --rm --entrypoint /bin/bash "$BACKEND_IMAGE" -lc "
+          docker run --rm --entrypoint /bin/bash "$CI_IMAGE" -lc "
             set -e
             python -m pip install --no-cache-dir --user flake8
             python -m flake8 /app --count --max-line-length=120 --extend-ignore=E501,F401 --statistics
@@ -48,7 +50,7 @@ jobs:
 
       - name: Test (inside container)
         run: |
-          docker run --rm --entrypoint /bin/bash "$BACKEND_IMAGE" -lc '
+          docker run --rm --entrypoint /bin/bash "$CI_IMAGE" -lc '
           set -e
           if find /app -name "test_*.py" -o -name "*_test.py" | grep -q .; then
             python -m pip install --no-cache-dir --user pytest pytest-cov
@@ -72,21 +74,43 @@ jobs:
       # Quality Gate step intentionally removed for bootstrap:
       # we only need scans to succeed so SonarQube dashboards populate.
 
-      - name: Login to ACR & Push
+      - name: Set up Docker Buildx
         if: |
           github.event_name == 'push' && (
             github.ref == 'refs/heads/v1-dev' ||
             github.ref == 'refs/heads/v1-staging' ||
             github.ref == 'refs/heads/v1'
           )
-        run: |
-          echo "${{ secrets.AZURE_CR_PASSWORD }}" | \
-            docker login neurapodacr.azurecr.io \
-              -u "${{ secrets.AZURE_CR_USERNAME }}" \
-              --password-stdin
+        uses: docker/setup-buildx-action@v3
 
-          docker push "$BACKEND_IMAGE"
-          echo "Pushed $BACKEND_IMAGE"
+      - name: Login to ACR
+        if: |
+          github.event_name == 'push' && (
+            github.ref == 'refs/heads/v1-dev' ||
+            github.ref == 'refs/heads/v1-staging' ||
+            github.ref == 'refs/heads/v1'
+          )
+        uses: docker/login-action@v3
+        with:
+          registry: neurapodacr.azurecr.io
+          username: ${{ secrets.AZURE_CR_USERNAME }}
+          password: ${{ secrets.AZURE_CR_PASSWORD }}
+
+      - name: Build & Push Production Backend Image (cached)
+        if: |
+          github.event_name == 'push' && (
+            github.ref == 'refs/heads/v1-dev' ||
+            github.ref == 'refs/heads/v1-staging' ||
+            github.ref == 'refs/heads/v1'
+          )
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/Dockerfile
+          push: true
+          tags: ${{ env.BACKEND_IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   deploy-dev:
     needs: ci
