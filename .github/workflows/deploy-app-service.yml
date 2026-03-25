@@ -7,7 +7,8 @@
 #              AZURE_HEALTH_URL_* (optional), CORS_ALLOWED_ORIGINS (optional; backend — synced to Azure)
 # - Secrets: AZURE_CREDENTIALS, AZURE_CR_USERNAME, AZURE_CR_PASSWORD
 # - Backend deploy also requires (Environment secrets — copied into the App Service each deploy):
-#     DEVICE_JWT_SECRET, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY
+#     DEVICE_JWT_SECRET, SUPABASE_SERVICE_ROLE_KEY, and either SUPABASE_URL or NEXT_PUBLIC_SUPABASE_URL
+#     SUPABASE_ANON_KEY (optional; falls back to NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY / NEXT_PUBLIC_SUPABASE_ANON_KEY)
 #   GitHub secrets are NOT visible to the container unless this workflow applies them here.
 #
 # If login fails with "No subscriptions found", the SP has no role on that subscription — see
@@ -125,8 +126,11 @@ jobs:
           RG: ${{ vars.AZURE_RESOURCE_GROUP }}
           DEVICE_JWT_SECRET: ${{ secrets.DEVICE_JWT_SECRET }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
           CORS_ALLOWED_ORIGINS: ${{ secrets.CORS_ALLOWED_ORIGINS }}
         run: |
           set -e
@@ -146,8 +150,19 @@ jobs:
             echo "::error::Add Environment secret DEVICE_JWT_SECRET (development) — required for API startup. It will be synced to Azure each deploy."
             exit 1
           fi
+          if [ -z "$SUPABASE_URL" ] && [ -n "$NEXT_PUBLIC_SUPABASE_URL" ]; then
+            SUPABASE_URL="$NEXT_PUBLIC_SUPABASE_URL"
+          fi
+          if [ -z "$SUPABASE_ANON_KEY" ]; then
+            if [ -n "$NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY" ]; then
+              SUPABASE_ANON_KEY="$NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY"
+            elif [ -n "$NEXT_PUBLIC_SUPABASE_ANON_KEY" ]; then
+              SUPABASE_ANON_KEY="$NEXT_PUBLIC_SUPABASE_ANON_KEY"
+            fi
+          fi
+
           if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
-            echo "::error::Add Environment secrets SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY for backend deploy."
+            echo "::error::Backend deploy needs SUPABASE_SERVICE_ROLE_KEY and a Supabase project URL (set SUPABASE_URL or NEXT_PUBLIC_SUPABASE_URL on the GitHub Environment)."
             exit 1
           fi
 
@@ -201,5 +216,5 @@ jobs:
             fi
           done
           echo "ERROR: Health check failed for $URL"
-          echo "Backend: ensure GitHub Environment secrets DEVICE_JWT_SECRET, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY are set (they are synced to Azure on deploy)."
+          echo "Backend: ensure GitHub Environment secrets DEVICE_JWT_SECRET, SUPABASE_SERVICE_ROLE_KEY, and SUPABASE_URL or NEXT_PUBLIC_SUPABASE_URL are set (they are synced to Azure on deploy)."
           exit 1
