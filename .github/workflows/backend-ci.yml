@@ -1,8 +1,7 @@
 # ─────────────────────────────────────────────────────────────
 # Backend CI/CD
 # ─────────────────────────────────────────────────────────────
-# Auto-runs on push: v*-dev, v*-staging only.
-# Production (v1): run manually — Actions → Backend CI/CD → Run workflow → branch v1.
+# Note: this comment is a no-op change to trigger a clean CI rerun.
 
 name: Backend CI/CD
 
@@ -11,10 +10,18 @@ on:
     branches:
       - 'v*-dev'
       - 'v*-staging'
+      - 'v1'
     paths:
       - 'backend/**'
       - '.github/workflows/**'
-  workflow_dispatch: # production: select branch v1, then Run
+
+  # Production App Service deploy is manual only: Actions → Backend CI/CD → Run workflow (branch v1, enable deploy).
+  workflow_dispatch:
+    inputs:
+      deploy_to_production:
+        description: 'Deploy backend to production App Service (requires branch v1)'
+        type: boolean
+        default: false
 
 concurrency:
   group: backend-ci-${{ github.ref }}
@@ -73,7 +80,11 @@ jobs:
       # we only need scans to succeed so SonarQube dashboards populate.
 
       - name: Build Docker Image
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/v1')
+        if: >
+          github.event_name == 'push' ||
+          (github.event_name == 'workflow_dispatch' &&
+           github.ref == 'refs/heads/v1' &&
+           github.event.inputs.deploy_to_production == 'true')
         run: |
           docker build \
             -t neurapodacr.azurecr.io/backend:${{ github.sha }} \
@@ -83,9 +94,12 @@ jobs:
         if: |
           (github.event_name == 'push' && (
             github.ref == 'refs/heads/v1-dev' ||
-            github.ref == 'refs/heads/v1-staging'
+            github.ref == 'refs/heads/v1-staging' ||
+            github.ref == 'refs/heads/v1'
           )) ||
-          (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/v1')
+          (github.event_name == 'workflow_dispatch' &&
+           github.ref == 'refs/heads/v1' &&
+           github.event.inputs.deploy_to_production == 'true')
         run: |
           echo "${{ secrets.AZURE_CR_PASSWORD }}" | \
             docker login neurapodacr.azurecr.io \
@@ -108,23 +122,22 @@ jobs:
   deploy-staging:
     needs: ci
     if: github.ref == 'refs/heads/v1-staging' && github.event_name == 'push'
-    uses: ./.github/workflows/deploy-env.yml
+    uses: ./.github/workflows/deploy-app-service.yml
     with:
       environment: staging
       component: backend
-      container_name: neurapod-backend
-      port: '8080'
       image_sha: ${{ github.sha }}
     secrets: inherit
 
   deploy-production:
     needs: ci
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/v1'
-    uses: ./.github/workflows/deploy-env.yml
+    if: >
+      github.ref == 'refs/heads/v1' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.deploy_to_production == 'true'
+    uses: ./.github/workflows/deploy-app-service.yml
     with:
       environment: production
       component: backend
-      container_name: neurapod-backend
-      port: '8080'
       image_sha: ${{ github.sha }}
     secrets: inherit
