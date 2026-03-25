@@ -2,6 +2,7 @@
 # Backend CI/CD
 # ─────────────────────────────────────────────────────────────
 # Note: this comment is a no-op change to trigger a clean CI rerun.
+# Note: no-op change to trigger CI rerun (staging).
 
 name: Backend CI/CD
 
