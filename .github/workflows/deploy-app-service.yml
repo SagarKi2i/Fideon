@@ -6,6 +6,9 @@
 # - Variables: AZURE_SUBSCRIPTION_ID, AZURE_WEBAPP_FRONTEND, AZURE_WEBAPP_BACKEND, AZURE_RESOURCE_GROUP
 #              AZURE_HEALTH_URL_* (optional), CORS_ALLOWED_ORIGINS (optional; backend — synced to Azure)
 # - Secrets: AZURE_CREDENTIALS, AZURE_CR_USERNAME, AZURE_CR_PASSWORD
+# - Frontend deploy syncs (Environment secrets → App Service): NEXT_PUBLIC_SUPABASE_URL,
+#   NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY (or NEXT_PUBLIC_SUPABASE_ANON_KEY), NEXT_PUBLIC_API_URL
+#   (optional; defaults to https://<AZURE_WEBAPP_BACKEND>.azurewebsites.net when unset)
 # - Backend deploy also requires (Environment secrets — copied into the App Service each deploy):
 #     DEVICE_JWT_SECRET, SUPABASE_SERVICE_ROLE_KEY, and either SUPABASE_URL or NEXT_PUBLIC_SUPABASE_URL
 #     SUPABASE_ANON_KEY (optional; falls back to NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY / NEXT_PUBLIC_SUPABASE_ANON_KEY)
@@ -85,13 +88,18 @@ jobs:
           if [ -z "$HEALTH_URL" ]; then
             if [ "$COMPONENT" = "frontend" ]; then
               HEALTH_URL="https://${APP}.azurewebsites.net/"
+              HEALTH_LOG_DETAIL="default root /"
             else
               HEALTH_URL="https://${APP}.azurewebsites.net/health"
+              HEALTH_LOG_DETAIL="default /health"
             fi
+          else
+            HEALTH_LOG_DETAIL="custom AZURE_HEALTH_URL_*"
           fi
 
           echo "app=$APP" >> "$GITHUB_OUTPUT"
           echo "health_url=$HEALTH_URL" >> "$GITHUB_OUTPUT"
+          echo "health_log_detail=$HEALTH_LOG_DETAIL" >> "$GITHUB_OUTPUT"
 
       - name: Azure Login
         uses: azure/login@v2
@@ -131,16 +139,38 @@ jobs:
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
           NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+          NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
           CORS_ALLOWED_ORIGINS: ${{ secrets.CORS_ALLOWED_ORIGINS }}
         run: |
           set -e
           az account set --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
 
           if [ "$COMPONENT" = "frontend" ]; then
+            FE_SETTINGS=(WEBSITES_PORT=3000)
+            SUPABASE_CLIENT_KEY="${NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:-$NEXT_PUBLIC_SUPABASE_ANON_KEY}"
+            if [ -n "$NEXT_PUBLIC_SUPABASE_URL" ]; then
+              FE_SETTINGS+=("NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}")
+            fi
+            if [ -n "$SUPABASE_CLIENT_KEY" ]; then
+              FE_SETTINGS+=("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=${SUPABASE_CLIENT_KEY}")
+            fi
+            API_URL="${NEXT_PUBLIC_API_URL}"
+            if [ -z "$API_URL" ]; then
+              BE_APP="${{ vars.AZURE_WEBAPP_BACKEND }}"
+              if [ -n "$BE_APP" ]; then
+                API_URL="https://${BE_APP}.azurewebsites.net"
+              fi
+            fi
+            if [ -n "$API_URL" ]; then
+              FE_SETTINGS+=("NEXT_PUBLIC_API_URL=${API_URL}")
+            fi
+            if [ -z "$NEXT_PUBLIC_SUPABASE_URL" ] || [ -z "$SUPABASE_CLIENT_KEY" ]; then
+              echo "::warning::Frontend: set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY or NEXT_PUBLIC_SUPABASE_ANON_KEY on the GitHub Environment so the App Service has Supabase client config at runtime."
+            fi
             az webapp config appsettings set \
               --name "$APP" \
               --resource-group "$RG" \
-              --settings WEBSITES_PORT=3000
+              --settings "${FE_SETTINGS[@]}"
             az webapp restart --name "$APP" --resource-group "$RG"
             exit 0
           fi
@@ -192,8 +222,10 @@ jobs:
       - name: Health check
         shell: bash
         env:
-          URL: ${{ steps.target.outputs.health_url }}
+          CURL_URL: ${{ steps.target.outputs.health_url }}
           COMPONENT: ${{ inputs.component }}
+          TARGET_APP: ${{ steps.target.outputs.app }}
+          HEALTH_LOG_DETAIL: ${{ steps.target.outputs.health_log_detail }}
         run: |
           # Backend: larger image + gunicorn/spaCy cold start; allow more time than frontend.
           if [ "$COMPONENT" = "backend" ]; then
@@ -206,15 +238,16 @@ jobs:
             CURL_MAX=15
           fi
           for i in $(seq 1 "$ATTEMPTS"); do
-            if curl -sfSL --max-time "$CURL_MAX" "$URL" > /dev/null 2>&1; then
-              echo "Healthy: $URL"
+            if curl -sfSL --max-time "$CURL_MAX" "$CURL_URL" > /dev/null 2>&1; then
+              # Log webapp + probe description (avoids GitHub masking when the full URL matches a secret).
+              echo "Health check passed: component=${COMPONENT} webapp=${TARGET_APP} (${HEALTH_LOG_DETAIL})"
               exit 0
             fi
-            echo "Health check failed ($i/$ATTEMPTS), retrying in ${SLEEP_SEC}s..."
+            echo "Health check failed ($i/$ATTEMPTS) webapp=${TARGET_APP} (${HEALTH_LOG_DETAIL}), retrying in ${SLEEP_SEC}s..."
             if [ "$i" -lt "$ATTEMPTS" ]; then
               sleep "$SLEEP_SEC"
             fi
           done
-          echo "ERROR: Health check failed for $URL"
+          echo "ERROR: Health check failed webapp=${TARGET_APP} (${HEALTH_LOG_DETAIL})"
           echo "Backend: ensure GitHub Environment secrets DEVICE_JWT_SECRET, SUPABASE_SERVICE_ROLE_KEY, and SUPABASE_URL or NEXT_PUBLIC_SUPABASE_URL are set (they are synced to Azure on deploy)."
           exit 1

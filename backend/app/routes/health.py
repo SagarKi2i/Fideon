@@ -29,6 +29,12 @@ async def health():
     return {"ok": True}
 
 
+@router.get("/healthy")
+async def healthy_alias():
+    """Same as /health — common typo for probes and bookmarks."""
+    return {"ok": True}
+
+
 def _is_enabled(value: str) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
