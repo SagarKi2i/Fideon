@@ -114,22 +114,45 @@ jobs:
               --container-registry-url "$REG_URL" \
               --container-registry-user "${{ secrets.AZURE_CR_USERNAME }}" \
               --container-registry-password "${{ secrets.AZURE_CR_PASSWORD }}"
+            # Route traffic to the container listen port (required for Linux custom containers).
+            if [ "${{ inputs.component }}" = "backend" ]; then
+              WEBSITES_PORT="8080"
+            else
+              WEBSITES_PORT="3000"
+            fi
+            az webapp config appsettings set \
+              --name "$APP" \
+              --resource-group "$RG" \
+              --settings "WEBSITES_PORT=$WEBSITES_PORT"
             echo "Restarting web app..."
             az webapp restart --name "$APP" --resource-group "$RG"
 
       - name: Health check
         shell: bash
+        env:
+          URL: ${{ steps.target.outputs.health_url }}
+          COMPONENT: ${{ inputs.component }}
         run: |
-          URL="${{ steps.target.outputs.health_url }}"
-
-          for i in 1 2 3 4 5 6; do
-            if curl -sf --max-time 15 "$URL" > /dev/null 2>&1; then
+          # Backend: larger image + gunicorn/spaCy cold start; allow more time than frontend.
+          if [ "$COMPONENT" = "backend" ]; then
+            ATTEMPTS=18
+            SLEEP_SEC=15
+            CURL_MAX=25
+          else
+            ATTEMPTS=8
+            SLEEP_SEC=10
+            CURL_MAX=15
+          fi
+          for i in $(seq 1 "$ATTEMPTS"); do
+            if curl -sfSL --max-time "$CURL_MAX" "$URL" > /dev/null 2>&1; then
               echo "Healthy: $URL"
               exit 0
             fi
-            echo "Health check failed ($i/6), retrying in 10s..."
-            sleep 10
+            echo "Health check failed ($i/$ATTEMPTS), retrying in ${SLEEP_SEC}s..."
+            if [ "$i" -lt "$ATTEMPTS" ]; then
+              sleep "$SLEEP_SEC"
+            fi
           done
-
           echo "ERROR: Health check failed for $URL"
+          echo "If backend: confirm App Service Configuration has env vars (DEVICE_JWT_SECRET, Supabase, etc.)."
           exit 1
