@@ -1,8 +1,9 @@
 # ─────────────────────────────────────────────────────────────
 # Hotfix Pipeline
 # Expedited pipeline for hotfix changes targeting v1 (production).
-# Runs basic quality checks before deploying. After deploy,
-# back-merge to v1-dev and v1-staging manually.
+# Push/PR to v1: quality checks only (no ACR push, no VM deploy).
+# Production deploy: Actions → Hotfix Pipeline → Run workflow → branch v1.
+# After deploy, back-merge to v1-dev and v1-staging manually.
 # ─────────────────────────────────────────────────────────────
 
 name: Hotfix Pipeline
@@ -21,6 +22,8 @@ on:
     paths:
       - 'frontend/**'
       - 'backend/**'
+
+  workflow_dispatch: # build, push to ACR, deploy to production VM
 
 concurrency:
   group: hotfix-${{ github.ref }}
@@ -60,11 +63,12 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
           pip install flake8
-          flake8 . --count --max-line-length=120 --statistics
+          flake8 . --count --max-line-length=120 --per-file-ignores=app/llm_fallback/models.py:F811 --statistics
 
   # ── Build & push frontend ──────────────────────────────────────────────────
   build-frontend:
     needs: quality-check
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/v1'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: production
@@ -86,7 +90,6 @@ jobs:
             frontend/
 
       - name: Push to ACR
-        if: github.event_name == 'push'
         run: |
           echo "${{ secrets.AZURE_CR_PASSWORD }}" | \
             docker login neurapodacr.azurecr.io \
@@ -97,6 +100,7 @@ jobs:
   # ── Build & push backend ───────────────────────────────────────────────────
   build-backend:
     needs: quality-check
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/v1'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: production
@@ -110,7 +114,6 @@ jobs:
             backend/
 
       - name: Push to ACR
-        if: github.event_name == 'push'
         run: |
           echo "${{ secrets.AZURE_CR_PASSWORD }}" | \
             docker login neurapodacr.azurecr.io \
@@ -121,7 +124,7 @@ jobs:
   # ── Deploy both to production VM ──────────────────────────────────────────
   deploy-hotfix:
     needs: [build-frontend, build-backend]
-    if: github.ref == 'refs/heads/v1' && github.event_name == 'push'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/v1'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: production

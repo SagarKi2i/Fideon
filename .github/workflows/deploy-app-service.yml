@@ -76,30 +76,44 @@ jobs:
         shell: bash
         env:
           COMPONENT: ${{ inputs.component }}
+          HEALTH_URL_FE: ${{ vars.AZURE_HEALTH_URL_FRONTEND }}
+          HEALTH_URL_BE: ${{ vars.AZURE_HEALTH_URL_BACKEND }}
         run: |
           if [ "$COMPONENT" = "frontend" ]; then
             APP="${{ vars.AZURE_WEBAPP_FRONTEND }}"
-            HEALTH_URL="${{ vars.AZURE_HEALTH_URL_FRONTEND }}"
+            CUSTOM_HEALTH="$HEALTH_URL_FE"
+            DEFAULT_HEALTH="https://${APP}.azurewebsites.net/"
           else
             APP="${{ vars.AZURE_WEBAPP_BACKEND }}"
-            HEALTH_URL="${{ vars.AZURE_HEALTH_URL_BACKEND }}"
+            CUSTOM_HEALTH="$HEALTH_URL_BE"
+            DEFAULT_HEALTH="https://${APP}.azurewebsites.net/health"
           fi
 
-          if [ -z "$HEALTH_URL" ]; then
-            if [ "$COMPONENT" = "frontend" ]; then
-              HEALTH_URL="https://${APP}.azurewebsites.net/"
-              HEALTH_LOG_DETAIL="default root /"
-            else
-              HEALTH_URL="https://${APP}.azurewebsites.net/health"
-              HEALTH_LOG_DETAIL="default /health"
-            fi
+          if [ -n "$CUSTOM_HEALTH" ]; then
+            HEALTH_URL="$CUSTOM_HEALTH"
           else
-            HEALTH_LOG_DETAIL="custom AZURE_HEALTH_URL_*"
+            HEALTH_URL="$DEFAULT_HEALTH"
+          fi
+
+          # Log line must not use env-injected probe URL (GitHub masks it when it matches a secret).
+          # Reconstruct from app name (Environment variable, not a secret) whenever probe matches default pattern.
+          # Normalize trailing slashes so AZURE_HEALTH_URL_* can match the computed default.
+          strip_slash() {
+            echo "$1" | sed 's|/*$||'
+          }
+          H_NORM=$(strip_slash "$HEALTH_URL")
+          D_NORM=$(strip_slash "$DEFAULT_HEALTH")
+
+          DISPLAY_AS_DEFAULT="false"
+          if [ -z "$CUSTOM_HEALTH" ]; then
+            DISPLAY_AS_DEFAULT="true"
+          elif [ "$H_NORM" = "$D_NORM" ]; then
+            DISPLAY_AS_DEFAULT="true"
           fi
 
           echo "app=$APP" >> "$GITHUB_OUTPUT"
           echo "health_url=$HEALTH_URL" >> "$GITHUB_OUTPUT"
-          echo "health_log_detail=$HEALTH_LOG_DETAIL" >> "$GITHUB_OUTPUT"
+          echo "health_display_as_default=$DISPLAY_AS_DEFAULT" >> "$GITHUB_OUTPUT"
 
       - name: Azure Login
         uses: azure/login@v2
@@ -225,8 +239,17 @@ jobs:
           CURL_URL: ${{ steps.target.outputs.health_url }}
           COMPONENT: ${{ inputs.component }}
           TARGET_APP: ${{ steps.target.outputs.app }}
-          HEALTH_LOG_DETAIL: ${{ steps.target.outputs.health_log_detail }}
+          HEALTH_DISPLAY_AS_DEFAULT: ${{ steps.target.outputs.health_display_as_default }}
         run: |
+          if [ -z "$CURL_URL" ]; then
+            echo "::error::Health probe URL is empty. Check Environment variables AZURE_WEBAPP_FRONTEND / AZURE_WEBAPP_BACKEND and optional AZURE_HEALTH_URL_*."
+            exit 1
+          fi
+          if [ -z "$TARGET_APP" ]; then
+            echo "::error::Resolved App Service name (app output) is empty after preflight — workflow bug or skipped resolve step."
+            exit 1
+          fi
+
           # Backend: larger image + gunicorn/spaCy cold start; allow more time than frontend.
           if [ "$COMPONENT" = "backend" ]; then
             ATTEMPTS=18
@@ -239,15 +262,31 @@ jobs:
           fi
           for i in $(seq 1 "$ATTEMPTS"); do
             if curl -sfSL --max-time "$CURL_MAX" "$CURL_URL" > /dev/null 2>&1; then
-              # Log webapp + probe description (avoids GitHub masking when the full URL matches a secret).
-              echo "Health check passed: component=${COMPONENT} webapp=${TARGET_APP} (${HEALTH_LOG_DETAIL})"
+              # Build this string in-shell from TARGET_APP only so GitHub does not mask the URL
+              # (env CURL_URL is often fully redacted when it matches a registered secret).
+              if [ "$HEALTH_DISPLAY_AS_DEFAULT" = "true" ]; then
+                if [ "$COMPONENT" = "frontend" ]; then
+                  echo "Healthy: https://${TARGET_APP}.azurewebsites.net/"
+                else
+                  echo "Healthy: https://${TARGET_APP}.azurewebsites.net/health"
+                fi
+              else
+                echo "Healthy: probe succeeded (custom AZURE_HEALTH_URL_* — URL omitted from logs to avoid secret masking) webapp=${TARGET_APP}"
+              fi
               exit 0
             fi
-            echo "Health check failed ($i/$ATTEMPTS) webapp=${TARGET_APP} (${HEALTH_LOG_DETAIL}), retrying in ${SLEEP_SEC}s..."
+            echo "Health check failed ($i/$ATTEMPTS) webapp=${TARGET_APP}, retrying in ${SLEEP_SEC}s..."
             if [ "$i" -lt "$ATTEMPTS" ]; then
               sleep "$SLEEP_SEC"
             fi
           done
-          echo "ERROR: Health check failed webapp=${TARGET_APP} (${HEALTH_LOG_DETAIL})"
-          echo "Backend: ensure GitHub Environment secrets DEVICE_JWT_SECRET, SUPABASE_SERVICE_ROLE_KEY, and SUPABASE_URL or NEXT_PUBLIC_SUPABASE_URL are set (they are synced to Azure on deploy)."
+
+          # One non-fatal diagnostic (no -f): surface HTTP code or 000 if TCP/ TLS failed
+          HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" --max-time "$CURL_MAX" "$CURL_URL" 2>/dev/null || echo "000")
+          echo "::error::Health check exhausted retries. Last HTTP status: ${HTTP_CODE} (000 = no response — container down, wrong port, or still starting). webapp=${TARGET_APP} component=${COMPONENT}"
+          if [ "$COMPONENT" = "backend" ]; then
+            echo "Hints: Azure Portal → App Service → Log stream / Container logs. Confirm WEBSITES_PORT=8080 and required app settings (DEVICE_JWT_SECRET, SUPABASE_*). Default probe is GET /health."
+          else
+            echo "Hints: Confirm WEBSITES_PORT=3000, image listens on 3000, and NEXT_PUBLIC_* synced from GitHub Environment if the app needs them at runtime."
+          fi
           exit 1

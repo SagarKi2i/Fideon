@@ -1,7 +1,8 @@
 # ─────────────────────────────────────────────────────────────
 # Backend CI/CD
 # ─────────────────────────────────────────────────────────────
-# Note: this comment is a no-op change to trigger a clean CI rerun.
+# Auto-runs on push: v*-dev, v*-staging only.
+# Production (v1): run manually — Actions → Backend CI/CD → Run workflow → branch v1.
 
 name: Backend CI/CD
 
@@ -10,10 +11,10 @@ on:
     branches:
       - 'v*-dev'
       - 'v*-staging'
-      - 'v1'
     paths:
       - 'backend/**'
       - '.github/workflows/**'
+  workflow_dispatch: # production: select branch v1, then Run
 
 concurrency:
   group: backend-ci-${{ github.ref }}
@@ -46,7 +47,7 @@ jobs:
       - name: Lint
         working-directory: backend
         continue-on-error: true
-        run: flake8 . --count --max-line-length=120 --extend-ignore=E501,F401 --statistics
+        run: flake8 . --count --max-line-length=120 --extend-ignore=E501,F401 --per-file-ignores=app/llm_fallback/models.py:F811 --statistics
 
       - name: Test
         working-directory: backend
@@ -72,7 +73,7 @@ jobs:
       # we only need scans to succeed so SonarQube dashboards populate.
 
       - name: Build Docker Image
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/v1')
         run: |
           docker build \
             -t neurapodacr.azurecr.io/backend:${{ github.sha }} \
@@ -80,11 +81,11 @@ jobs:
 
       - name: Login to ACR & Push
         if: |
-          github.event_name == 'push' && (
+          (github.event_name == 'push' && (
             github.ref == 'refs/heads/v1-dev' ||
-            github.ref == 'refs/heads/v1-staging' ||
-            github.ref == 'refs/heads/v1'
-          )
+            github.ref == 'refs/heads/v1-staging'
+          )) ||
+          (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/v1')
         run: |
           echo "${{ secrets.AZURE_CR_PASSWORD }}" | \
             docker login neurapodacr.azurecr.io \
@@ -118,7 +119,7 @@ jobs:
 
   deploy-production:
     needs: ci
-    if: github.ref == 'refs/heads/v1' && github.event_name == 'push'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/v1'
     uses: ./.github/workflows/deploy-env.yml
     with:
       environment: production

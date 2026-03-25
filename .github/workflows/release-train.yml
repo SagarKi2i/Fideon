@@ -75,5 +75,5 @@ jobs:
           echo "  Tag            : release/${{ github.event.inputs.version }}"
           echo "  Frontend       : ${{ github.event.inputs.frontend_version }}"
           echo "  Backend        : ${{ github.event.inputs.backend_version }}"
-          echo "  Next step      : Push to ${{ github.event.inputs.version }} triggers production deploy"
+          echo "  Next step      : Merge to production branch (e.g. v1), then run Frontend CI/CD + Backend CI/CD manually (workflow_dispatch) to build images and deploy"
           echo "========================================"
