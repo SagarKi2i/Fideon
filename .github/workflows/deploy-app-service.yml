@@ -10,6 +10,9 @@
 #
 # If login fails with "No subscriptions found", the SP has no role on that subscription — see
 # .github/DEPLOY-TROUBLESHOOTING.md ("Azure Login: No subscriptions found").
+#
+# azure/login@v2: do not pass subscription-id (or client-id/tenant-id) together with creds — the
+# action ignores creds and then requires separate client-id/tenant-id/client-secret.
 
 on:
   workflow_call:
@@ -91,7 +94,6 @@ jobs:
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Deploy container (Azure CLI — no Kudu)
         uses: azure/cli@v2
@@ -99,6 +101,7 @@ jobs:
           azcliversion: agentazcliversion
           inlineScript: |
             set -e
+            az account set --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
             APP="${{ steps.target.outputs.app }}"
             RG="${{ vars.AZURE_RESOURCE_GROUP }}"
             IMAGE="${{ inputs.acr_login_server }}/${{ inputs.component }}:${{ inputs.image_sha }}"
