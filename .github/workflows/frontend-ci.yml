@@ -1,6 +1,8 @@
 # ─────────────────────────────────────────────────────────────
 # Frontend CI/CD
 # ─────────────────────────────────────────────────────────────
+# Note: no-op change to trigger CI rerun.
+# Note: no-op change to trigger CI rerun (demo).
 
 name: Frontend CI/CD
 
