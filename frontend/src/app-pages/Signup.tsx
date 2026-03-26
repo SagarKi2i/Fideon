@@ -967,7 +967,7 @@ export default function Signup() {
                   <Button
                     type="button"
                     onClick={nextStep}
-                    disabled={loading || completed || (step === 0 && !canGoNext())}
+                    disabled={loading || completed}
                     className="flex items-center gap-1 text-xs md:text-sm"
                   >
                     Next

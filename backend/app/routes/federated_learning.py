@@ -2,8 +2,10 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from urllib.parse import quote
 
+import jwt
 from fastapi import APIRouter, Header, HTTPException, Request
 
+from app.core.config import DEVICE_JWT_SECRET
 from app.core.supabase import get_device_by_token, postgrest_get, postgrest_insert, postgrest_patch
 
 router = APIRouter()
@@ -11,6 +13,65 @@ router = APIRouter()
 
 def _device_id(device: dict[str, Any]) -> str:
     return str(device["id"])
+
+
+def _parse_utc_iso(value: Any) -> datetime:
+    raw = str(value)
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    dt = datetime.fromisoformat(raw)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _verify_device_jwt(token: str) -> dict[str, Any]:
+    try:
+        return jwt.decode(token, DEVICE_JWT_SECRET, algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Device token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid device token")
+
+
+def _enforce_not_revoked(claims: dict[str, Any], jwt_issued_after_raw: Any) -> None:
+    if not jwt_issued_after_raw:
+        return
+    try:
+        issued_after_ts = _parse_utc_iso(jwt_issued_after_raw).timestamp()
+    except ValueError:
+        issued_after_ts = 0
+    if claims.get("iat", 0) < issued_after_ts:
+        raise HTTPException(status_code=401, detail="Device token has been revoked — please re-register")
+
+
+async def _resolve_device_auth(
+    authorization: Optional[str],
+    x_device_token: Optional[str],
+) -> dict[str, Any]:
+    # Primary auth contract for v1 device APIs: Bearer device JWT.
+    if authorization and authorization.lower().startswith("bearer "):
+        claims = _verify_device_jwt(authorization.split(" ", 1)[1])
+        device_id = str(claims.get("device_id") or "")
+        if not device_id:
+            raise HTTPException(status_code=401, detail="Invalid device JWT claims")
+        rows = await postgrest_get(
+            "devices",
+            f"select=id,is_active,jwt_issued_after&id=eq.{quote(device_id, safe='')}&limit=1",
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="Device not found")
+        device = rows[0]
+        if not device.get("is_active", False):
+            raise HTTPException(status_code=403, detail="Device is deactivated")
+        _enforce_not_revoked(claims, device.get("jwt_issued_after"))
+        return {"id": device_id}
+
+    # Backward compatibility path for older clients.
+    if x_device_token:
+        return await get_device_by_token(x_device_token)
+
+    raise HTTPException(status_code=401, detail="Device JWT required")
 
 
 async def _action_get_feedback(device: dict[str, Any], model_id: Optional[str], unused_only: bool) -> dict[str, Any]:
@@ -165,10 +226,12 @@ async def _action_submit_gradient(device: dict[str, Any], body: dict[str, Any]) 
 
 
 @router.api_route("/api/federated-learning", methods=["GET", "POST"])
-async def federated_learning(request: Request, x_device_token: Optional[str] = Header(default=None)):
-    if not x_device_token:
-        raise HTTPException(status_code=400, detail="Device token is required")
-    device = await get_device_by_token(x_device_token)
+async def federated_learning(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+    x_device_token: Optional[str] = Header(default=None),
+):
+    device = await _resolve_device_auth(authorization, x_device_token)
     action = request.query_params.get("action")
     if action == "get-feedback":
         return await _action_get_feedback(

@@ -21,6 +21,7 @@ from app.core.supabase import (
     service_headers,
     verify_admin,
     verify_user,
+    get_user_context,
 )
 
 log = structlog.get_logger("device")
@@ -501,11 +502,32 @@ async def revoke_device(
     Auth: Supabase user JWT with admin role.
     """
     await verify_admin(authorization)  # raises 401/403 if not a valid admin user
+    requester_context = await get_user_context(authorization)
+    requester_role = requester_context.get("role")
+    requester_tenant_id = requester_context.get("tenant_id")
 
     now = datetime.now(timezone.utc)
-    rows = await postgrest_get("devices", f"select=id&id=eq.{quote(device_id, safe='')}&limit=1")
+    rows = await postgrest_get(
+        "devices",
+        f"select=id,tenant_id,registered_by&id=eq.{quote(device_id, safe='')}&limit=1",
+    )
     if not rows:
         raise HTTPException(status_code=404, detail="Device not found")
+    target = rows[0]
+
+    if requester_role in {"admin", "global_admin"}:
+        if not requester_tenant_id:
+            raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
+        target_tenant_id = target.get("tenant_id")
+        # Backward compatibility: derive tenant via registered_by for legacy rows.
+        if not target_tenant_id and target.get("registered_by"):
+            owner_rows = await postgrest_get(
+                "app_users",
+                f"select=tenant_id&user_id=eq.{quote(str(target['registered_by']), safe='')}&limit=1",
+            )
+            target_tenant_id = owner_rows[0].get("tenant_id") if owner_rows else None
+        if target_tenant_id != requester_tenant_id:
+            raise HTTPException(status_code=403, detail="Cross-tenant device access denied")
 
     await postgrest_patch(
         "devices",

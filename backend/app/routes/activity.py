@@ -10,13 +10,17 @@ router = APIRouter()
 PAGE_SIZE = 25
 
 
-async def _get_user_role(authorization: Optional[str]) -> tuple[dict, Optional[str]]:
+async def _get_user_role(authorization: Optional[str]) -> tuple[dict, Optional[str], Optional[str]]:
     user = await verify_user(authorization)
     roles = await postgrest_get(
         "user_roles", f"select=role&user_id=eq.{quote(user['id'], safe='')}&limit=1"
     )
     role = roles[0].get("role") if roles else None
-    return user, role
+    profiles = await postgrest_get(
+        "app_users", f"select=tenant_id&user_id=eq.{quote(user['id'], safe='')}&limit=1"
+    )
+    tenant_id = profiles[0].get("tenant_id") if profiles else None
+    return user, role, tenant_id
 
 
 @router.get("/api/activity/system")
@@ -34,7 +38,7 @@ async def get_system_activity(
     - user / viewer: only their own rows
     - guest: denied
     """
-    user, role = await _get_user_role(authorization)
+    user, role, tenant_id = await _get_user_role(authorization)
     if role not in {"global_admin", "admin", "user", "viewer"}:
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -50,9 +54,14 @@ async def get_system_activity(
     )
     query += f"&order=created_at.desc&limit={limit}&offset={offset}"
 
-    # Non-admins see only their own rows (defence-in-depth; RLS also enforces this).
+    # Users/viewers see only their own rows.
     if role not in {"global_admin", "admin"}:
         query += f"&user_id=eq.{quote(user['id'], safe='')}"
+    else:
+        # Tenant admins/global_admin are tenant-bounded in this project.
+        if not tenant_id:
+            raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
+        query += f"&tenant_id=eq.{quote(tenant_id, safe='')}"
 
     if action:
         query += f"&action=ilike.*{quote(action, safe='')}*"

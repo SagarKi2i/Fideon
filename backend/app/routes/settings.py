@@ -51,7 +51,7 @@ async def get_profile(authorization: Optional[str] = Header(default=None)):
 
     rows = await postgrest_get(
         "app_users",
-        f"select=user_id,email,full_name,metadata&user_id=eq.{quote(user_id, safe='')}&limit=1",
+        f"select=user_id,email,full_name,metadata,tenant_id&user_id=eq.{quote(user_id, safe='')}&limit=1",
     )
     if not rows:
         raise HTTPException(status_code=404, detail=USER_PROFILE_NOT_FOUND)
@@ -60,6 +60,19 @@ async def get_profile(authorization: Optional[str] = Header(default=None)):
     metadata = profile.get("metadata") if isinstance(profile.get("metadata"), dict) else {}
     preferences = _normalize_preferences(metadata)
     role = await _get_user_role(user_id)
+    tenant_name = None
+    tenant_plan = None
+    tenant_id = profile.get("tenant_id")
+    if tenant_id:
+        tenant_rows = await postgrest_get(
+            "tenants",
+            f"select=id,name,metadata&id=eq.{quote(str(tenant_id), safe='')}&limit=1",
+        )
+        if tenant_rows:
+            tenant_row = tenant_rows[0]
+            tenant_name = tenant_row.get("name")
+            tenant_metadata = tenant_row.get("metadata") if isinstance(tenant_row.get("metadata"), dict) else {}
+            tenant_plan = tenant_metadata.get("plan")
     return {
         "profile": {
             "user_id": profile.get("user_id"),
@@ -67,6 +80,9 @@ async def get_profile(authorization: Optional[str] = Header(default=None)):
             "full_name": profile.get("full_name") or "",
             "role": role or "user",
             "preferences": preferences,
+            "tenant_id": tenant_id,
+            "tenant_name": tenant_name,
+            "tenant_plan": tenant_plan,
         }
     }
 

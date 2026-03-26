@@ -11,6 +11,7 @@ import { REALTIME_DEVICE_EVENT } from '@/lib/realtimeEvents';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Link } from 'react-router-dom';
+import { apiUrl } from '@/lib/apiBaseUrl';
 
 interface DashboardStats {
   totalDevices: number;
@@ -160,6 +161,7 @@ export default function AdminDashboard() {
         { count: usageTodayCount, error: usageTodayError },
         { count: usageYesterdayCount, error: usageYesterdayError },
         { count: devicesCreatedThisWeekCount, error: devicesWeekError },
+        dashboardStatsResp,
       ] = await Promise.all([
         supabase.from('devices').select('*'),
         supabase.from('device_licenses').select('*'),
@@ -177,6 +179,21 @@ export default function AdminDashboard() {
           .gte('created_at', new Date(Date.now() - (2 * dayMs)).toISOString())
           .lt('created_at', yesterdayIso),
         supabase.from('devices').select('*', { count: 'exact', head: true }).gte('registered_at', weekAgoIso),
+        (async () => {
+          const { data: { session } } = await supabase.auth.getSession();
+          if (!session?.access_token) throw new Error('Missing auth session');
+          const resp = await fetch(apiUrl('/api/admin/dashboard-stats'), {
+            method: 'GET',
+            headers: {
+              Authorization: `Bearer ${session.access_token}`,
+            },
+          });
+          if (!resp.ok) {
+            const msg = await resp.text();
+            throw new Error(msg || 'Failed to fetch admin dashboard stats');
+          }
+          return resp.json() as Promise<{ total_devices?: number; total_models_assigned?: number }>;
+        })(),
       ]);
 
       if (assignedModelsError) throw assignedModelsError;
@@ -194,13 +211,13 @@ export default function AdminDashboard() {
       const systemHealthText = getSystemHealthText(syncLogs?.length ?? 0, onlineDevices);
 
       setStats({
-        totalDevices: devices?.length ?? 0,
+        totalDevices: Number(dashboardStatsResp?.total_devices ?? devices?.length ?? 0),
         onlineDevices,
         offlineDevices: devices?.filter(d => d.status === 'offline').length ?? 0,
         pendingApprovals: pendingPodRequestsCount ?? 0,
         expiringSoon: licenses?.filter(l => l.expires_at && new Date(l.expires_at) <= thirtyDaysFromNow).length ?? 0,
         syncFailures: syncLogs?.length ?? 0,
-        totalModelsAssigned: assignedModelsCount ?? 0,
+        totalModelsAssigned: Number(dashboardStatsResp?.total_models_assigned ?? assignedModelsCount ?? 0),
         totalUsageToday: usageToday,
         deviceGrowthTrend: devicesCreatedThisWeekCount ? `+${devicesCreatedThisWeekCount} this week` : null,
         usageTrend,

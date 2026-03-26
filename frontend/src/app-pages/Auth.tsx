@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import type { Provider } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -24,6 +24,9 @@ const AUTH_LIMITS = {
   email: { min: 6, max: 254, localPartMax: 64 },
   password: { min: 8, max: 72 },
 };
+const AUTH_LOCK_MAX_ATTEMPTS = 5;
+const AUTH_LOCK_MINUTES = 5;
+const AUTH_LOCK_STORAGE_KEY = "nb:auth-login-attempts:v1";
 
 const VALID_APP_ROLES: AppRole[] = ["global_admin", "admin", "user", "viewer", "guest"];
 
@@ -127,6 +130,11 @@ interface AuthProps {
   readonly initialView?: AuthView;
 }
 
+type LoginAttemptState = {
+  failedAttempts: number;
+  lockUntilEpochMs: number | null;
+};
+
 function getViewDescription(effectiveView: AuthView): string {
   if (effectiveView === "signin") return "Sign in to access your Private AI Tenant";
   if (effectiveView === "forgot") return "Request a secure password reset link";
@@ -137,7 +145,76 @@ function getFriendlySignInErrorMessage(rawMsg: string, accountExists: boolean): 
   if (!/invalid login credentials/i.test(rawMsg)) return rawMsg;
   return accountExists
     ? "Password is incorrect. Please check your details or contact your admin."
-    : "No account found for this email.";
+    : "No account is associated with this email. Please sign up first.";
+}
+
+async function checkEmailExists(email: string): Promise<boolean | null> {
+  try {
+    const res = await fetch(
+      apiUrl(`/api/v1/auth/email-availability?email=${encodeURIComponent(email)}`),
+      { method: "GET" },
+    );
+    if (!res.ok) return null;
+    const payload = await readJsonSafe(res);
+    return typeof payload?.exists === "boolean" ? payload.exists : null;
+  } catch {
+    return null;
+  }
+}
+
+function readLoginAttemptState(email: string): LoginAttemptState {
+  if (typeof window === "undefined") {
+    return { failedAttempts: 0, lockUntilEpochMs: null };
+  }
+  try {
+    const raw = window.localStorage.getItem(AUTH_LOCK_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) as Record<string, LoginAttemptState> : {};
+    const state = parsed[email];
+    if (!state) return { failedAttempts: 0, lockUntilEpochMs: null };
+    const now = Date.now();
+    if (state.lockUntilEpochMs && state.lockUntilEpochMs <= now) {
+      // Lock expired; clear stale state lazily.
+      parsed[email] = { failedAttempts: 0, lockUntilEpochMs: null };
+      window.localStorage.setItem(AUTH_LOCK_STORAGE_KEY, JSON.stringify(parsed));
+      return parsed[email];
+    }
+    return {
+      failedAttempts: Number(state.failedAttempts || 0),
+      lockUntilEpochMs: state.lockUntilEpochMs ?? null,
+    };
+  } catch {
+    return { failedAttempts: 0, lockUntilEpochMs: null };
+  }
+}
+
+function writeLoginAttemptState(email: string, state: LoginAttemptState): void {
+  if (typeof window === "undefined") return;
+  try {
+    const raw = window.localStorage.getItem(AUTH_LOCK_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) as Record<string, LoginAttemptState> : {};
+    parsed[email] = state;
+    window.localStorage.setItem(AUTH_LOCK_STORAGE_KEY, JSON.stringify(parsed));
+  } catch {
+    // Best-effort; do not block auth path.
+  }
+}
+
+function clearLoginAttemptState(email: string): void {
+  writeLoginAttemptState(email, { failedAttempts: 0, lockUntilEpochMs: null });
+}
+
+function registerFailedLoginAttempt(email: string): LoginAttemptState {
+  const current = readLoginAttemptState(email);
+  const nextAttempts = (current.failedAttempts || 0) + 1;
+  if (nextAttempts >= AUTH_LOCK_MAX_ATTEMPTS) {
+    const lockUntil = Date.now() + AUTH_LOCK_MINUTES * 60 * 1000;
+    const lockedState = { failedAttempts: nextAttempts, lockUntilEpochMs: lockUntil };
+    writeLoginAttemptState(email, lockedState);
+    return lockedState;
+  }
+  const nextState = { failedAttempts: nextAttempts, lockUntilEpochMs: null };
+  writeLoginAttemptState(email, nextState);
+  return nextState;
 }
 
 export default function Auth({ initialView = "signin" }: AuthProps) {
@@ -235,6 +312,19 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
       toast({ title: "Missing password", description: "Password is required.", variant: "destructive" });
       return;
     }
+    const attemptsState = readLoginAttemptState(normalizedEmail);
+    if (attemptsState.lockUntilEpochMs && attemptsState.lockUntilEpochMs > Date.now()) {
+      const remainingMinutes = Math.max(
+        1,
+        Math.ceil((attemptsState.lockUntilEpochMs - Date.now()) / 60_000),
+      );
+      toast({
+        title: "Account locked",
+        description: `Account locked. Try after ${remainingMinutes} minute${remainingMinutes > 1 ? "s" : ""}.`,
+        variant: "destructive",
+      });
+      return;
+    }
     setLoading(true);
 
     try {
@@ -247,6 +337,7 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
       if (error) throw error;
 
       if (signInData.user) {
+        clearLoginAttemptState(normalizedEmail);
         const effectiveRole = await resolveEffectiveRole(signInData.user.id);
 
         safeLog.info("auth_signin_success", {
@@ -313,11 +404,22 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
       const rawMsg: string = error.message ?? "";
       let friendlyMsg = rawMsg;
       if (/invalid login credentials/i.test(rawMsg)) {
-        const { count } = await supabase
-          .from("app_users")
-          .select("user_id", { count: "exact", head: true })
-          .eq("email", normalizedEmail);
-        friendlyMsg = getFriendlySignInErrorMessage(rawMsg, (count ?? 0) > 0);
+        const lockState = registerFailedLoginAttempt(normalizedEmail);
+        if (lockState.lockUntilEpochMs && lockState.lockUntilEpochMs > Date.now()) {
+          const remainingMinutes = Math.max(
+            1,
+            Math.ceil((lockState.lockUntilEpochMs - Date.now()) / 60_000),
+          );
+          friendlyMsg = `Account locked. Try after ${remainingMinutes} minute${remainingMinutes > 1 ? "s" : ""}.`;
+        } else {
+        const exists = await checkEmailExists(normalizedEmail);
+        if (exists === null) {
+          // If availability check fails, keep message accurate but non-misleading.
+          friendlyMsg = "Invalid credentials. Please check your email and password.";
+        } else {
+          friendlyMsg = getFriendlySignInErrorMessage(rawMsg, exists);
+        }
+        }
       }
       toast({
         title: "Sign in failed",
@@ -604,10 +706,13 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
           placeholder="your@email.com"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
+          autoComplete="email"
+          inputMode="email"
+          spellCheck={false}
           minLength={AUTH_LIMITS.email.min}
           maxLength={AUTH_LIMITS.email.max}
           required
-          className="bg-background/50"
+          className="bg-background/50 min-w-0"
         />
       </div>
       <div className="space-y-2">
@@ -630,13 +735,12 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
       >
         {loading ? "Signing in..." : "Sign In"}
       </Button>
-      <button
-        type="button"
-        onClick={() => navigate("/forgot-password")}
-        className="w-full text-sm text-primary underline-offset-4 hover:underline bg-transparent border-none cursor-pointer py-1"
+      <Link
+        to="/forgot-password"
+        className="block w-full text-center text-sm text-primary underline-offset-4 hover:underline py-1"
       >
         Forgot password?
-      </button>
+      </Link>
       <Button type="button" variant="outline" className="w-full" onClick={() => navigate("/signup")}>
         Create new account
       </Button>
@@ -653,22 +757,24 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
           placeholder="your@email.com"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
+          autoComplete="email"
+          inputMode="email"
+          spellCheck={false}
           minLength={AUTH_LIMITS.email.min}
           maxLength={AUTH_LIMITS.email.max}
           required
-          className="bg-background/50"
+          className="bg-background/50 min-w-0"
         />
       </div>
       <Button type="submit" className="w-full" disabled={loading}>
         {loading ? "Sending..." : "Send reset link"}
       </Button>
-      <button
-        type="button"
-        onClick={() => navigate("/auth")}
-        className="w-full text-sm text-primary underline-offset-4 hover:underline bg-transparent border-none cursor-pointer py-1"
+      <Link
+        to="/auth"
+        className="block w-full text-center text-sm text-primary underline-offset-4 hover:underline py-1"
       >
         Back to sign in
-      </button>
+      </Link>
     </form>
   );
 
@@ -783,8 +889,8 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
         </div>
 
         {/* Right side - Sign In Only */}
-        <div className="animate-scale-in">
-          <Card className="w-full backdrop-blur-xl bg-card/80 border-border/50 shadow-2xl">
+        <div className="animate-scale-in min-w-0">
+          <Card className="w-full min-w-0 backdrop-blur-xl bg-card/80 border-border/50 shadow-2xl">
             <CardHeader className="space-y-4">
               <div className="flex justify-center lg:hidden">
                 <div className="p-3 rounded-xl bg-primary/10 backdrop-blur-sm border border-primary/20">
@@ -798,7 +904,7 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
                 {getViewDescription(effectiveView)}
               </CardDescription>
             </CardHeader>
-            <CardContent>
+            <CardContent className="min-w-0">
               {effectiveView === "signin" && signInView}
               {effectiveView === "forgot" && forgotView}
               {effectiveView === "reset" && resetView}

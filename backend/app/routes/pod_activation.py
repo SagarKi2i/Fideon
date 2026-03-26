@@ -5,7 +5,15 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Header, HTTPException, Request
 
-from app.core.supabase import insert_audit_log, postgrest_delete, postgrest_get, postgrest_insert, postgrest_patch, verify_user
+from app.core.supabase import (
+    get_user_context,
+    insert_audit_log,
+    postgrest_delete,
+    postgrest_get,
+    postgrest_insert,
+    postgrest_patch,
+    verify_user,
+)
 
 router = APIRouter()
 VALID_STATUSES = {"pending", "approved", "rejected"}
@@ -97,8 +105,12 @@ async def list_activation_requests(
     status: Optional[str] = None,
     authorization: Optional[str] = Header(default=None),
 ):
-    _, requester_role = await _get_requester_role(authorization)
+    context = await get_user_context(authorization)
+    requester_role = context.get("role")
+    requester_tenant_id = context.get("tenant_id")
     _require_admin(requester_role)
+    if not requester_tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
 
     query = "select=*&order=requested_at.desc"
     if status:
@@ -107,7 +119,55 @@ async def list_activation_requests(
         query += f"&status=eq.{quote(status, safe='')}"
 
     rows = await postgrest_get("pod_activation_requests", query)
-    return {"requests": rows}
+    if not rows:
+        return {"requests": []}
+
+    # Enrich requests with requester identity + tenant info.
+    # This avoids relying on client-side RLS joins and guarantees tenant-scoped visibility.
+    user_ids = [r.get("user_id") for r in rows if r.get("user_id")]
+    if not user_ids:
+        return {"requests": []}
+    encoded_user_ids = ",".join(quote(str(uid), safe="") for uid in user_ids)
+
+    app_users = await postgrest_get(
+        "app_users",
+        f"select=user_id,full_name,email,tenant_id&user_id=in.({encoded_user_ids})",
+    )
+    user_map = {str(u.get("user_id")): u for u in (app_users or []) if u.get("user_id")}
+
+    tenant_ids = sorted({str(u.get("tenant_id")) for u in (app_users or []) if u.get("tenant_id")})
+    tenants_map: dict[str, str] = {}
+    if tenant_ids:
+        encoded_tenant_ids = ",".join(quote(tid, safe="") for tid in tenant_ids)
+        tenants = await postgrest_get(
+            "tenants",
+            f"select=id,name&id=in.({encoded_tenant_ids})",
+        )
+        tenants_map = {str(t.get("id")): str(t.get("name")) for t in tenants if t.get("id") and t.get("name") is not None}
+
+    enriched: list[dict[str, object]] = []
+    for r in rows:
+        uid = r.get("user_id")
+        u = user_map.get(str(uid)) if uid else None
+        if not u:
+            # Tenant isolation defense-in-depth: if we can't resolve tenant for the requester, don't return it.
+            continue
+        req_tenant_id = u.get("tenant_id")
+        if not req_tenant_id or str(req_tenant_id) != str(requester_tenant_id):
+            continue
+
+        req_tenant_name = tenants_map.get(str(req_tenant_id))
+        enriched.append(
+            {
+                **r,
+                "requested_by_full_name": u.get("full_name"),
+                "requested_by_email": u.get("email"),
+                "requested_by_tenant_id": req_tenant_id,
+                "requested_by_tenant_name": req_tenant_name,
+            }
+        )
+
+    return {"requests": enriched}
 
 
 @router.post("/api/pod-activation/{request_id}/approve")
@@ -116,8 +176,13 @@ async def approve_activation_request(
     request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
-    requester, requester_role = await _get_requester_role(authorization)
+    context = await get_user_context(authorization)
+    requester = context.get("user") or {}
+    requester_role = context.get("role")
+    requester_tenant_id = context.get("tenant_id")
     _require_admin(requester_role)
+    if not requester_tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
 
     requests = await postgrest_get(
         "pod_activation_requests",
@@ -128,6 +193,17 @@ async def approve_activation_request(
     activation_request = requests[0]
     if activation_request.get("status") != "pending":
         raise HTTPException(status_code=400, detail="Only pending requests can be approved")
+
+    # Tenant isolation: ensure activation_request belongs to the caller tenant.
+    app_users = await postgrest_get(
+        "app_users",
+        f"select=tenant_id&user_id=eq.{quote(str(activation_request['user_id']), safe='')}&limit=1",
+    )
+    if not app_users:
+        raise HTTPException(status_code=403, detail="Requester context not found")
+    target_tenant_id = app_users[0].get("tenant_id")
+    if not target_tenant_id or str(target_tenant_id) != str(requester_tenant_id):
+        raise HTTPException(status_code=403, detail="Cross-tenant pod activation approval denied")
 
     existing = await postgrest_get(
         "activated_models",
@@ -178,8 +254,13 @@ async def reject_activation_request(
     request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
-    requester, requester_role = await _get_requester_role(authorization)
+    context = await get_user_context(authorization)
+    requester = context.get("user") or {}
+    requester_role = context.get("role")
+    requester_tenant_id = context.get("tenant_id")
     _require_admin(requester_role)
+    if not requester_tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
 
     requests = await postgrest_get(
         "pod_activation_requests",
@@ -190,6 +271,16 @@ async def reject_activation_request(
     activation_request = requests[0]
     if activation_request.get("status") != "pending":
         raise HTTPException(status_code=400, detail="Only pending requests can be rejected")
+
+    app_users = await postgrest_get(
+        "app_users",
+        f"select=tenant_id&user_id=eq.{quote(str(activation_request['user_id']), safe='')}&limit=1",
+    )
+    if not app_users:
+        raise HTTPException(status_code=403, detail="Requester context not found")
+    target_tenant_id = app_users[0].get("tenant_id")
+    if not target_tenant_id or str(target_tenant_id) != str(requester_tenant_id):
+        raise HTTPException(status_code=403, detail="Cross-tenant pod activation rejection denied")
 
     body = await request.json()
     rejection_reason = (body.get("rejection_reason") or "").strip() or None

@@ -11,7 +11,7 @@ import { safeLog } from "@/logger";
 
 /**
  * Signs the user out after a period of UI inactivity (insurance-style session policy).
- * Duration: `NEXT_PUBLIC_IDLE_SESSION_MINUTES` (default 15). Set to `0` to disable.
+ * Duration: `NEXT_PUBLIC_IDLE_SESSION_MINUTES` (default 30). Set to `0` to disable.
  */
 export function IdleSessionWatcher() {
   const navigate = useNavigate();

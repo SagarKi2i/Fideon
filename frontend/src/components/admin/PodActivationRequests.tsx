@@ -30,6 +30,10 @@ interface ActivationRequest {
   requested_at: string;
   reviewed_at: string | null;
   rejection_reason: string | null;
+  requested_by_full_name?: string | null;
+  requested_by_email?: string | null;
+  requested_by_tenant_name?: string | null;
+  requested_by_tenant_id?: string | null;
 }
 
 interface RequestUserContext {
@@ -91,10 +95,23 @@ export function PodActivationRequests() {
       const payload = await readJsonSafe(response);
       if (!response.ok) throw buildApiRequestError(response, payload, "Failed to approve request");
 
-      // Audit: admin/global_admin approving a pod request
-      try {
-        const { data: { user } } = await supabase.auth.getUser();
-        if (user) {
+      // Close modal quickly. Remaining work (audit + refresh) happens in the background.
+      setReviewRequest(null);
+      setReviewRejectionReason("");
+
+      toast({
+        title: "Request Approved",
+        description: `${request.model_name} has been activated for the user`,
+      });
+
+      void loadRequests();
+
+      // Audit: admin/global_admin approving a pod request (best-effort, non-blocking).
+      void (async () => {
+        try {
+          const { data: { user } } = await supabase.auth.getUser();
+          if (!user) return;
+
           const createdAt = new Date().toISOString();
           const integrity_hash = await computeAuditIntegrityHash({
             user_id: user.id,
@@ -112,27 +129,19 @@ export function PodActivationRequests() {
             email: user.email,
             role: role ?? "admin",
             event: `approve_pod:${request.model_id}`,
-            action_code: "U",              // Update allocation state
+            action_code: "U",
             outcome_code: 0,
             resource_type: "pod_activation",
             resource_id: request.id,
             created_at: createdAt,
             integrity_hash,
           });
+        } catch (auditError) {
+          safeLog.error("auth_audit_pod_approve_error", {
+            error: auditError instanceof Error ? auditError.message : String(auditError),
+          });
         }
-      } catch (auditError) {
-        safeLog.error("auth_audit_pod_approve_error", {
-          error:
-            auditError instanceof Error ? auditError.message : String(auditError),
-        });
-      }
-
-      toast({
-        title: "Request Approved",
-        description: `${request.model_name} has been activated for the user`,
-      });
-
-      loadRequests();
+      })();
     } catch (error) {
       console.error("Error approving request:", error);
       toast({
@@ -164,10 +173,23 @@ export function PodActivationRequests() {
       const payload = await readJsonSafe(response);
       if (!response.ok) throw buildApiRequestError(response, payload, "Failed to reject request");
 
-      // Audit: admin/global_admin rejecting a pod request
-      try {
-        const { data: { user } } = await supabase.auth.getUser();
-        if (user) {
+      // Close modal quickly. Remaining work (audit + refresh) happens in the background.
+      toast({
+        title: "Request Rejected",
+        description: `Activation request for ${request.model_name} has been rejected`,
+      });
+
+      setReviewRequest(null);
+      setReviewRejectionReason("");
+
+      void loadRequests();
+
+      // Audit: admin/global_admin rejecting a pod request (best-effort, non-blocking).
+      void (async () => {
+        try {
+          const { data: { user } } = await supabase.auth.getUser();
+          if (!user) return;
+
           const createdAt = new Date().toISOString();
           const integrity_hash = await computeAuditIntegrityHash({
             user_id: user.id,
@@ -185,29 +207,19 @@ export function PodActivationRequests() {
             email: user.email,
             role: role ?? "admin",
             event: `reject_pod:${request.model_id}`,
-            action_code: "U",              // Update request status
+            action_code: "U",
             outcome_code: 0,
             resource_type: "pod_activation",
             resource_id: request.id,
             created_at: createdAt,
             integrity_hash,
           });
+        } catch (auditError) {
+          safeLog.error("auth_audit_pod_reject_error", {
+            error: auditError instanceof Error ? auditError.message : String(auditError),
+          });
         }
-      } catch (auditError) {
-        safeLog.error("auth_audit_pod_reject_error", {
-          error:
-            auditError instanceof Error ? auditError.message : String(auditError),
-        });
-      }
-
-      toast({
-        title: "Request Rejected",
-        description: `Activation request for ${request.model_name} has been rejected`,
-      });
-
-      setReviewRequest(null);
-      setReviewRejectionReason("");
-      loadRequests();
+      })();
     } catch (error) {
       console.error("Error rejecting request:", error);
       toast({
@@ -227,6 +239,21 @@ export function PodActivationRequests() {
     setLoadingReviewContext(true);
 
     try {
+      // Prefer backend-enriched requester context (production-safe; avoids client-side RLS joins).
+      if (
+        request.requested_by_email !== undefined ||
+        request.requested_by_full_name !== undefined ||
+        request.requested_by_tenant_name !== undefined
+      ) {
+        setReviewContext({
+          fullName: request.requested_by_full_name ?? null,
+          email: request.requested_by_email ?? null,
+          tenantId: request.requested_by_tenant_id ?? null,
+          tenantName: request.requested_by_tenant_name ?? null,
+        });
+        return;
+      }
+
       const { data: appUser, error } = await supabase
         .from("app_users")
         .select("full_name,email,tenant_id")
@@ -392,9 +419,12 @@ export function PodActivationRequests() {
                   <p className="text-muted-foreground">Loading tenant context...</p>
                 ) : (
                   <>
-                    <p><span className="text-muted-foreground">Requested by:</span> {reviewContext?.fullName ?? "Unknown user"}</p>
+                    <p>
+                      <span className="text-muted-foreground">Requested by:</span>{" "}
+                      {reviewContext?.fullName ?? reviewContext?.email ?? "Unknown user"}
+                    </p>
                     <p><span className="text-muted-foreground">Email:</span> {reviewContext?.email ?? "Not available"}</p>
-                    <p><span className="text-muted-foreground">Tenant:</span> {reviewContext?.tenantName ?? "Unassigned tenant"}</p>
+                    <p><span className="text-muted-foreground">Tenant:</span> {reviewContext?.tenantName ?? (reviewContext?.tenantId ? "Tenant (ID available)" : "Unassigned tenant")}</p>
                     <p className="text-xs text-muted-foreground">Tenant ID: {reviewContext?.tenantId ?? "N/A"}</p>
                     <p className="text-xs text-muted-foreground">User ID: {reviewRequest.user_id}</p>
                   </>
