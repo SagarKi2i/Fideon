@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 
-/** Default aligns with common insurance / PHI session policies (15–20 min inactivity). */
+/** Default aligns with requested policy: 30 minutes inactivity timeout. */
 const DEFAULT_MINUTES = 15;
 
 /**

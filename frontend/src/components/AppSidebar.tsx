@@ -18,7 +18,6 @@ import {
   CalendarClock,
   Zap,
   ClipboardCheck,
-  QrCode,
 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useState, useEffect, useCallback } from "react";
@@ -70,7 +69,6 @@ const items = [
   
   { title: "Mailbox", url: "/mailbox", icon: Mail, allowedRoles: ["global_admin", "admin", "user"] as AppRole[] },
   { title: "Settings", url: "/settings", icon: Settings, allowedRoles: ["global_admin", "admin", "user", "viewer", "guest"] as AppRole[] },
-  { title: "Link Devices", url: "/link-devices", icon: QrCode, allowedRoles: ["global_admin", "admin", "user", "viewer", "guest"] as AppRole[] },
 ];
 
 const adminItems = [

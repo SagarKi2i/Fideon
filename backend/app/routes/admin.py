@@ -10,7 +10,6 @@ from fastapi import APIRouter, Header, HTTPException, Request
 
 from app.core.config import SUPABASE_URL
 from app.core.supabase import (
-    admin_list_users,
     insert_audit_log,
     postgrest_get,
     postgrest_insert,
@@ -37,13 +36,17 @@ def _generate_temp_password(length: int = 20) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
-async def _get_requester_role(authorization: Optional[str]) -> tuple[dict, Optional[str]]:
+async def _get_requester_role(authorization: Optional[str]) -> tuple[dict, Optional[str], Optional[str]]:
     requester = await verify_user(authorization)
     requester_roles = await postgrest_get(
         "user_roles", f"select=role&user_id=eq.{quote(requester['id'], safe='')}&limit=1"
     )
     requester_role = requester_roles[0].get("role") if requester_roles else None
-    return requester, requester_role
+    requester_profiles = await postgrest_get(
+        "app_users", f"select=tenant_id&user_id=eq.{quote(requester['id'], safe='')}&limit=1"
+    )
+    requester_tenant_id = requester_profiles[0].get("tenant_id") if requester_profiles else None
+    return requester, requester_role, requester_tenant_id
 
 
 def _parse_admin_create_user_body(body: dict) -> tuple[str, Optional[str], Optional[str], str, str]:
@@ -98,7 +101,14 @@ async def _create_auth_user(email: str, password: str, full_name: Optional[str],
         )
     if resp.status_code >= 400:
         raise HTTPException(status_code=400, detail=resp.text)
-    return resp.json().get("user") or {}
+    body = resp.json()
+    if isinstance(body, dict):
+        if isinstance(body.get("user"), dict):
+            return body["user"]
+        # Some Supabase admin responses return user fields at the top level.
+        if body.get("id"):
+            return body
+    return {}
 
 
 async def _send_password_reset(email: str) -> None:
@@ -117,11 +127,15 @@ async def _finalize_user_creation(
     email: str,
     full_name: Optional[str],
     role: str,
+    tenant_id: Optional[str],
     password: Optional[str] = None,
 ) -> dict:
     """Create auth user + assign role + audit log. Returns user dict."""
     actual_password = password or _generate_temp_password()
     user_data = await _create_auth_user(email, actual_password, full_name, role)
+    if not user_data.get("id"):
+        raise HTTPException(status_code=500, detail="Auth user created without a valid user id")
+    inherited_models_count = 0
     if user_data:
         try:
             await postgrest_insert("user_roles", {"user_id": user_data["id"], "role": role})
@@ -135,6 +149,50 @@ async def _finalize_user_creation(
                     {"full_name": full_name},
                 )
             except Exception:
+                pass
+        if tenant_id:
+            await postgrest_patch(
+                "app_users",
+                f"user_id=eq.{quote(user_data['id'], safe='')}",
+                {"tenant_id": tenant_id},
+            )
+        # Inherit tenant model access for the newly created user.
+        # We copy distinct model assignments that already exist within the tenant.
+        if tenant_id:
+            try:
+                tenant_users = await postgrest_get(
+                    "app_users",
+                    f"select=user_id&tenant_id=eq.{quote(str(tenant_id), safe='')}",
+                )
+                tenant_user_ids = [str(row.get("user_id")) for row in tenant_users if row.get("user_id")]
+                if tenant_user_ids:
+                    encoded_user_ids = ",".join(quote(uid, safe="") for uid in tenant_user_ids)
+                    tenant_models = await postgrest_get(
+                        "activated_models",
+                        f"select=model_id,model_name,domain&user_id=in.({encoded_user_ids})",
+                    )
+                    seen_model_ids: set[str] = set()
+                    for row in tenant_models:
+                        model_id = str(row.get("model_id") or "").strip()
+                        model_name = str(row.get("model_name") or "").strip()
+                        domain = str(row.get("domain") or "").strip()
+                        if not model_id or not model_name or not domain:
+                            continue
+                        if model_id in seen_model_ids:
+                            continue
+                        seen_model_ids.add(model_id)
+                        await postgrest_insert(
+                            "activated_models",
+                            {
+                                "user_id": user_data["id"],
+                                "model_id": model_id,
+                                "model_name": model_name,
+                                "domain": domain,
+                            },
+                        )
+                        inherited_models_count += 1
+            except Exception:
+                # Best effort: user creation must not fail if model inheritance fails.
                 pass
         # If no password was supplied, send a reset link so user can self-set
         if not password:
@@ -152,6 +210,7 @@ async def _finalize_user_creation(
             previous_value=None,
             new_value={"role": role},
         )
+    user_data["inherited_models_count"] = inherited_models_count
     return user_data
 
 
@@ -185,21 +244,24 @@ async def _handle_global_admin_create(
     email: str,
     full_name: Optional[str],
     role: str,
+    tenant_id: Optional[str],
     password: Optional[str],
 ) -> dict:
     if not password:
         raise HTTPException(status_code=400, detail=PASSWORD_REQUIRED)
     user_data = await _finalize_user_creation(
-        request, requester["id"], email, full_name, role, password
+        request, requester["id"], email, full_name, role, tenant_id, password
     )
     return {"success": True, "pending": False,
-            "user": {"id": user_data.get("id"), "email": user_data.get("email")}}
+            "user": {"id": user_data.get("id"), "email": user_data.get("email")},
+            "inherited_models_count": int(user_data.get("inherited_models_count") or 0)}
 
 
 async def _queue_user_creation_request(
     request: Request,
     requester: dict,
     requester_role: str,
+    requester_tenant_id: Optional[str],
     email: str,
     full_name: Optional[str],
     role: str,
@@ -209,6 +271,7 @@ async def _queue_user_creation_request(
         {
             "requested_by": requester["id"],
             "requester_role": requester_role,
+            "tenant_id": requester_tenant_id,
             "email": email,
             "full_name": full_name,
             "requested_role": role,
@@ -234,18 +297,22 @@ async def _handle_admin_create(
     password: Optional[str],
     full_name: Optional[str],
     role: str,
+    requester_tenant_id: Optional[str],
 ) -> dict:
     if role in ADMIN_INSTANT_ROLES:
         if not password:
             raise HTTPException(status_code=400, detail=PASSWORD_REQUIRED)
         user_data = await _finalize_user_creation(
-            request, requester["id"], email, full_name, role, password
+            request, requester["id"], email, full_name, role, requester_tenant_id, password
         )
         return {"success": True, "pending": False,
-                "user": {"id": user_data.get("id"), "email": user_data.get("email")}}
+                "user": {"id": user_data.get("id"), "email": user_data.get("email")},
+                "inherited_models_count": int(user_data.get("inherited_models_count") or 0)}
 
     if role in ADMIN_PENDING_ROLES:
-        await _queue_user_creation_request(request, requester, "admin", email, full_name, role)
+        await _queue_user_creation_request(
+            request, requester, "admin", requester_tenant_id, email, full_name, role
+        )
         return {
             "success": True,
             "pending": True,
@@ -258,13 +325,16 @@ async def _handle_admin_create(
 async def _handle_user_create(
     request: Request,
     requester: dict,
+    requester_tenant_id: Optional[str],
     email: str,
     full_name: Optional[str],
     role: str,
 ) -> dict:
     if role not in USER_PENDING_ROLES:
         raise HTTPException(status_code=403, detail="Users can only request creation of 'user' role accounts")
-    await _queue_user_creation_request(request, requester, "user", email, full_name, role)
+    await _queue_user_creation_request(
+        request, requester, "user", requester_tenant_id, email, full_name, role
+    )
     return {
         "success": True,
         "pending": True,
@@ -277,24 +347,82 @@ async def _handle_user_create(
 # ─────────────────────────────────────────────────────────────────────────────
 @router.get("/api/list-users")
 async def list_users(authorization: Optional[str] = Header(default=None)):
-    user = await verify_user(authorization)
-    roles = await postgrest_get("user_roles", f"select=role&user_id=eq.{quote(user['id'], safe='')}&limit=1")
-    if not roles or roles[0].get("role") not in {"admin", "global_admin"}:
+    requester, requester_role, requester_tenant_id = await _get_requester_role(authorization)
+    if requester_role not in {"admin", "global_admin"}:
         raise HTTPException(status_code=403, detail=ADMIN_ACCESS_REQUIRED)
+    if not requester_tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
 
-    users = await admin_list_users()
-    user_roles = await postgrest_get("user_roles", "select=user_id,role")
-    role_map = {r["user_id"]: r["role"] for r in user_roles}
-    out = [
-        {
-            "id": u.get("id"),
-            "email": u.get("email"),
-            "role": role_map.get(u.get("id"), "user"),
-            "created_at": u.get("created_at"),
-        }
-        for u in users
-    ]
+    rows = await postgrest_get(
+        "app_users",
+        (
+            "select=user_id,email,created_at"
+            f"&tenant_id=eq.{quote(requester_tenant_id, safe='')}"
+            "&order=created_at.desc"
+        ),
+    )
+    user_ids = [str(row.get("user_id")) for row in rows if row.get("user_id")]
+    role_map: dict[str, str] = {}
+    if user_ids:
+        id_list = ",".join(quote(uid, safe="") for uid in user_ids)
+        role_rows = await postgrest_get(
+            "user_roles",
+            f"select=user_id,role&user_id=in.({id_list})",
+        )
+        role_map = {str(r.get("user_id")): str(r.get("role")) for r in role_rows}
+    out = []
+    for row in rows:
+        role_value = role_map.get(str(row.get("user_id")), "user")
+        out.append(
+            {
+                "id": row.get("user_id"),
+                "email": row.get("email"),
+                "role": role_value,
+                "created_at": row.get("created_at"),
+            }
+        )
     return {"users": out}
+
+
+@router.get("/api/admin/dashboard-stats")
+async def admin_dashboard_stats(authorization: Optional[str] = Header(default=None)):
+    _, requester_role, requester_tenant_id = await _get_requester_role(authorization)
+    if requester_role not in {"admin", "global_admin"}:
+        raise HTTPException(status_code=403, detail=ADMIN_ACCESS_REQUIRED)
+    if not requester_tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
+
+    device_rows = await postgrest_get(
+        "devices",
+        (
+            "select=id"
+            f"&tenant_id=eq.{quote(requester_tenant_id, safe='')}"
+        ),
+    )
+    total_devices = len(device_rows or [])
+
+    tenant_users = await postgrest_get(
+        "app_users",
+        (
+            "select=user_id"
+            f"&tenant_id=eq.{quote(requester_tenant_id, safe='')}"
+        ),
+    )
+    tenant_user_ids = [str(row.get("user_id")) for row in tenant_users if row.get("user_id")]
+
+    total_models_assigned = 0
+    if tenant_user_ids:
+        encoded_user_ids = ",".join(quote(uid, safe="") for uid in tenant_user_ids)
+        model_rows = await postgrest_get(
+            "activated_models",
+            f"select=id&user_id=in.({encoded_user_ids})",
+        )
+        total_models_assigned = len(model_rows or [])
+
+    return {
+        "total_devices": total_devices,
+        "total_models_assigned": total_models_assigned,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -302,7 +430,7 @@ async def list_users(authorization: Optional[str] = Header(default=None)):
 # ─────────────────────────────────────────────────────────────────────────────
 @router.post("/api/admin-create-user")
 async def admin_create_user(request: Request, authorization: Optional[str] = Header(default=None)):
-    requester, requester_role = await _get_requester_role(authorization)
+    requester, requester_role, requester_tenant_id = await _get_requester_role(authorization)
 
     body = await request.json()
     email, password, full_name, role, action = _parse_admin_create_user_body(body)
@@ -316,19 +444,19 @@ async def admin_create_user(request: Request, authorization: Optional[str] = Hea
     # ── GLOBAL ADMIN: create any role instantly ───────────────────────────────
     if requester_role == "global_admin":
         return await _handle_global_admin_create(
-            request, requester, email, full_name, role, password
+            request, requester, email, full_name, role, requester_tenant_id, password
         )
 
     # ── ADMIN: instant for user/viewer/guest; pending for admin ───────────────
     if requester_role == "admin":
         return await _handle_admin_create(
-            request, requester, email, password, full_name, role
+            request, requester, email, password, full_name, role, requester_tenant_id
         )
 
     # ── USER: can request creation of another user (pending approval) ─────────
     if requester_role == "user":
         return await _handle_user_create(
-            request, requester, email, full_name, role
+            request, requester, requester_tenant_id, email, full_name, role
         )
 
     # viewer and guest cannot create or request any users
@@ -384,22 +512,22 @@ async def admin_set_user_role(request: Request, authorization: Optional[str] = H
 # ─────────────────────────────────────────────────────────────────────────────
 @router.get("/api/user-creation-requests")
 async def list_user_creation_requests(authorization: Optional[str] = Header(default=None)):
-    _, requester_role = await _get_requester_role(authorization)
+    _, requester_role, requester_tenant_id = await _get_requester_role(authorization)
     if requester_role not in {"admin", "global_admin"}:
         raise HTTPException(status_code=403, detail=ADMIN_ACCESS_REQUIRED)
+    if not requester_tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
 
-    # global_admin sees ALL pending requests
-    # admin sees only requests from 'user' role (user→user requests)
-    if requester_role == "global_admin":
-        rows = await postgrest_get(
-            "user_creation_requests",
-            "select=*&status=eq.pending&order=created_at.asc",
-        )
-    else:
-        rows = await postgrest_get(
-            "user_creation_requests",
-            "select=*&status=eq.pending&requester_role=eq.user&order=created_at.asc",
-        )
+    # Tenant-only queue. Admin sees user requests; global_admin sees tenant queue.
+    base = (
+        "select=*"
+        f"&tenant_id=eq.{quote(requester_tenant_id, safe='')}"
+        "&status=eq.pending"
+        "&order=created_at.asc"
+    )
+    if requester_role == "admin":
+        base += "&requester_role=eq.user"
+    rows = await postgrest_get("user_creation_requests", base)
 
     return {"requests": rows or []}
 
@@ -409,10 +537,15 @@ async def list_user_creation_requests(authorization: Optional[str] = Header(defa
 # ─────────────────────────────────────────────────────────────────────────────
 @router.get("/api/my-user-creation-requests")
 async def my_user_creation_requests(authorization: Optional[str] = Header(default=None)):
-    requester, _ = await _get_requester_role(authorization)
+    requester, _, requester_tenant_id = await _get_requester_role(authorization)
     rows = await postgrest_get(
         "user_creation_requests",
-        f"select=*&requested_by=eq.{quote(requester['id'], safe='')}&order=created_at.desc&limit=20",
+        (
+            "select=*"
+            f"&requested_by=eq.{quote(requester['id'], safe='')}"
+            f"&tenant_id=eq.{quote(str(requester_tenant_id or ''), safe='')}"
+            "&order=created_at.desc&limit=20"
+        ),
     )
     return {"requests": rows or []}
 
@@ -426,14 +559,20 @@ async def approve_user_creation_request(
     request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
-    requester, requester_role = await _get_requester_role(authorization)
+    requester, requester_role, requester_tenant_id = await _get_requester_role(authorization)
     if requester_role not in {"admin", "global_admin"}:
         raise HTTPException(status_code=403, detail=ADMIN_ACCESS_REQUIRED)
 
     # Fetch the pending request
     rows = await postgrest_get(
         "user_creation_requests",
-        f"select=*&id=eq.{quote(request_id, safe='')}&status=eq.pending&limit=1",
+        (
+            "select=*"
+            f"&id=eq.{quote(request_id, safe='')}"
+            "&status=eq.pending"
+            f"&tenant_id=eq.{quote(str(requester_tenant_id or ''), safe='')}"
+            "&limit=1"
+        ),
     )
     if not rows:
         raise HTTPException(status_code=404, detail="Pending request not found")
@@ -456,6 +595,7 @@ async def approve_user_creation_request(
         ucr["email"],
         ucr.get("full_name"),
         ucr["requested_role"],
+        requester_tenant_id,
         password=None,   # temp password generated; reset email sent automatically
     )
 
@@ -485,6 +625,7 @@ async def approve_user_creation_request(
         "success": True,
         "message": f"User {ucr['email']} created with role '{ucr['requested_role']}'. A password-reset email has been sent.",
         "user": {"id": user_data.get("id"), "email": user_data.get("email")},
+        "inherited_models_count": int(user_data.get("inherited_models_count") or 0),
     }
 
 
@@ -497,13 +638,19 @@ async def reject_user_creation_request(
     request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
-    requester, requester_role = await _get_requester_role(authorization)
+    requester, requester_role, requester_tenant_id = await _get_requester_role(authorization)
     if requester_role not in {"admin", "global_admin"}:
         raise HTTPException(status_code=403, detail=ADMIN_ACCESS_REQUIRED)
 
     rows = await postgrest_get(
         "user_creation_requests",
-        f"select=*&id=eq.{quote(request_id, safe='')}&status=eq.pending&limit=1",
+        (
+            "select=*"
+            f"&id=eq.{quote(request_id, safe='')}"
+            "&status=eq.pending"
+            f"&tenant_id=eq.{quote(str(requester_tenant_id or ''), safe='')}"
+            "&limit=1"
+        ),
     )
     if not rows:
         raise HTTPException(status_code=404, detail="Pending request not found")

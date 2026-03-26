@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { apiUrl } from "@/lib/apiBaseUrl";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -122,9 +122,7 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
 
   const selectedRoleOption = roleOptions.find((o) => o.role === newUserRole) ?? roleOptions[0];
 
-  useEffect(() => { loadUsers(); }, []);
-
-  const loadUsersFromSupabaseFallback = async () => {
+  const loadUsersFromSupabaseFallback = useCallback(async () => {
     const { data: appUsers, error: appUsersError } = await supabase
       .from("app_users")
       .select("user_id,email")
@@ -144,9 +142,9 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
         role: roleMap.get(u.user_id) || "user",
       }))
     );
-  };
+  }, []);
 
-  const loadUsers = async () => {
+  const loadUsers = useCallback(async () => {
     setLoading(true);
     try {
       const { data: { session } } = await supabase.auth.getSession();
@@ -179,7 +177,11 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [loadUsersFromSupabaseFallback, toast]);
+
+  useEffect(() => {
+    void loadUsers();
+  }, [loadUsers]);
 
   const updateRole = async (userId: string, role: AppRole) => {
     // Only global_admin can change existing roles
@@ -271,9 +273,10 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
           description: result.message || "Your request has been sent for approval.",
         });
       } else {
+        const inheritedModelsCount = Number(result.inherited_models_count ?? 0);
         toast({
           title: "User created",
-          description: `Created ${newUserEmail} with role ${newUserRole}.`,
+          description: `Created ${newUserEmail} with role ${newUserRole}. Inherited ${inheritedModelsCount} tenant model${inheritedModelsCount === 1 ? "" : "s"}.`,
         });
         await loadUsers();
       }
