@@ -70,6 +70,75 @@ After changing any of the above, re-run the failed **Deploy** job (or push again
 
 ---
 
+## Azure Login: `No subscriptions found for ...`
+
+**Error:** `Error: No subscriptions found for ***` during **`azure/login@v2`**.
+
+Azure only lists subscriptions where the **service principal has a role assignment** (Reader is enough to see the sub; **Website Contributor** on the resource group is typical for deploy). An app registration **without** any assignment on a subscription produces exactly this error.
+
+### Fast fix (recommended — one command, replaces `AZURE_CREDENTIALS`)
+
+Run in **Azure Cloud Shell** or any shell where you are logged in as a user who can create role assignments (e.g. **Owner** on the subscription or **User Access Administrator** on the RG):
+
+1. Set IDs (from Azure Portal → **Subscriptions** and **Resource groups**):
+
+   - `SUBSCRIPTION_ID` — GUID of the subscription that hosts the Web Apps  
+   - `RESOURCE_GROUP` — same value you use for **`AZURE_RESOURCE_GROUP`** in GitHub  
+
+2. Run:
+
+```bash
+az ad sp create-for-rbac \
+  --name "github-actions-fideon-dev" \
+  --role "Website Contributor" \
+  --scopes "/subscriptions/SUBSCRIPTION_ID/resourceGroups/RESOURCE_GROUP" \
+  --sdk-auth
+```
+
+3. Copy the **entire JSON output** (starts with `{` and includes `clientId`, `clientSecret`, `subscriptionId`, `tenantId`) into the GitHub Environment secret **`AZURE_CREDENTIALS`**.
+
+4. In the same GitHub Environment, set variable **`AZURE_SUBSCRIPTION_ID`** to that subscription GUID (must match the apps’ subscription).
+
+5. Re-run the failed workflow.
+
+### If you already have an SP and only need a role
+
+```bash
+az role assignment create \
+  --assignee CLIENT_ID \
+  --role "Website Contributor" \
+  --scope "/subscriptions/SUBSCRIPTION_ID/resourceGroups/RESOURCE_GROUP"
+```
+
+Use the existing app’s **Application (client) ID** as `CLIENT_ID`. Then ensure **`AZURE_CREDENTIALS`** JSON uses the correct **`subscriptionId`** and **`tenantId`**, and set **`AZURE_SUBSCRIPTION_ID`** in GitHub to the same subscription.
+
+---
+
+## App Service (v1-dev): deploy-dev / `deploy-app-service`
+
+The reusable workflow **`.github/workflows/deploy-app-service.yml`** deploys with **`azure/login`** + **`az webapp config container set`** (no `azure/webapps-deploy`, no Kudu `/diagnostics/runtime`).
+
+### Required in the GitHub Environment (e.g. `development`)
+
+| Name | Type | Purpose |
+|------|------|--------|
+| `AZURE_SUBSCRIPTION_ID` | Variable | Subscription GUID (Portal → Subscriptions → copy; must match apps) |
+| `AZURE_WEBAPP_FRONTEND` | Variable | Frontend App Service name |
+| `AZURE_WEBAPP_BACKEND` | Variable | Backend App Service name |
+| `AZURE_RESOURCE_GROUP` | Variable | Resource group that contains both Web Apps |
+| `AZURE_CREDENTIALS` | Secret | Full JSON from `az ad sp create-for-rbac ... --sdk-auth` (see above) |
+| `AZURE_CR_USERNAME` / `AZURE_CR_PASSWORD` | Secret | ACR pull credentials (same as Docker push) |
+
+The service principal must have permission to update the Web Apps (the **`create-for-rbac`** command above grants **Website Contributor** on the RG).
+
+### If `az webapp config container set` fails
+
+- Confirm **subscription** in `AZURE_CREDENTIALS` matches where the apps live.
+- Confirm app names and **`AZURE_RESOURCE_GROUP`** match Azure Portal exactly.
+- Ensure the SP can read/write App Service configuration on those resources.
+
+---
+
 ## Quick checklist (development)
 
 | Check | Where |
@@ -80,3 +149,4 @@ After changing any of the above, re-run the failed **Deploy** job (or push again
 | `AZURE_VM_USERNAME` = SSH user | Same |
 | `CHATBOT_SERVER_KEY` = private key | Same |
 | sshd running on VM | `systemctl status sshd` on VM |
+| App Service dev deploy | `AZURE_CREDENTIALS`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, Web App names | GitHub → Environments → development |

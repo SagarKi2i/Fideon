@@ -38,6 +38,7 @@ This now includes Sprint-1 closure migrations for:
 3. Run frontend:
    - `npm run dev`
 4. Build frontend:
+
    - `npm run build`
 
 ## Auth provider toggles (frontend)

@@ -2,6 +2,8 @@
 # Backend CI/CD
 # ─────────────────────────────────────────────────────────────
 # Note: this comment is a no-op change to trigger a clean CI rerun.
+# Note: no-op change to trigger CI rerun (staging).
+# Note: no-op change to trigger CI rerun (demo).
 
 name: Backend CI/CD
 
@@ -14,6 +16,14 @@ on:
     paths:
       - 'backend/**'
       - '.github/workflows/**'
+
+  # Production App Service deploy is manual only: Actions → Backend CI/CD → Run workflow (branch v1, enable deploy).
+  workflow_dispatch:
+    inputs:
+      deploy_to_production:
+        description: 'Deploy backend to production App Service (requires branch v1)'
+        type: boolean
+        default: false
 
 concurrency:
   group: backend-ci-${{ github.ref }}
@@ -40,24 +50,13 @@ jobs:
         working-directory: backend
         run: |
           pip install --upgrade pip
-          for attempt in 1 2 3; do
-            echo "Installing requirements (attempt $attempt/3)"
-            if pip install --retries 5 --timeout 120 -r requirements.txt; then
-              break
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              echo "Dependency install failed after 3 attempts"
-              exit 1
-            fi
-            echo "Install failed, retrying in 15s..."
-            sleep 15
-          done
+          pip install --retries 5 --timeout 120 -r requirements.txt
           pip install pytest pytest-cov flake8
 
       - name: Lint
         working-directory: backend
         continue-on-error: true
-        run: flake8 . --count --max-line-length=120 --extend-ignore=E501,F401 --statistics
+        run: flake8 . --count --max-line-length=120 --extend-ignore=E501,F401 --per-file-ignores=app/llm_fallback/models.py:F811 --statistics
 
       - name: Test
         working-directory: backend
@@ -83,20 +82,26 @@ jobs:
       # we only need scans to succeed so SonarQube dashboards populate.
 
       - name: Build Docker Image
-        if: github.event_name == 'push'
+        if: >
+          github.event_name == 'push' ||
+          (github.event_name == 'workflow_dispatch' &&
+           github.ref == 'refs/heads/v1' &&
+           github.event.inputs.deploy_to_production == 'true')
         run: |
           docker build \
             -t neurapodacr.azurecr.io/backend:${{ github.sha }} \
-            --no-cache \
             backend/
 
       - name: Login to ACR & Push
         if: |
-          github.event_name == 'push' && (
+          (github.event_name == 'push' && (
             github.ref == 'refs/heads/v1-dev' ||
             github.ref == 'refs/heads/v1-staging' ||
             github.ref == 'refs/heads/v1'
-          )
+          )) ||
+          (github.event_name == 'workflow_dispatch' &&
+           github.ref == 'refs/heads/v1' &&
+           github.event.inputs.deploy_to_production == 'true')
         run: |
           echo "${{ secrets.AZURE_CR_PASSWORD }}" | \
             docker login neurapodacr.azurecr.io \
@@ -119,23 +124,22 @@ jobs:
   deploy-staging:
     needs: ci
     if: github.ref == 'refs/heads/v1-staging' && github.event_name == 'push'
-    uses: ./.github/workflows/deploy-env.yml
+    uses: ./.github/workflows/deploy-app-service.yml
     with:
       environment: staging
       component: backend
-      container_name: neurapod-backend
-      port: '8080'
       image_sha: ${{ github.sha }}
     secrets: inherit
 
   deploy-production:
     needs: ci
-    if: github.ref == 'refs/heads/v1' && github.event_name == 'push'
-    uses: ./.github/workflows/deploy-env.yml
+    if: >
+      github.ref == 'refs/heads/v1' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.deploy_to_production == 'true'
+    uses: ./.github/workflows/deploy-app-service.yml
     with:
       environment: production
       component: backend
-      container_name: neurapod-backend
-      port: '8080'
       image_sha: ${{ github.sha }}
     secrets: inherit

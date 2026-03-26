@@ -79,14 +79,14 @@ describe("Auth flow smoke", () => {
     });
   });
 
-  it("switches to forgot-password mode and sends reset email", async () => {
+  it("forgot-password view sends reset email", async () => {
+    // Production uses /forgot-password → <Auth initialView="forgot" />; navigate() is mocked so we mount that view directly.
     render(
       <MemoryRouter>
-        <Auth />
+        <Auth initialView="forgot" />
       </MemoryRouter>
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Forgot password?" }));
     fireEvent.change(screen.getByLabelText("Work Email"), { target: { value: "user@example.com" } });
     fireEvent.click(screen.getByRole("button", { name: "Send reset link" }));
 
