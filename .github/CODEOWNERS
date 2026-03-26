@@ -1,8 +1,8 @@
 # Frontend changes require Frontend Team review
-/frontend/   @shubhammakeshwar23 @Samarth-i2i @Akshayi2i
+/frontend/   @sakshi-i2i 
 
 # Backend changes require Backend Team review
-/backend/    @Samarth-i2i @Akshayi2i @shubhammakeshwar23
+/backend/    @sakshi-i2i 
 
 # QA Test Scripts require QA Team review
 /qa/         @SKOTWALI2I
@@ -11,5 +11,5 @@
 /scripts/    @sakshi-i2i
 
 # Workflow and CI/CD changes require DevOps review
-/.github/    @sakshi-i2i
+/.github/    @sakshi-i2i 
 
