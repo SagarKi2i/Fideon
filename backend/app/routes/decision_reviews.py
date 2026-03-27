@@ -4,7 +4,13 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Header, HTTPException, Request
 
-from app.core.supabase import insert_audit_log, postgrest_get, postgrest_insert, postgrest_patch, verify_user
+from app.core.supabase import (
+    insert_audit_log,
+    postgrest_get,
+    postgrest_insert,
+    postgrest_patch,
+    verify_user,
+)
 
 router = APIRouter()
 VALID_REVIEW_STATUSES = {"pending", "approved", "rejected"}
@@ -28,13 +34,17 @@ VALID_DECISION_TYPES = {
 }
 
 
-async def _get_requester_role(authorization: Optional[str]) -> tuple[dict, Optional[str]]:
+async def _get_requester_role(authorization: Optional[str]) -> tuple[dict, Optional[str], Optional[str]]:
     requester = await verify_user(authorization)
     requester_roles = await postgrest_get(
         "user_roles", f"select=role&user_id=eq.{quote(requester['id'], safe='')}&limit=1"
     )
     requester_role = requester_roles[0].get("role") if requester_roles else None
-    return requester, requester_role
+    requester_profiles = await postgrest_get(
+        "app_users", f"select=tenant_id&user_id=eq.{quote(requester['id'], safe='')}&limit=1"
+    )
+    requester_tenant_id = requester_profiles[0].get("tenant_id") if requester_profiles else None
+    return requester, requester_role, requester_tenant_id
 
 
 def _require_admin(role: Optional[str]) -> None:
@@ -44,7 +54,9 @@ def _require_admin(role: Optional[str]) -> None:
 
 @router.post("/api/reviews")
 async def create_review_request(request: Request, authorization: Optional[str] = Header(default=None)):
-    requester, _ = await _get_requester_role(authorization)
+    requester, _, requester_tenant_id = await _get_requester_role(authorization)
+    if not requester_tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
     body = await request.json()
 
     pod_model_id = str(body.get("pod_model_id") or "").strip()
@@ -83,6 +95,7 @@ async def create_review_request(request: Request, authorization: Optional[str] =
             "input_data": input_data,
             "output_data": output_data,
             "status": "pending",
+            "tenant_id": requester_tenant_id,
         },
     )
 
@@ -106,8 +119,15 @@ async def list_my_reviews(
     status: Optional[str] = None,
     authorization: Optional[str] = Header(default=None),
 ):
-    requester, _ = await _get_requester_role(authorization)
-    query = f"select=*&user_id=eq.{quote(requester['id'], safe='')}&order=created_at.desc"
+    requester, _, requester_tenant_id = await _get_requester_role(authorization)
+    if not requester_tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
+    query = (
+        "select=*"
+        f"&user_id=eq.{quote(requester['id'], safe='')}"
+        f"&tenant_id=eq.{quote(str(requester_tenant_id), safe='')}"
+        "&order=created_at.desc"
+    )
     if status:
         if status not in VALID_REVIEW_STATUSES:
             raise HTTPException(status_code=400, detail="Invalid status")
@@ -121,10 +141,16 @@ async def list_all_reviews(
     status: Optional[str] = None,
     authorization: Optional[str] = Header(default=None),
 ):
-    _, requester_role = await _get_requester_role(authorization)
+    _, requester_role, requester_tenant_id = await _get_requester_role(authorization)
     _require_admin(requester_role)
+    if not requester_tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
 
-    query = "select=*&order=created_at.desc"
+    query = (
+        "select=*"
+        f"&tenant_id=eq.{quote(str(requester_tenant_id), safe='')}"
+        "&order=created_at.desc"
+    )
     if status:
         if status not in VALID_REVIEW_STATUSES:
             raise HTTPException(status_code=400, detail="Invalid status")
@@ -135,9 +161,18 @@ async def list_all_reviews(
 
 @router.get("/api/reviews/pending-count")
 async def get_pending_review_count(authorization: Optional[str] = Header(default=None)):
-    _, requester_role = await _get_requester_role(authorization)
+    _, requester_role, requester_tenant_id = await _get_requester_role(authorization)
     _require_admin(requester_role)
-    rows = await postgrest_get("decision_reviews", "select=id&status=eq.pending")
+    if not requester_tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
+    rows = await postgrest_get(
+        "decision_reviews",
+        (
+            "select=id"
+            "&status=eq.pending"
+            f"&tenant_id=eq.{quote(str(requester_tenant_id), safe='')}"
+        ),
+    )
     return {"count": len(rows)}
 
 
@@ -147,12 +182,19 @@ async def approve_review(
     request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
-    requester, requester_role = await _get_requester_role(authorization)
+    requester, requester_role, requester_tenant_id = await _get_requester_role(authorization)
     _require_admin(requester_role)
+    if not requester_tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
 
     rows = await postgrest_get(
         "decision_reviews",
-        f"select=*&id=eq.{quote(review_id, safe='')}&limit=1",
+        (
+            "select=*"
+            f"&id=eq.{quote(review_id, safe='')}"
+            f"&tenant_id=eq.{quote(str(requester_tenant_id), safe='')}"
+            "&limit=1"
+        ),
     )
     if not rows:
         raise HTTPException(status_code=404, detail="Review not found")
@@ -194,12 +236,19 @@ async def reject_review(
     request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
-    requester, requester_role = await _get_requester_role(authorization)
+    requester, requester_role, requester_tenant_id = await _get_requester_role(authorization)
     _require_admin(requester_role)
+    if not requester_tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
 
     rows = await postgrest_get(
         "decision_reviews",
-        f"select=*&id=eq.{quote(review_id, safe='')}&limit=1",
+        (
+            "select=*"
+            f"&id=eq.{quote(review_id, safe='')}"
+            f"&tenant_id=eq.{quote(str(requester_tenant_id), safe='')}"
+            "&limit=1"
+        ),
     )
     if not rows:
         raise HTTPException(status_code=404, detail="Review not found")

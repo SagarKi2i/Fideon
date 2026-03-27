@@ -24,6 +24,7 @@ import { useState, useEffect, useCallback } from "react";
 import { isElectron } from "@/lib/ollama";
 import { useUserRole } from "@/hooks/useUserRole";
 import { supabase } from "@/integrations/supabase/client";
+import { apiUrl } from "@/lib/apiBaseUrl";
 import { Separator } from "@/components/ui/separator";
 import { HelpAssistant } from "@/components/HelpAssistant";
 import type { Database } from "@/integrations/supabase/types";
@@ -56,10 +57,10 @@ interface ActivatedPod {
 type AppRole = Database["public"]["Enums"]["app_role"];
 
 const items = [
-  { title: "User Dashboard", url: "/", icon: LayoutDashboard, allowedRoles: ["global_admin", "admin", "user", "viewer", "guest"] as AppRole[] },
+  { title: "User Dashboard", url: "/", icon: LayoutDashboard, allowedRoles: ["user", "viewer", "guest"] as AppRole[] },
   { title: "Marketplace", url: "/marketplace", icon: ShoppingBag, allowedRoles: ["global_admin", "admin", "user", "viewer", "guest"] as AppRole[] },
-  { title: "My Models", url: "/my-models", icon: Box, allowedRoles: ["global_admin", "admin", "user", "viewer"] as AppRole[] },
-  { title: "Playground", url: "/playground", icon: MessageSquare, allowedRoles: ["global_admin", "admin", "user"] as AppRole[] },
+  { title: "My Models", url: "/my-models", icon: Box, allowedRoles: ["user", "viewer"] as AppRole[] },
+  { title: "Playground", url: "/playground", icon: MessageSquare, allowedRoles: ["user"] as AppRole[] },
   { title: "Model Training", url: "/training", icon: GraduationCap, allowedRoles: ["global_admin", "admin", "user"] as AppRole[] },
   { title: "Agent Workflows", url: "/agent-workflows", icon: Zap, allowedRoles: ["global_admin", "admin", "user"] as AppRole[] },
   { title: "Custom Workflows", url: "/workflows", icon: Workflow, allowedRoles: ["global_admin", "admin", "user"] as AppRole[] },
@@ -117,13 +118,17 @@ export function AppSidebar() {
   const loadPendingPodRequestCount = useCallback(async () => {
     if (!isAdmin) return;
     try {
-      const { count, error } = await supabase
-        .from("pod_activation_requests")
-        .select("id", { count: "exact", head: true })
-        .eq("status", "pending");
-
-      if (error) throw error;
-      setPendingPodRequestCount(count ?? 0);
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) return;
+      const response = await fetch(apiUrl("/api/pod-activation/requests?status=pending"), {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+        },
+      });
+      if (!response.ok) throw new Error("Failed to load pending pod request count");
+      const payload = await response.json() as { requests?: unknown[] };
+      setPendingPodRequestCount(Array.isArray(payload?.requests) ? payload.requests.length : 0);
     } catch (error) {
       console.error("Error loading pending pod request count:", error);
     }
@@ -132,12 +137,17 @@ export function AppSidebar() {
   const loadPendingReviewCount = useCallback(async () => {
     if (!isAdmin) return;
     try {
-      const { count, error } = await supabase
-        .from("decision_reviews")
-        .select("id", { count: "exact", head: true })
-        .eq("status", "pending");
-      if (error) throw error;
-      setPendingReviewCount(count ?? 0);
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) return;
+      const response = await fetch(apiUrl("/api/reviews/pending-count"), {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+        },
+      });
+      if (!response.ok) throw new Error("Failed to load pending review count");
+      const payload = await response.json() as { count?: number };
+      setPendingReviewCount(Number(payload?.count ?? 0));
     } catch (error) {
       console.error("Error loading pending review count:", error);
     }
@@ -208,6 +218,37 @@ export function AppSidebar() {
           </div>
         </div>
         
+        {isAdmin && (
+          <SidebarGroup>
+            <SidebarGroupLabel className="text-sidebar-foreground/70">Admin</SidebarGroupLabel>
+            <SidebarGroupContent>
+              <SidebarMenu>
+                {adminItems.map((item) => (
+                  <SidebarMenuItem key={item.title}>
+                    <SidebarMenuButton asChild tooltip={item.title}>
+                      <NavLink 
+                        to={item.url}
+                        end={item.url === "/devices"}
+                        onClick={handleNavClick}
+                        className="hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
+                        activeClassName="bg-sidebar-primary text-sidebar-primary-foreground font-medium"
+                      >
+                        <item.icon className="h-4 w-4" />
+                        <span>{item.title}</span>
+                        {item.title === "Pending Approvals" && pendingPodRequestCount > 0 ? (
+                          <Badge className="ml-auto h-5 min-w-5 px-1 text-[10px] leading-5">
+                            {pendingPodRequestCount > 99 ? "99+" : pendingPodRequestCount}
+                          </Badge>
+                        ) : null}
+                      </NavLink>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                ))}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        )}
+
         <SidebarGroup>
           <SidebarGroupLabel className="text-sidebar-foreground/70">Navigation</SidebarGroupLabel>
           <SidebarGroupContent>
@@ -238,7 +279,7 @@ export function AppSidebar() {
         </SidebarGroup>
 
         {/* Activated Pods Section */}
-        {activatedPods.length > 0 && (
+        {!isAdmin && activatedPods.length > 0 && (
           <SidebarGroup>
             <Collapsible open={podsOpen} onOpenChange={setPodsOpen}>
               <CollapsibleTrigger className="w-full">
@@ -272,36 +313,6 @@ export function AppSidebar() {
                 </SidebarGroupContent>
               </CollapsibleContent>
             </Collapsible>
-          </SidebarGroup>
-        )}
-
-        {isAdmin && (
-          <SidebarGroup>
-            <SidebarGroupLabel className="text-sidebar-foreground/70">Admin</SidebarGroupLabel>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                {adminItems.map((item) => (
-                  <SidebarMenuItem key={item.title}>
-                    <SidebarMenuButton asChild tooltip={item.title}>
-                      <NavLink 
-                        to={item.url}
-                        onClick={handleNavClick}
-                        className="hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
-                        activeClassName="bg-sidebar-primary text-sidebar-primary-foreground font-medium"
-                      >
-                        <item.icon className="h-4 w-4" />
-                        <span>{item.title}</span>
-                        {item.title === "Pending Approvals" && pendingPodRequestCount > 0 ? (
-                          <Badge className="ml-auto h-5 min-w-5 px-1 text-[10px] leading-5">
-                            {pendingPodRequestCount > 99 ? "99+" : pendingPodRequestCount}
-                          </Badge>
-                        ) : null}
-                      </NavLink>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                ))}
-              </SidebarMenu>
-            </SidebarGroupContent>
           </SidebarGroup>
         )}
 

@@ -53,6 +53,7 @@ const CRON_PRESETS = [
 
 export default function AgentWorkflows() {
   const { toast } = useToast();
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingPipeline, setEditingPipeline] = useState<Pipeline | null>(null);
@@ -69,11 +70,23 @@ export default function AgentWorkflows() {
   const [scheduledTime, setScheduledTime] = useState("09:00");
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
 
-  useEffect(() => { loadData(); }, []);
+  useEffect(() => {
+    void (async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      setCurrentUserId(user?.id ?? null);
+      await loadData(user?.id ?? null);
+    })();
+  }, []);
 
-  const loadData = async () => {
+  const loadData = async (userId?: string | null) => {
     try {
-      const { data } = await supabase.from("agent_pipelines").select("*").order("created_at", { ascending: false });
+      const uid = userId ?? currentUserId;
+      if (!uid) return;
+      const { data } = await supabase
+        .from("agent_pipelines")
+        .select("*")
+        .eq("user_id", uid)
+        .order("created_at", { ascending: false });
       if (data) setPipelines(data.map((p: any) => ({
         ...p, steps: Array.isArray(p.steps) ? p.steps : [], schedule_config: p.schedule_config || null,
       })));
@@ -137,7 +150,8 @@ export default function AgentWorkflows() {
           steps: steps as any,
           schedule_config: schedConfig as any,
         } as any)
-        .eq("id", editingPipeline.id);
+        .eq("id", editingPipeline.id)
+        .eq("user_id", userId);
       if (error) throw error;
       toast({ title: "Pipeline Updated" });
       return;
@@ -170,19 +184,23 @@ export default function AgentWorkflows() {
 
       const schedConfig = getScheduleConfigPayload();
       await savePipeline(schedConfig, user.id);
-      resetForm(); setCreateOpen(false); loadData();
+      resetForm(); setCreateOpen(false); await loadData(user.id);
     } catch (e: any) {
       toast({ title: "Error", description: e.message, variant: "destructive" });
     } finally { setSaving(false); }
   };
 
   const deletePipeline = async (id: string) => {
-    await supabase.from("agent_pipelines").delete().eq("id", id);
-    loadData();
+    await supabase.from("agent_pipelines").delete().eq("id", id).eq("user_id", currentUserId ?? "");
+    await loadData();
   };
 
   const togglePipeline = async (id: string, current: boolean) => {
-    await supabase.from("agent_pipelines").update({ is_active: !current } as any).eq("id", id);
+    await supabase
+      .from("agent_pipelines")
+      .update({ is_active: !current } as any)
+      .eq("id", id)
+      .eq("user_id", currentUserId ?? "");
     setPipelines(prev => prev.map(p => p.id === id ? { ...p, is_active: !current } : p));
   };
 
