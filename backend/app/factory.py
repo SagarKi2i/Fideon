@@ -24,6 +24,7 @@ from app.routes.federated_learning import router as federated_router
 from app.routes.health import router as health_router
 from app.routes.help_assistant import router as help_router
 from app.routes.pod_activation import router as pod_activation_router
+from app.routes.password_reset import router as password_reset_router
 from app.routes.settings import router as settings_router
 from app.routes.tenants import router as tenants_router
 from app.routes.workflow_ai import router as workflow_router
@@ -136,6 +137,7 @@ def create_app() -> FastAPI:
     app.include_router(federated_router)
     app.include_router(admin_router)
     app.include_router(pod_activation_router)
+    app.include_router(password_reset_router)
     app.include_router(tenants_router)
     app.include_router(settings_router)
 

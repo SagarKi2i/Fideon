@@ -223,6 +223,7 @@ export function useGlobalRealtimeSubscriptions() {
   const channelsRef = useRef<RealtimeChannel[]>([]);
   const currentUserIdRef = useRef<string | null>(null);
   const currentRoleRef = useRef<string | null>(null);
+  const currentTenantIdRef = useRef<string | null>(null);
   const requesterLabelCacheRef = useRef<Record<string, string>>({});
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -353,6 +354,20 @@ export function useGlobalRealtimeSubscriptions() {
       }
     } catch {
       currentRoleRef.current = null;
+    }
+    try {
+      const { data: profileRows, error } = await supabase
+        .from("app_users")
+        .select("tenant_id")
+        .eq("user_id", userId)
+        .limit(1);
+      if (error) throw error;
+      currentTenantIdRef.current =
+        Array.isArray(profileRows) && profileRows.length > 0
+          ? (profileRows[0] as any)?.tenant_id ?? null
+          : null;
+    } catch {
+      currentTenantIdRef.current = null;
     }
 
     // Notifications are now persisted in DB per user, so we avoid synthetic backlog replay.
@@ -504,6 +519,12 @@ export function useGlobalRealtimeSubscriptions() {
           filter: "status=eq.failed",
         },
         (payload: any) => {
+          const uid = currentUserIdRef.current;
+          const role = currentRoleRef.current;
+          const tenantId = currentTenantIdRef.current;
+          if (!uid || !isAdminRole(role)) return;
+          const payloadTenantId = payload?.new?.tenant_id;
+          if (tenantId && payloadTenantId && String(payloadTenantId) !== String(tenantId)) return;
           const message = "Device sync failure detected.";
           const detail = {
             eventType: payload.eventType,
@@ -514,8 +535,8 @@ export function useGlobalRealtimeSubscriptions() {
           };
           emitNotificationRealtime(detail);
           const pushed = pushRealtimeNotification(detail);
-          if (pushed && currentUserIdRef.current) {
-            void persistNotification(currentUserIdRef.current, {
+          if (pushed && uid) {
+            void persistNotification(uid, {
               eventType: detail.eventType,
               table: detail.table,
               message: detail.message,
@@ -588,6 +609,7 @@ export function useGlobalRealtimeSubscriptions() {
         cleanupChannels();
         currentUserIdRef.current = null;
         currentRoleRef.current = null;
+        currentTenantIdRef.current = null;
       }
     });
 
@@ -598,6 +620,7 @@ export function useGlobalRealtimeSubscriptions() {
       cleanupChannels();
       currentUserIdRef.current = null;
       currentRoleRef.current = null;
+      currentTenantIdRef.current = null;
       if (typeof window !== "undefined") {
         window.removeEventListener("online", handleOnline);
       }

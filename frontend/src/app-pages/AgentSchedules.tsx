@@ -46,6 +46,7 @@ const CRON_PRESETS = [
 
 export default function AgentSchedules() {
   const { toast } = useToast();
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [schedules, setSchedules] = useState<AgentSchedule[]>([]);
   const [models, setModels] = useState<ActivatedModel[]>([]);
   const [loading, setLoading] = useState(true);
@@ -62,17 +63,21 @@ export default function AgentSchedules() {
   const [prompt, setPrompt] = useState("");
 
   useEffect(() => {
-    loadData();
+    void (async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      setCurrentUserId(user?.id ?? null);
+      await loadData(user?.id ?? null);
+    })();
   }, []);
 
-  const loadData = async () => {
+  const loadData = async (userId?: string | null) => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+      const uid = userId ?? currentUserId;
+      if (!uid) return;
 
       const [modelsRes, schedulesRes] = await Promise.all([
-        supabase.from("activated_models").select("*").eq("user_id", user.id),
-        supabase.from("agent_schedules").select("*").order("created_at", { ascending: false }),
+        supabase.from("activated_models").select("*").eq("user_id", uid),
+        supabase.from("agent_schedules").select("*").eq("user_id", uid).order("created_at", { ascending: false }),
       ]);
 
       if (modelsRes.data) {
@@ -126,7 +131,7 @@ export default function AgentSchedules() {
       toast({ title: "Schedule Created", description: `Agent "${model.model_name}" has been scheduled` });
       setCreateOpen(false);
       resetForm();
-      loadData();
+      await loadData(user.id);
     } catch (e: any) {
       toast({ title: "Error", description: e.message, variant: "destructive" });
     } finally {
@@ -135,14 +140,22 @@ export default function AgentSchedules() {
   };
 
   const toggleSchedule = async (id: string, currentState: boolean) => {
-    const { error } = await supabase.from("agent_schedules").update({ is_active: !currentState } as any).eq("id", id);
+    const { error } = await supabase
+      .from("agent_schedules")
+      .update({ is_active: !currentState } as any)
+      .eq("id", id)
+      .eq("user_id", currentUserId ?? "");
     if (!error) {
       setSchedules(prev => prev.map(s => s.id === id ? { ...s, is_active: !currentState } : s));
     }
   };
 
   const deleteSchedule = async (id: string) => {
-    const { error } = await supabase.from("agent_schedules").delete().eq("id", id);
+    const { error } = await supabase
+      .from("agent_schedules")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", currentUserId ?? "");
     if (!error) {
       setSchedules(prev => prev.filter(s => s.id !== id));
       toast({ title: "Deleted", description: "Schedule removed" });

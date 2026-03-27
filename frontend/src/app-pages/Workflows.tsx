@@ -69,6 +69,7 @@ function getStepTimelineClass(index: number, currentStep: number): string {
 
 export default function Workflows() {
   const { toast } = useToast();
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
@@ -108,15 +109,18 @@ export default function Workflows() {
   };
 
   useEffect(() => {
-    loadWorkflows();
-    loadModels();
+    void (async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      setCurrentUserId(user?.id ?? null);
+      await Promise.all([loadWorkflows(user?.id ?? null), loadModels(user?.id ?? null)]);
+    })();
   }, []);
 
-  const loadModels = async () => {
+  const loadModels = async (userId?: string | null) => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-      const { data } = await supabase.from("activated_models").select("*").eq("user_id", user.id);
+      const uid = userId ?? currentUserId;
+      if (!uid) return;
+      const { data } = await supabase.from("activated_models").select("*").eq("user_id", uid);
       if (data && data.length > 0) {
         setModels(data);
         setSelectedModel(data[0].model_id);
@@ -127,11 +131,14 @@ export default function Workflows() {
   };
 
 
-  const loadWorkflows = async () => {
+  const loadWorkflows = async (userId?: string | null) => {
     try {
+      const uid = userId ?? currentUserId;
+      if (!uid) return;
       const { data, error } = await supabase
         .from("workflows")
         .select("*")
+        .eq("user_id", uid)
         .order("created_at", { ascending: false });
       if (error) throw error;
       setWorkflows((data ?? []).map((w: any) => ({
@@ -192,7 +199,7 @@ export default function Workflows() {
       setNewDescription("");
       setNewSopText("");
       setNewCategory("general");
-      loadWorkflows();
+      await loadWorkflows();
     } catch (e: any) {
       console.error(e);
       toast({ title: "Error", description: e.message ?? "Failed to create workflow", variant: "destructive" });
@@ -276,7 +283,7 @@ export default function Workflows() {
       step_results: newResults as any,
       status: isComplete ? "completed" : "in_progress",
       completed_at: isComplete ? new Date().toISOString() : null,
-    }).eq("id", activeRun.run.id);
+    }).eq("id", activeRun.run.id).eq("user_id", currentUserId ?? "");
 
     if (isComplete) {
       toast({ title: "Workflow Complete!", description: `All ${activeRun.workflow.parsed_steps.length} steps finished` });
@@ -292,8 +299,8 @@ export default function Workflows() {
   };
 
   const deleteWorkflow = async (id: string) => {
-    await supabase.from("workflows").delete().eq("id", id);
-    loadWorkflows();
+    await supabase.from("workflows").delete().eq("id", id).eq("user_id", currentUserId ?? "");
+    await loadWorkflows();
   };
 
   const runModelPrompt = async () => {

@@ -18,6 +18,7 @@ interface PendingDevice {
 
 export default function PendingDevices() {
   const [devices, setDevices] = useState<PendingDevice[]>([]);
+  const [loading, setLoading] = useState(true);
   const { toast } = useToast();
 
   useEffect(() => {
@@ -37,9 +38,10 @@ export default function PendingDevices() {
 
   async function fetchPendingDevices() {
     try {
+      setLoading(true);
       const { data, error } = await supabase
         .from('devices')
-        .select('*')
+        .select('id,device_name,device_token,os_type,registered_at,metadata')
         .eq('status', 'never_checked_in')
         .order('registered_at', { ascending: false });
 
@@ -52,6 +54,8 @@ export default function PendingDevices() {
         description: 'Failed to fetch pending devices',
         variant: 'destructive',
       });
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -144,7 +148,12 @@ export default function PendingDevices() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {devices.length === 0 ? (
+          {loading ? (
+            <div className="text-center py-12 text-muted-foreground">
+              <Server className="h-12 w-12 mx-auto mb-4 opacity-50 animate-pulse" />
+              <p>Loading pending devices...</p>
+            </div>
+          ) : devices.length === 0 ? (
             <div className="text-center py-12 text-muted-foreground">
               <Server className="h-12 w-12 mx-auto mb-4 opacity-50" />
               <p>No pending device approvals</p>

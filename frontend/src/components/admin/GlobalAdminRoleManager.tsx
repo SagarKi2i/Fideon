@@ -162,6 +162,12 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
           setUsers((data.users || []).map((u: any) => ({ ...u, role: (u.role || "user") as AppRole })));
           return;
         }
+        // For admin/global admin we require backend-tenant-scoped user listing.
+        // Falling back to client-side table reads can show incomplete rows under RLS.
+        if (currentUserRole === "admin" || currentUserRole === "global_admin") {
+          const payload = await readJsonSafe(response);
+          throw buildApiRequestError(response, payload, "Failed to load tenant users");
+        }
       } catch (backendError) {
         console.warn("Primary /api/list-users failed, using fallback:", backendError);
       }
@@ -177,7 +183,7 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [loadUsersFromSupabaseFallback, toast]);
+  }, [currentUserRole, loadUsersFromSupabaseFallback, toast]);
 
   useEffect(() => {
     void loadUsers();

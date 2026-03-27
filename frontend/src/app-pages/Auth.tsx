@@ -442,11 +442,21 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
     setLoading(true);
     try {
       const redirectTo = `${window.location.origin}/reset-password`;
-      const { error } = await supabase.auth.resetPasswordForEmail(normalizedEmail, { redirectTo });
-      if (error) throw error;
+      const resp = await fetch(apiUrl("/api/v1/auth/password-reset/request"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ email: normalizedEmail, redirect_to: redirectTo }),
+      });
+      // Enumeration-safe UX: always show success unless request is malformed.
+      if (!resp.ok && resp.status === 400) {
+        const payload = await readJsonSafe(resp);
+        throw buildApiRequestError(resp, payload, "Invalid password reset request");
+      }
       toast({
         title: "Reset email sent",
-        description: "Check your inbox for the password reset link.",
+        description: "If an account exists, check your inbox for the password reset link.",
       });
       setView("signin");
     } catch (error: any) {
@@ -514,35 +524,22 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
         });
       }
 
-      const { error } = await supabase.auth.updateUser({ password: newPassword });
-      if (error) throw error;
-      try {
-        const { data: sessionData } = await supabase.auth.getSession();
-        const accessToken = sessionData.session?.access_token;
-        if (accessToken) {
-          const res = await fetch(apiUrl("/api/settings/password-changed"), {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${accessToken}`,
-            },
-          });
-
-          if (!res.ok) {
-            const payload = await readJsonSafe(res);
-            const apiError = buildApiRequestError(
-              res,
-              payload,
-              "Password changed, but failed to persist password timestamp",
-            );
-            safeLog.error("auth_password_changed_backend_sync_failed", {
-              error: apiError.message,
-            });
-          }
-        }
-      } catch (syncError) {
-        safeLog.error("auth_password_changed_backend_sync_exception", {
-          error: syncError instanceof Error ? syncError.message : String(syncError),
-        });
+      const { data: sessionData } = await supabase.auth.getSession();
+      const accessToken = sessionData.session?.access_token;
+      if (!accessToken) {
+        throw new Error("Reset session expired. Please open the reset link again.");
+      }
+      const res = await fetch(apiUrl("/api/v1/auth/password-reset/confirm"), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ password: newPassword }),
+      });
+      if (!res.ok) {
+        const payload = await readJsonSafe(res);
+        throw buildApiRequestError(res, payload, "Could not update password");
       }
 
       // Recovery flow creates a temporary session. Sign out after password update

@@ -168,22 +168,19 @@ function AuthEventsTab() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      // Fetch PAGE_SIZE + 1 to detect next page
-      let q = (supabase as any)
-        .from("auth_audit")
-        .select("*")
-        .order("created_at", { ascending: false })
-        .range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
-
-      if (filterEvent) q = q.ilike("event", `%${filterEvent}%`);
-      if (filterDateFrom) q = q.gte("created_at", filterDateFrom);
-      if (filterDateTo) q = q.lte("created_at", filterDateTo + "T23:59:59Z");
-
-      const { data, error } = await q;
-      if (error) throw error;
-      const fetched = (data || []) as AuditRow[];
-      setHasMore(fetched.length > PAGE_SIZE);
-      setRows(fetched.slice(0, PAGE_SIZE));
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
+      const params = new URLSearchParams({ page: String(page) });
+      if (filterEvent) params.set("event", filterEvent);
+      if (filterDateFrom) params.set("date_from", filterDateFrom);
+      if (filterDateTo) params.set("date_to", filterDateTo + "T23:59:59Z");
+      const resp = await fetch(apiUrl(`/api/activity/auth?${params}`), {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      const payload = await readJsonSafe(resp);
+      if (!resp.ok) throw buildApiRequestError(resp, payload, "Failed to load auth logs");
+      setRows((payload.logs || []) as AuditRow[]);
+      setHasMore(!!payload.has_more);
     } catch (e: any) {
       safeLog.error("activity_auth_fetch_error", { error: e.message });
     } finally {

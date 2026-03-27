@@ -34,6 +34,21 @@ def _require_admin(role: Optional[str]) -> None:
         raise HTTPException(status_code=403, detail="Admin access required")
 
 
+def _is_missing_tenant_column(exc: HTTPException) -> bool:
+    detail = str(exc.detail).lower()
+    return "tenant_id" in detail and "pod_activation_requests" in detail
+
+
+async def _require_same_tenant_user(user_id: str, requester_tenant_id: str) -> None:
+    rows = await postgrest_get(
+        "app_users",
+        f"select=tenant_id&user_id=eq.{quote(user_id, safe='')}&limit=1",
+    )
+    target_tenant_id = rows[0].get("tenant_id") if rows else None
+    if not target_tenant_id or str(target_tenant_id) != str(requester_tenant_id):
+        raise HTTPException(status_code=403, detail="Cross-tenant access denied")
+
+
 @router.get("/api/pod-activation/my-activations")
 async def list_my_activations(authorization: Optional[str] = Header(default=None)):
     requester = await verify_user(authorization)
@@ -49,19 +64,41 @@ async def list_my_requests(
     status: Optional[str] = None,
     authorization: Optional[str] = Header(default=None),
 ):
-    requester = await verify_user(authorization)
-    query = f"select=*&user_id=eq.{quote(requester['id'], safe='')}&order=requested_at.desc"
+    context = await get_user_context(authorization)
+    requester = context.get("user") or {}
+    requester_tenant_id = context.get("tenant_id")
+    if not requester_tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
+
+    query = (
+        "select=*"
+        f"&user_id=eq.{quote(requester['id'], safe='')}"
+        f"&tenant_id=eq.{quote(str(requester_tenant_id), safe='')}"
+        "&order=requested_at.desc"
+    )
     if status:
         if status not in VALID_STATUSES:
             raise HTTPException(status_code=400, detail="Invalid status")
         query += f"&status=eq.{quote(status, safe='')}"
-    rows = await postgrest_get("pod_activation_requests", query)
+    try:
+        rows = await postgrest_get("pod_activation_requests", query)
+    except HTTPException as exc:
+        if not _is_missing_tenant_column(exc):
+            raise
+        raise HTTPException(
+            status_code=503,
+            detail="Tenant isolation migration required for pod activation requests",
+        ) from exc
     return {"requests": rows}
 
 
 @router.post("/api/pod-activation/request")
 async def create_activation_request(request: Request, authorization: Optional[str] = Header(default=None)):
-    requester = await verify_user(authorization)
+    context = await get_user_context(authorization)
+    requester = context.get("user") or {}
+    requester_tenant_id = context.get("tenant_id")
+    if not requester_tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
     body = await request.json()
     model_id = (body.get("model_id") or "").strip()
     model_name = (body.get("model_name") or "").strip()
@@ -79,12 +116,21 @@ async def create_activation_request(request: Request, authorization: Optional[st
                 "model_name": model_name,
                 "domain": domain,
                 "status": "pending",
+                "tenant_id": requester_tenant_id,
             },
         )
     except HTTPException as exc:
-        detail = str(exc.detail)
-        if "23505" in detail or "duplicate key" in detail.lower():
-            raise HTTPException(status_code=409, detail="Request already pending")
+        if _is_missing_tenant_column(exc):
+            raise HTTPException(
+                status_code=503,
+                detail="Tenant isolation migration required for pod activation requests",
+            ) from exc
+        else:
+            detail = str(exc.detail)
+            if "23505" in detail or "duplicate key" in detail.lower():
+                raise HTTPException(status_code=409, detail="Request already pending")
+            raise
+    except Exception:
         raise
 
     await insert_audit_log(
@@ -112,13 +158,25 @@ async def list_activation_requests(
     if not requester_tenant_id:
         raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
 
-    query = "select=*&order=requested_at.desc"
+    query = (
+        "select=*"
+        f"&tenant_id=eq.{quote(str(requester_tenant_id), safe='')}"
+        "&order=requested_at.desc"
+    )
     if status:
         if status not in VALID_STATUSES:
             raise HTTPException(status_code=400, detail="Invalid status")
         query += f"&status=eq.{quote(status, safe='')}"
 
-    rows = await postgrest_get("pod_activation_requests", query)
+    try:
+        rows = await postgrest_get("pod_activation_requests", query)
+    except HTTPException as exc:
+        if not _is_missing_tenant_column(exc):
+            raise
+        raise HTTPException(
+            status_code=503,
+            detail="Tenant isolation migration required for pod activation requests",
+        ) from exc
     if not rows:
         return {"requests": []}
 
@@ -184,24 +242,36 @@ async def approve_activation_request(
     if not requester_tenant_id:
         raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
 
-    requests = await postgrest_get(
-        "pod_activation_requests",
-        f"select=*&id=eq.{quote(request_id, safe='')}&limit=1",
-    )
+    try:
+        requests = await postgrest_get(
+            "pod_activation_requests",
+            (
+                "select=*"
+                f"&id=eq.{quote(request_id, safe='')}"
+                f"&tenant_id=eq.{quote(str(requester_tenant_id), safe='')}"
+                "&limit=1"
+            ),
+        )
+    except HTTPException as exc:
+        if not _is_missing_tenant_column(exc):
+            raise
+        raise HTTPException(
+            status_code=503,
+            detail="Tenant isolation migration required for pod activation requests",
+        ) from exc
     if not requests:
         raise HTTPException(status_code=404, detail="Activation request not found")
     activation_request = requests[0]
     if activation_request.get("status") != "pending":
         raise HTTPException(status_code=400, detail="Only pending requests can be approved")
 
-    # Tenant isolation: ensure activation_request belongs to the caller tenant.
-    app_users = await postgrest_get(
-        "app_users",
-        f"select=tenant_id&user_id=eq.{quote(str(activation_request['user_id']), safe='')}&limit=1",
-    )
-    if not app_users:
-        raise HTTPException(status_code=403, detail="Requester context not found")
-    target_tenant_id = app_users[0].get("tenant_id")
+    target_tenant_id = activation_request.get("tenant_id")
+    if not target_tenant_id:
+        app_users = await postgrest_get(
+            "app_users",
+            f"select=tenant_id&user_id=eq.{quote(str(activation_request['user_id']), safe='')}&limit=1",
+        )
+        target_tenant_id = app_users[0].get("tenant_id") if app_users else None
     if not target_tenant_id or str(target_tenant_id) != str(requester_tenant_id):
         raise HTTPException(status_code=403, detail="Cross-tenant pod activation approval denied")
 
@@ -262,23 +332,36 @@ async def reject_activation_request(
     if not requester_tenant_id:
         raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
 
-    requests = await postgrest_get(
-        "pod_activation_requests",
-        f"select=*&id=eq.{quote(request_id, safe='')}&limit=1",
-    )
+    try:
+        requests = await postgrest_get(
+            "pod_activation_requests",
+            (
+                "select=*"
+                f"&id=eq.{quote(request_id, safe='')}"
+                f"&tenant_id=eq.{quote(str(requester_tenant_id), safe='')}"
+                "&limit=1"
+            ),
+        )
+    except HTTPException as exc:
+        if not _is_missing_tenant_column(exc):
+            raise
+        raise HTTPException(
+            status_code=503,
+            detail="Tenant isolation migration required for pod activation requests",
+        ) from exc
     if not requests:
         raise HTTPException(status_code=404, detail="Activation request not found")
     activation_request = requests[0]
     if activation_request.get("status") != "pending":
         raise HTTPException(status_code=400, detail="Only pending requests can be rejected")
 
-    app_users = await postgrest_get(
-        "app_users",
-        f"select=tenant_id&user_id=eq.{quote(str(activation_request['user_id']), safe='')}&limit=1",
-    )
-    if not app_users:
-        raise HTTPException(status_code=403, detail="Requester context not found")
-    target_tenant_id = app_users[0].get("tenant_id")
+    target_tenant_id = activation_request.get("tenant_id")
+    if not target_tenant_id:
+        app_users = await postgrest_get(
+            "app_users",
+            f"select=tenant_id&user_id=eq.{quote(str(activation_request['user_id']), safe='')}&limit=1",
+        )
+        target_tenant_id = app_users[0].get("tenant_id") if app_users else None
     if not target_tenant_id or str(target_tenant_id) != str(requester_tenant_id):
         raise HTTPException(status_code=403, detail="Cross-tenant pod activation rejection denied")
 
@@ -313,8 +396,11 @@ async def list_user_activations(
     user_id: str,
     authorization: Optional[str] = Header(default=None),
 ):
-    _, requester_role = await _get_requester_role(authorization)
+    _, requester_role, requester_tenant_id = await _get_requester_role(authorization)
     _require_admin(requester_role)
+    if not requester_tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
+    await _require_same_tenant_user(user_id, str(requester_tenant_id))
 
     rows = await postgrest_get(
         "activated_models",
@@ -328,8 +414,10 @@ async def allocate_model_to_user(
     request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
-    requester, requester_role = await _get_requester_role(authorization)
+    requester, requester_role, requester_tenant_id = await _get_requester_role(authorization)
     _require_admin(requester_role)
+    if not requester_tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
 
     body = await request.json()
     user_id = (body.get("user_id") or "").strip()
@@ -338,6 +426,7 @@ async def allocate_model_to_user(
     domain = (body.get("domain") or "").strip()
     if not user_id or not model_id or not model_name or domain not in VALID_DOMAINS:
         raise HTTPException(status_code=400, detail="user_id, model_id, model_name and valid domain are required")
+    await _require_same_tenant_user(user_id, str(requester_tenant_id))
 
     existing = await postgrest_get(
         "activated_models",
@@ -379,8 +468,10 @@ async def deallocate_model(
     request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
-    requester, requester_role = await _get_requester_role(authorization)
+    requester, requester_role, requester_tenant_id = await _get_requester_role(authorization)
     _require_admin(requester_role)
+    if not requester_tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
 
     allocation_rows = await postgrest_get(
         "activated_models",
@@ -388,6 +479,10 @@ async def deallocate_model(
     )
     if not allocation_rows:
         raise HTTPException(status_code=404, detail="Allocation not found")
+    allocation_user_id = str(allocation_rows[0].get("user_id") or "")
+    if not allocation_user_id:
+        raise HTTPException(status_code=400, detail="Invalid allocation ownership")
+    await _require_same_tenant_user(allocation_user_id, str(requester_tenant_id))
 
     await postgrest_delete(
         "activated_models",

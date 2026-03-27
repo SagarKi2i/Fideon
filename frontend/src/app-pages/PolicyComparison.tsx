@@ -40,9 +40,15 @@ export default function PolicyComparison() {
 
   const loadDocuments = async () => {
     try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        setDocuments([]);
+        return;
+      }
       const { data, error } = await supabase
         .from("documents")
         .select("id, filename, file_type")
+        .eq("user_id", user.id)
         .or("file_type.eq.application/pdf,file_type.ilike.%word%");
 
       if (error) throw error;

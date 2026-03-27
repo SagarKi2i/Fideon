@@ -66,11 +66,26 @@ def _utc_now_z() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-async def _update_password_for_existing_user(email: str, password: str) -> dict:
+async def _update_password_for_existing_user(
+    email: str,
+    password: str,
+    requester_role: Optional[str],
+    requester_tenant_id: Optional[str],
+) -> dict:
     users = await admin_list_users()
     user = next((u for u in users if u.get("email") == email), None)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    if requester_role != "global_admin":
+        if not requester_tenant_id:
+            raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
+        target_profile = await postgrest_get(
+            "app_users",
+            f"select=tenant_id&user_id=eq.{quote(str(user['id']), safe='')}&limit=1",
+        )
+        target_tenant_id = target_profile[0].get("tenant_id") if target_profile else None
+        if not target_tenant_id or str(target_tenant_id) != str(requester_tenant_id):
+            raise HTTPException(status_code=403, detail="Cross-tenant password update denied")
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.put(
             f"{SUPABASE_URL}/auth/v1/admin/users/{user['id']}",
@@ -218,6 +233,7 @@ async def _handle_update_password_action(
     request: Request,
     requester: dict,
     requester_role: Optional[str],
+    requester_tenant_id: Optional[str],
     email: str,
     password: Optional[str],
 ) -> dict:
@@ -225,7 +241,12 @@ async def _handle_update_password_action(
         raise HTTPException(status_code=403, detail=ADMIN_ACCESS_REQUIRED)
     if not password:
         raise HTTPException(status_code=400, detail=PASSWORD_REQUIRED)
-    user = await _update_password_for_existing_user(email, password)
+    user = await _update_password_for_existing_user(
+        email=email,
+        password=password,
+        requester_role=requester_role,
+        requester_tenant_id=requester_tenant_id,
+    )
     await insert_audit_log(
         request=request,
         user_id=requester["id"],
@@ -438,7 +459,7 @@ async def admin_create_user(request: Request, authorization: Optional[str] = Hea
     # ── Password-update action (admin/global_admin only) ──────────────────────
     if action == "update_password":
         return await _handle_update_password_action(
-            request, requester, requester_role, email, password
+            request, requester, requester_role, requester_tenant_id, email, password
         )
 
     # ── GLOBAL ADMIN: create any role instantly ───────────────────────────────
@@ -468,15 +489,24 @@ async def admin_create_user(request: Request, authorization: Optional[str] = Hea
 # ─────────────────────────────────────────────────────────────────────────────
 @router.post("/api/admin-set-user-role")
 async def admin_set_user_role(request: Request, authorization: Optional[str] = Header(default=None)):
-    requester, requester_role = await _get_requester_role(authorization)
+    requester, requester_role, requester_tenant_id = await _get_requester_role(authorization)
     if requester_role != "global_admin":
         raise HTTPException(status_code=403, detail="Global admin access required")
+    if not requester_tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
 
     body = await request.json()
     user_id = body.get("user_id")
     role = body.get("role")
     if not user_id or role not in VALID_ROLES:
         raise HTTPException(status_code=400, detail="Valid user_id and role are required")
+    target_profiles = await postgrest_get(
+        "app_users",
+        f"select=tenant_id&user_id=eq.{quote(user_id, safe='')}&limit=1",
+    )
+    target_tenant_id = target_profiles[0].get("tenant_id") if target_profiles else None
+    if not target_tenant_id or str(target_tenant_id) != str(requester_tenant_id):
+        raise HTTPException(status_code=403, detail="Cross-tenant role change denied")
 
     current_roles = await postgrest_get(
         "user_roles", f"select=role&user_id=eq.{quote(user_id, safe='')}&limit=1"

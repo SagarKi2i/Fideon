@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import type { Database } from "@/integrations/supabase/types";
@@ -133,6 +133,8 @@ export default function Signup() {
   const [checkingEmail, setCheckingEmail] = useState(false);
   const [lastCheckedEmail, setLastCheckedEmail] = useState("");
   const [lastCheckedEmailExists, setLastCheckedEmailExists] = useState<boolean | null>(null);
+  const emailAvailabilityCacheRef = useRef<Map<string, boolean>>(new Map());
+  const emailCheckControllerRef = useRef<AbortController | null>(null);
 
   const buildStep0Errors = () => {
     const nextErrors: typeof step0Errors = {};
@@ -268,30 +270,75 @@ export default function Signup() {
     if (!normalizedEmail || !EMAIL_RE.test(normalizedEmail)) {
       return false;
     }
+    const cached = emailAvailabilityCacheRef.current.get(normalizedEmail);
+    if (cached !== undefined) {
+      setLastCheckedEmail(normalizedEmail);
+      setLastCheckedEmailExists(cached);
+      return cached;
+    }
     if (normalizedEmail === lastCheckedEmail && lastCheckedEmailExists !== null) {
       return lastCheckedEmailExists;
     }
 
+    if (emailCheckControllerRef.current) {
+      emailCheckControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    emailCheckControllerRef.current = controller;
+
     setCheckingEmail(true);
     try {
+      const timeout = window.setTimeout(() => controller.abort(), 4000);
       const res = await fetch(
         apiUrl(`/api/v1/auth/email-availability?email=${encodeURIComponent(normalizedEmail)}`),
-        { method: "GET" },
+        { method: "GET", signal: controller.signal },
       );
+      window.clearTimeout(timeout);
       if (!res.ok) {
         setLastCheckedEmail(normalizedEmail);
         setLastCheckedEmailExists(false);
+        emailAvailabilityCacheRef.current.set(normalizedEmail, false);
         return false;
       }
       const payload = await res.json().catch(() => null);
       const exists = Boolean(payload?.exists);
       setLastCheckedEmail(normalizedEmail);
       setLastCheckedEmailExists(exists);
+      emailAvailabilityCacheRef.current.set(normalizedEmail, exists);
       return exists;
+    } catch (error: any) {
+      if (error?.name === "AbortError") {
+        return false;
+      }
+      setLastCheckedEmail(normalizedEmail);
+      setLastCheckedEmailExists(false);
+      return false;
     } finally {
-      setCheckingEmail(false);
+      if (emailCheckControllerRef.current === controller) {
+        emailCheckControllerRef.current = null;
+        setCheckingEmail(false);
+      }
     }
   };
+
+  useEffect(() => {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail || !EMAIL_RE.test(normalizedEmail)) {
+      setCheckingEmail(false);
+      return;
+    }
+    const debounceId = window.setTimeout(() => {
+      void checkEmailAlreadyExists(normalizedEmail).then((exists) => {
+        if (exists) {
+          setStep0Errors((prev) => ({
+            ...prev,
+            email: "This work email is already registered. Please sign in or use other email.",
+          }));
+        }
+      });
+    }, 250);
+    return () => window.clearTimeout(debounceId);
+  }, [email]);
 
   const nextStep = async () => {
     if (step === 0) {

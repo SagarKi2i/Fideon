@@ -93,6 +93,7 @@ export default function Devices() {
   const [searchTerm, setSearchTerm] = useState("");
   const [allocating, setAllocating] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const refreshTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     checkAccessAndLoad();
@@ -100,11 +101,20 @@ export default function Devices() {
     const channel = supabase
       .channel("devices-page-live")
       .on("postgres_changes", { event: "*", schema: "public", table: "activated_models" }, () => {
-        loadUsers();
+        if (refreshTimerRef.current !== null) {
+          window.clearTimeout(refreshTimerRef.current);
+        }
+        refreshTimerRef.current = window.setTimeout(() => {
+          refreshTimerRef.current = null;
+          void loadUsers();
+        }, 400);
       })
       .subscribe();
 
     return () => {
+      if (refreshTimerRef.current !== null) {
+        window.clearTimeout(refreshTimerRef.current);
+      }
       supabase.removeChannel(channel);
     };
   }, []);
@@ -167,6 +177,7 @@ export default function Devices() {
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) return;
+      let userList: UserAccount[] = [];
 
       try {
         const response = await fetch(
@@ -176,19 +187,28 @@ export default function Devices() {
 
         if (response.ok) {
           const data = await response.json();
-          const userList: UserAccount[] = data.users || [];
+          userList = data.users || [];
           setUsers(userList);
         } else {
           await loadUsersFromSupabaseFallback();
+          return;
         }
       } catch (backendError) {
         console.warn("Primary /api/list-users failed, using fallback:", backendError);
         await loadUsersFromSupabaseFallback();
+        return;
+      }
+
+      const userIds = userList.map((u) => u.id).filter(Boolean);
+      if (!userIds.length) {
+        setUserModels({});
+        return;
       }
 
       const { data: allModels, error } = await supabase
         .from("activated_models")
-        .select("*");
+        .select("id,user_id,model_id,model_name,domain,activated_at")
+        .in("user_id", userIds);
 
       if (!error && allModels) {
         const grouped: Record<string, AllocatedModel[]> = {};

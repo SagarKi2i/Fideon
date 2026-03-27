@@ -78,3 +78,54 @@ async def get_system_activity(
         rows = rows[:PAGE_SIZE]
 
     return {"logs": rows, "page": page, "page_size": PAGE_SIZE, "has_more": has_more}
+
+
+@router.get("/api/activity/auth")
+async def get_auth_activity(
+    page: int = 0,
+    event: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Return paginated rows from auth_audit with tenant isolation."""
+    user, role, tenant_id = await _get_user_role(authorization)
+    if role not in {"global_admin", "admin", "user", "viewer"}:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    offset = page * PAGE_SIZE
+    limit = PAGE_SIZE + 1
+
+    query = (
+        "select=id,user_id,email,role,event,action_code,outcome_code,resource_type,resource_id,created_at"
+        f"&order=created_at.desc&limit={limit}&offset={offset}"
+    )
+
+    if role not in {"global_admin", "admin"}:
+        query += f"&user_id=eq.{quote(user['id'], safe='')}"
+    else:
+        if not tenant_id:
+            raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
+        tenant_users = await postgrest_get(
+            "app_users",
+            f"select=user_id&tenant_id=eq.{quote(str(tenant_id), safe='')}",
+        )
+        tenant_user_ids = [str(row.get("user_id")) for row in tenant_users if row.get("user_id")]
+        if not tenant_user_ids:
+            return {"logs": [], "page": page, "page_size": PAGE_SIZE, "has_more": False}
+        encoded_user_ids = ",".join(quote(uid, safe="") for uid in tenant_user_ids)
+        query += f"&user_id=in.({encoded_user_ids})"
+
+    if event:
+        query += f"&event=ilike.*{quote(event, safe='')}*"
+    if date_from:
+        query += f"&created_at=gte.{quote(date_from, safe='')}"
+    if date_to:
+        query += f"&created_at=lte.{quote(date_to, safe='')}"
+
+    rows = await postgrest_get("auth_audit", query)
+    has_more = len(rows) > PAGE_SIZE
+    if has_more:
+        rows = rows[:PAGE_SIZE]
+
+    return {"logs": rows, "page": page, "page_size": PAGE_SIZE, "has_more": has_more}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Server, CheckCircle, XCircle, Clock, AlertTriangle, HardDrive, Activity, TrendingUp, QrCode, Link2 } from 'lucide-react';
@@ -128,6 +128,8 @@ function toPercent(value: number, total: number): number {
 
 export default function AdminDashboard() {
   const { isAdmin } = useUserRole();
+  // Temporary product decision: keep QR pairing features implemented, but hide from admin/global_admin UI.
+  const showQrPairingInsights = false;
   const [isLoading, setIsLoading] = useState(true);
   const [stats, setStats] = useState<DashboardStats>({
     totalDevices: 0,
@@ -145,17 +147,21 @@ export default function AdminDashboard() {
   const [pairings, setPairings] = useState<PairingSession[]>([]);
   const [linkedDevices, setLinkedDevices] = useState<LinkedDevice[]>([]);
   const [pairingDbReady, setPairingDbReady] = useState(true);
+  const refreshTimerRef = useRef<number | null>(null);
 
   const fetchDashboardStats = useCallback(async () => {
     try {
       const dayMs = 24 * 60 * 60 * 1000;
       const yesterdayIso = new Date(Date.now() - dayMs).toISOString();
       const weekAgoIso = new Date(Date.now() - (7 * dayMs)).toISOString();
+      const thirtyDaysFromNowIso = new Date(Date.now() + (30 * dayMs)).toISOString();
 
       const [
-        { data: devices },
-        { data: licenses },
-        { data: syncLogs },
+        { count: totalDevicesCount, error: totalDevicesError },
+        { count: onlineDevicesCount, error: onlineDevicesError },
+        { count: offlineDevicesCount, error: offlineDevicesError },
+        { count: expiringSoonCount, error: expiringSoonError },
+        { count: syncFailuresCount, error: syncFailuresError },
         { count: assignedModelsCount, error: assignedModelsError },
         { count: pendingPodRequestsCount, error: pendingReqError },
         { count: usageTodayCount, error: usageTodayError },
@@ -163,11 +169,16 @@ export default function AdminDashboard() {
         { count: devicesCreatedThisWeekCount, error: devicesWeekError },
         dashboardStatsResp,
       ] = await Promise.all([
-        supabase.from('devices').select('*'),
-        supabase.from('device_licenses').select('*'),
+        supabase.from('devices').select('*', { count: 'exact', head: true }),
+        supabase.from('devices').select('*', { count: 'exact', head: true }).eq('status', 'online'),
+        supabase.from('devices').select('*', { count: 'exact', head: true }).eq('status', 'offline'),
+        supabase
+          .from('device_licenses')
+          .select('*', { count: 'exact', head: true })
+          .lte('expires_at', thirtyDaysFromNowIso),
         supabase
           .from('device_sync_logs')
-          .select('*')
+          .select('*', { count: 'exact', head: true })
           .eq('status', 'failed')
           .gte('created_at', yesterdayIso),
         supabase.from('activated_models').select('*', { count: 'exact', head: true }),
@@ -201,22 +212,27 @@ export default function AdminDashboard() {
       if (usageTodayError) throw usageTodayError;
       if (usageYesterdayError) throw usageYesterdayError;
       if (devicesWeekError) throw devicesWeekError;
+      if (totalDevicesError) throw totalDevicesError;
+      if (onlineDevicesError) throw onlineDevicesError;
+      if (offlineDevicesError) throw offlineDevicesError;
+      if (expiringSoonError) throw expiringSoonError;
+      if (syncFailuresError) throw syncFailuresError;
 
-      const now = new Date();
-      const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
       const usageToday = usageTodayCount ?? 0;
       const usageYesterday = usageYesterdayCount ?? 0;
-      const onlineDevices = devices?.filter(d => d.status === 'online').length ?? 0;
+      const onlineDevices = onlineDevicesCount ?? 0;
+      const offlineDevices = offlineDevicesCount ?? 0;
       const usageTrend = getUsageTrendText(usageToday, usageYesterday);
-      const systemHealthText = getSystemHealthText(syncLogs?.length ?? 0, onlineDevices);
+      const syncFailures = syncFailuresCount ?? 0;
+      const systemHealthText = getSystemHealthText(syncFailures, onlineDevices);
 
       setStats({
-        totalDevices: Number(dashboardStatsResp?.total_devices ?? devices?.length ?? 0),
+        totalDevices: Number(dashboardStatsResp?.total_devices ?? totalDevicesCount ?? 0),
         onlineDevices,
-        offlineDevices: devices?.filter(d => d.status === 'offline').length ?? 0,
+        offlineDevices,
         pendingApprovals: pendingPodRequestsCount ?? 0,
-        expiringSoon: licenses?.filter(l => l.expires_at && new Date(l.expires_at) <= thirtyDaysFromNow).length ?? 0,
-        syncFailures: syncLogs?.length ?? 0,
+        expiringSoon: expiringSoonCount ?? 0,
+        syncFailures,
         totalModelsAssigned: Number(dashboardStatsResp?.total_models_assigned ?? assignedModelsCount ?? 0),
         totalUsageToday: usageToday,
         deviceGrowthTrend: devicesCreatedThisWeekCount ? `+${devicesCreatedThisWeekCount} this week` : null,
@@ -266,29 +282,45 @@ export default function AdminDashboard() {
   useEffect(() => {
     const bootstrap = async () => {
       setIsLoading(true);
-      await Promise.all([fetchDashboardStats(), fetchPairingInsights()]);
+      if (showQrPairingInsights) {
+        await Promise.all([fetchDashboardStats(), fetchPairingInsights()]);
+      } else {
+        await fetchDashboardStats();
+      }
       setIsLoading(false);
     };
     void bootstrap();
 
     const handleDeviceRealtime = () => {
-      void fetchDashboardStats();
-      void fetchPairingInsights();
+      if (refreshTimerRef.current !== null) {
+        window.clearTimeout(refreshTimerRef.current);
+      }
+      refreshTimerRef.current = window.setTimeout(() => {
+        refreshTimerRef.current = null;
+        void fetchDashboardStats();
+        if (showQrPairingInsights) {
+          void fetchPairingInsights();
+        }
+      }, 500);
     };
     window.addEventListener(REALTIME_DEVICE_EVENT, handleDeviceRealtime);
 
-    const pairingChannel = supabase
-      .channel('admin-device-pairings-live')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'device_pairings' }, () => {
-        fetchPairingInsights();
-      })
-      .subscribe();
+    const pairingChannel = showQrPairingInsights
+      ? supabase
+          .channel('admin-device-pairings-live')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'device_pairings' }, () => {
+            fetchPairingInsights();
+          })
+          .subscribe()
+      : null;
 
     const adminStatsChannel = supabase
       .channel('admin-dashboard-stats-live')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'devices' }, () => {
         void fetchDashboardStats();
-        void fetchPairingInsights();
+        if (showQrPairingInsights) {
+          void fetchPairingInsights();
+        }
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'device_licenses' }, () => {
         void fetchDashboardStats();
@@ -308,11 +340,14 @@ export default function AdminDashboard() {
       .subscribe();
 
     return () => {
+      if (refreshTimerRef.current !== null) {
+        window.clearTimeout(refreshTimerRef.current);
+      }
       window.removeEventListener(REALTIME_DEVICE_EVENT, handleDeviceRealtime);
-      supabase.removeChannel(pairingChannel);
+      if (pairingChannel) supabase.removeChannel(pairingChannel);
       supabase.removeChannel(adminStatsChannel);
     };
-  }, [fetchDashboardStats, fetchPairingInsights]);
+  }, [fetchDashboardStats, fetchPairingInsights, showQrPairingInsights]);
 
   const statCards = [
     { ...STAT_CARDS_TEMPLATE.totalDevices, value: stats.totalDevices, trend: stats.deviceGrowthTrend ?? undefined },
@@ -477,66 +512,68 @@ export default function AdminDashboard() {
         <PodActivationRequests />
       </div>
 
-      {/* Device Pairing Insights */}
-      <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-6 animate-fade-in">
-        <Card className="border-border/50 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 shadow-premium">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <QrCode className="h-5 w-5 text-primary" />
-              Recent Pairing Sessions
-            </CardTitle>
-            <CardDescription>Live status for QR link sessions</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {!pairingDbReady && (
-              <div className="text-sm text-muted-foreground">
-                `device_pairings` table not found yet. Apply latest Supabase migrations to enable this view.
-              </div>
-            )}
-            {pairingDbReady && pairings.length === 0 && (
-              <div className="text-sm text-muted-foreground">No pairing sessions yet.</div>
-            )}
-            {pairingDbReady && pairings.length > 0 && pairings.map((p) => (
-              <div key={p.id} className="rounded-lg border border-border/60 p-3 flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="text-sm font-medium truncate">{p.primary_device_label ?? 'Primary session'}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {new Date(p.created_at).toLocaleString()} - expires {new Date(p.expires_at).toLocaleTimeString()}
-                  </p>
+      {/* Device Pairing Insights (hidden for admin/global_admin for now, feature kept in codebase) */}
+      {showQrPairingInsights && (
+        <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-6 animate-fade-in">
+          <Card className="border-border/50 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 shadow-premium">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <QrCode className="h-5 w-5 text-primary" />
+                Recent Pairing Sessions
+              </CardTitle>
+              <CardDescription>Live status for QR link sessions</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {!pairingDbReady && (
+                <div className="text-sm text-muted-foreground">
+                  `device_pairings` table not found yet. Apply latest Supabase migrations to enable this view.
                 </div>
-                <Badge variant={p.status === 'confirmed' ? 'default' : 'outline'}>{p.status}</Badge>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-
-        <Card className="border-border/50 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 shadow-premium">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Link2 className="h-5 w-5 text-primary" />
-              Linked Devices (QR)
-            </CardTitle>
-            <CardDescription>Devices linked through pairing QR flow</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {linkedDevices.length === 0 ? (
-              <div className="text-sm text-muted-foreground">No QR-linked devices found yet.</div>
-            ) : (
-              linkedDevices.map((d) => (
-                <div key={d.id} className="rounded-lg border border-border/60 p-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <p className="text-sm font-medium truncate">{d.device_name}</p>
-                    <Badge variant="outline">{d.status}</Badge>
+              )}
+              {pairingDbReady && pairings.length === 0 && (
+                <div className="text-sm text-muted-foreground">No pairing sessions yet.</div>
+              )}
+              {pairingDbReady && pairings.length > 0 && pairings.map((p) => (
+                <div key={p.id} className="rounded-lg border border-border/60 p-3 flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium truncate">{p.primary_device_label ?? 'Primary session'}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {new Date(p.created_at).toLocaleString()} - expires {new Date(p.expires_at).toLocaleTimeString()}
+                    </p>
                   </div>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    {d.os_type ?? 'Unknown OS'} | {d.app_version ?? 'Unknown app'} | {new Date(d.registered_at).toLocaleString()}
-                  </p>
+                  <Badge variant={p.status === 'confirmed' ? 'default' : 'outline'}>{p.status}</Badge>
                 </div>
-              ))
-            )}
-          </CardContent>
-        </Card>
-      </div>
+              ))}
+            </CardContent>
+          </Card>
+
+          <Card className="border-border/50 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 shadow-premium">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Link2 className="h-5 w-5 text-primary" />
+                Linked Devices (QR)
+              </CardTitle>
+              <CardDescription>Devices linked through pairing QR flow</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {linkedDevices.length === 0 ? (
+                <div className="text-sm text-muted-foreground">No QR-linked devices found yet.</div>
+              ) : (
+                linkedDevices.map((d) => (
+                  <div key={d.id} className="rounded-lg border border-border/60 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm font-medium truncate">{d.device_name}</p>
+                      <Badge variant="outline">{d.status}</Badge>
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      {d.os_type ?? 'Unknown OS'} | {d.app_version ?? 'Unknown app'} | {new Date(d.registered_at).toLocaleString()}
+                    </p>
+                  </div>
+                ))
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
       {/* Model Allocation */}
       <div className="mt-6 animate-fade-in">
