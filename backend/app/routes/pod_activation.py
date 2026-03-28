@@ -8,6 +8,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from app.core.supabase import (
     get_user_context,
     insert_audit_log,
+    insert_auth_audit_row,
     postgrest_delete,
     postgrest_get,
     postgrest_insert,
@@ -142,6 +143,20 @@ async def create_activation_request(request: Request, authorization: Optional[st
         details={"model_id": model_id, "model_name": model_name, "domain": domain},
         previous_value=None,
         new_value={"status": "pending"},
+    )
+    # Same flow as approve/reject (client auth_audit): show user request on Auth Events tab.
+    req_id = created[0].get("id") if created else None
+    role_str = str(context.get("role") or "user")
+    email_str = str((requester.get("email") or "")).strip()
+    await insert_auth_audit_row(
+        user_id=str(requester["id"]),
+        email=email_str,
+        role=role_str,
+        event=f"request_pod:{model_id}",
+        action_code="C",
+        outcome_code=0,
+        resource_type="pod_activation",
+        resource_id=str(req_id) if req_id else None,
     )
     return {"success": True, "request": created[0] if created else None}
 

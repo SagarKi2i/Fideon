@@ -27,6 +27,7 @@ interface UserAccount {
   email: string;
   role: string;
   created_at: string;
+  tenant_name?: string;
 }
 
 interface AllocatedModel {
@@ -155,7 +156,7 @@ export default function Devices() {
   const loadUsersFromSupabaseFallback = async () => {
     const { data: appUsers, error: appUsersError } = await supabase
       .from("app_users")
-      .select("user_id,email,created_at");
+      .select("user_id,email,created_at,tenants(name)");
     if (appUsersError) throw appUsersError;
 
     const { data: roleRows, error: rolesError } = await supabase
@@ -169,6 +170,7 @@ export default function Devices() {
       email: u.email,
       role: roleMap.get(u.user_id) ?? "user",
       created_at: u.created_at,
+      tenant_name: (u as any)?.tenants?.name || "",
     }));
     setUsers(fallbackUsers);
   };
@@ -360,6 +362,9 @@ export default function Devices() {
                     <div className="flex items-center gap-2 text-xs text-muted-foreground">
                       <Mail className="h-3 w-3" />
                       <span>Joined {formatDistanceToNow(new Date(user.created_at), { addSuffix: true })}</span>
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      Tenant: {user.tenant_name || "Unknown tenant"}
                     </div>
                   </CardHeader>
 

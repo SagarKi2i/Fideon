@@ -377,11 +377,21 @@ async def list_users(authorization: Optional[str] = Header(default=None)):
     rows = await postgrest_get(
         "app_users",
         (
-            "select=user_id,email,created_at"
+            "select=user_id,email,created_at,tenant_id"
             f"&tenant_id=eq.{quote(requester_tenant_id, safe='')}"
             "&order=created_at.desc"
         ),
     )
+    tenant_name_map: dict[str, str] = {}
+    tenant_rows = await postgrest_get(
+        "tenants",
+        f"select=id,name&id=eq.{quote(requester_tenant_id, safe='')}&limit=1",
+    )
+    if tenant_rows:
+        tenant_row = tenant_rows[0]
+        tenant_id_value = str(tenant_row.get("id") or requester_tenant_id)
+        tenant_name_map[tenant_id_value] = str(tenant_row.get("name") or "")
+
     user_ids = [str(row.get("user_id")) for row in rows if row.get("user_id")]
     role_map: dict[str, str] = {}
     if user_ids:
@@ -400,6 +410,8 @@ async def list_users(authorization: Optional[str] = Header(default=None)):
                 "email": row.get("email"),
                 "role": role_value,
                 "created_at": row.get("created_at"),
+                "tenant_id": row.get("tenant_id"),
+                "tenant_name": tenant_name_map.get(str(row.get("tenant_id") or ""), ""),
             }
         )
     return {"users": out}

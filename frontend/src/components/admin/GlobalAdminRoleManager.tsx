@@ -16,6 +16,7 @@ interface UserInfo {
   id: string;
   email: string;
   role: AppRole;
+  tenant_name?: string;
 }
 
 interface Props {
@@ -125,7 +126,7 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
   const loadUsersFromSupabaseFallback = useCallback(async () => {
     const { data: appUsers, error: appUsersError } = await supabase
       .from("app_users")
-      .select("user_id,email")
+      .select("user_id,email,tenants(name)")
       .order("email", { ascending: true });
     if (appUsersError) throw appUsersError;
 
@@ -140,6 +141,7 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
         id: u.user_id,
         email: u.email,
         role: roleMap.get(u.user_id) || "user",
+        tenant_name: (u as any)?.tenants?.name || "",
       }))
     );
   }, []);
@@ -444,6 +446,7 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
                     <div className="min-w-0">
                       <p className="text-sm font-medium truncate">{u.email}</p>
                       <p className="text-xs text-muted-foreground">Current role: {u.role}</p>
+                      <p className="text-xs text-muted-foreground">Tenant: {u.tenant_name || "Unknown tenant"}</p>
                     </div>
 
                     {canChangeExistingRoles ? (

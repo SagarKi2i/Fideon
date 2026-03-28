@@ -5,7 +5,10 @@ from typing import Any, Dict, Optional
 from urllib.parse import quote
 
 import httpx
+import structlog
 from fastapi import HTTPException, Request
+
+_audit_log = structlog.get_logger("audit_log")
 
 from .config import SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL
 
@@ -242,7 +245,21 @@ async def insert_audit_log(
         }, sort_keys=True)
         integrity_hash = hashlib.sha256(hash_payload.encode()).hexdigest()
 
-        await postgrest_insert("audit_logs", {
+        tenant_id_value: Optional[str] = None
+        if user_id:
+            try:
+                prof = await postgrest_get(
+                    "app_users",
+                    f"select=tenant_id&user_id=eq.{quote(str(user_id), safe='')}&limit=1",
+                )
+                if prof:
+                    tid = prof[0].get("tenant_id")
+                    if tid is not None:
+                        tenant_id_value = str(tid)
+            except Exception:
+                tenant_id_value = None
+
+        row: Dict[str, Any] = {
             "user_id": user_id,
             "action": action,
             "resource_type": resource_type,
@@ -259,9 +276,69 @@ async def insert_audit_log(
             "model_id": model_id,
             "prediction": prediction,
             "reasoning": reasoning,
-        })
-    except Exception:
-        pass  # Audit failure must never block the main request path
+        }
+        if tenant_id_value:
+            row["tenant_id"] = tenant_id_value
+
+        await postgrest_insert("audit_logs", row)
+    except Exception as exc:  # noqa: BLE001 — never block callers; log for ops visibility
+        _audit_log.warning(
+            "audit_logs_insert_failed",
+            action=action,
+            resource_type=resource_type,
+            user_id=user_id,
+            error=str(exc),
+        )
+
+
+async def insert_auth_audit_row(
+    user_id: str,
+    email: str,
+    role: str,
+    event: str,
+    action_code: str,
+    outcome_code: int,
+    resource_type: str,
+    resource_id: Optional[str],
+) -> None:
+    """Insert auth_audit via service role. Hash matches frontend ``auditHash.ts`` (no email in hash)."""
+    try:
+        created_at = datetime.now(timezone.utc).isoformat()
+        oc: Any = outcome_code if isinstance(outcome_code, int) else ""
+        hash_payload = {
+            "user_id": user_id,
+            "role": role or "user",
+            "event": event,
+            "action_code": action_code or "",
+            "outcome_code": oc,
+            "resource_type": resource_type or "",
+            "resource_id": resource_id or "",
+            "created_at": created_at,
+        }
+        serialized = json.dumps(hash_payload, separators=(",", ":"), ensure_ascii=False)
+        integrity_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        await postgrest_insert(
+            "auth_audit",
+            {
+                "user_id": user_id,
+                "email": email or "",
+                "role": role or "user",
+                "event": event,
+                "action_code": action_code,
+                "outcome_code": outcome_code,
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+                "created_at": created_at,
+                "integrity_hash": integrity_hash,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        _audit_log.warning(
+            "auth_audit_insert_failed",
+            event=event,
+            user_id=user_id,
+            error=str(exc),
+        )
 
 
 async def admin_list_users() -> list[dict[str, Any]]:

@@ -7,13 +7,20 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { safeLog } from "@/logger";
+import { useToast } from "@/hooks/use-toast";
 import { ChevronLeft, ChevronRight, Download, RefreshCw } from "lucide-react";
 import { buildApiRequestError, readJsonSafe } from "@/lib/httpErrors";
 import { Skeleton } from "@/components/ui/skeleton";
 
 const PAGE_SIZE = 25;
+
+function activityFetchInit(accessToken: string): RequestInit {
+  return {
+    cache: "no-store",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  };
+}
 
 interface AuditRow {
   id: string;
@@ -154,6 +161,7 @@ function Pagination({
 // ── Auth Events Tab ───────────────────────────────────────────────────────────
 
 function AuthEventsTab() {
+  const { toast } = useToast();
   const [rows, setRows] = useState<AuditRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(0);
@@ -174,21 +182,35 @@ function AuthEventsTab() {
       if (filterEvent) params.set("event", filterEvent);
       if (filterDateFrom) params.set("date_from", filterDateFrom);
       if (filterDateTo) params.set("date_to", filterDateTo + "T23:59:59Z");
-      const resp = await fetch(apiUrl(`/api/activity/auth?${params}`), {
-        headers: { Authorization: `Bearer ${session.access_token}` },
-      });
+      const resp = await fetch(
+        apiUrl(`/api/activity/auth?${params}`),
+        activityFetchInit(session.access_token),
+      );
       const payload = await readJsonSafe(resp);
       if (!resp.ok) throw buildApiRequestError(resp, payload, "Failed to load auth logs");
       setRows((payload.logs || []) as AuditRow[]);
       setHasMore(!!payload.has_more);
     } catch (e: any) {
       safeLog.error("activity_auth_fetch_error", { error: e.message });
+      toast({
+        title: "Could not load auth activity",
+        description: e?.message || "Check that the backend is running and migrations are applied.",
+        variant: "destructive",
+      });
     } finally {
       setLoading(false);
     }
-  }, [page, filterEvent, filterDateFrom, filterDateTo]);
+  }, [page, filterEvent, filterDateFrom, filterDateTo, toast]);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void load();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [load]);
 
   const applyFilter = () => {
     setFilterEvent(pendingEvent);
@@ -327,6 +349,7 @@ function AuthEventsTab() {
 // ── System Events Tab ─────────────────────────────────────────────────────────
 
 function SystemEventsTab() {
+  const { toast } = useToast();
   const [rows, setRows] = useState<SystemLogRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(0);
@@ -352,21 +375,35 @@ function SystemEventsTab() {
       if (filterDateFrom) params.set("date_from", filterDateFrom);
       if (filterDateTo) params.set("date_to", filterDateTo + "T23:59:59Z");
 
-      const resp = await fetch(apiUrl(`/api/activity/system?${params}`), {
-        headers: { Authorization: `Bearer ${session.access_token}` },
-      });
+      const resp = await fetch(
+        apiUrl(`/api/activity/system?${params}`),
+        activityFetchInit(session.access_token),
+      );
       const payload = await readJsonSafe(resp);
       if (!resp.ok) throw buildApiRequestError(resp, payload, "Failed to load system logs");
       setRows((payload.logs || []) as SystemLogRow[]);
       setHasMore(!!payload.has_more);
     } catch (e: any) {
       safeLog.error("activity_sys_fetch_error", { error: e.message });
+      toast({
+        title: "Could not load system activity",
+        description: e?.message || "Check that the backend is running and audit_logs has tenant_id populated.",
+        variant: "destructive",
+      });
     } finally {
       setLoading(false);
     }
-  }, [page, filterAction, filterResource, filterDateFrom, filterDateTo]);
+  }, [page, filterAction, filterResource, filterDateFrom, filterDateTo, toast]);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void load();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [load]);
 
   const applyFilter = () => {
     setFilterAction(pendingAction);
@@ -532,18 +569,7 @@ function SystemEventsTab() {
 export default function Activity() {
   return (
     <div className="space-y-4">
-      <Tabs defaultValue="auth">
-        <TabsList>
-          <TabsTrigger value="auth">Auth Events</TabsTrigger>
-          <TabsTrigger value="system">System Events</TabsTrigger>
-        </TabsList>
-        <TabsContent value="auth" className="mt-4">
-          <AuthEventsTab />
-        </TabsContent>
-        <TabsContent value="system" className="mt-4">
-          <SystemEventsTab />
-        </TabsContent>
-      </Tabs>
+      <AuthEventsTab />
     </div>
   );
 }

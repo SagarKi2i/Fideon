@@ -28,7 +28,6 @@ import { apiUrl } from "@/lib/apiBaseUrl";
 import { Separator } from "@/components/ui/separator";
 import { HelpAssistant } from "@/components/HelpAssistant";
 import type { Database } from "@/integrations/supabase/types";
-import { Badge } from "@/components/ui/badge";
 
 import {
   Sidebar,
@@ -94,7 +93,6 @@ export function AppSidebar() {
   const [isElectronApp, setIsElectronApp] = useState(false);
   const [activatedPods, setActivatedPods] = useState<ActivatedPod[]>([]);
   const [podsOpen, setPodsOpen] = useState(true);
-  const [pendingPodRequestCount, setPendingPodRequestCount] = useState(0);
   const [pendingReviewCount, setPendingReviewCount] = useState(0);
 
   const loadActivatedPods = useCallback(async () => {
@@ -114,25 +112,6 @@ export function AppSidebar() {
       console.error("Error loading pods:", error);
     }
   }, []);
-
-  const loadPendingPodRequestCount = useCallback(async () => {
-    if (!isAdmin) return;
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session?.access_token) return;
-      const response = await fetch(apiUrl("/api/pod-activation/requests?status=pending"), {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${session.access_token}`,
-        },
-      });
-      if (!response.ok) throw new Error("Failed to load pending pod request count");
-      const payload = await response.json() as { requests?: unknown[] };
-      setPendingPodRequestCount(Array.isArray(payload?.requests) ? payload.requests.length : 0);
-    } catch (error) {
-      console.error("Error loading pending pod request count:", error);
-    }
-  }, [isAdmin]);
 
   const loadPendingReviewCount = useCallback(async () => {
     if (!isAdmin) return;
@@ -160,27 +139,8 @@ export function AppSidebar() {
     };
     checkElectron();
     loadActivatedPods();
-    loadPendingPodRequestCount();
     loadPendingReviewCount();
-  }, [loadActivatedPods, loadPendingPodRequestCount, loadPendingReviewCount]);
-
-  useEffect(() => {
-    if (!isAdmin) return;
-    const channel = supabase
-      .channel("pod-activation-sidebar-badge")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "pod_activation_requests" },
-        () => {
-          loadPendingPodRequestCount();
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [isAdmin, loadPendingPodRequestCount]);
+  }, [loadActivatedPods, loadPendingReviewCount]);
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -235,11 +195,6 @@ export function AppSidebar() {
                       >
                         <item.icon className="h-4 w-4" />
                         <span>{item.title}</span>
-                        {item.title === "Pending Approvals" && pendingPodRequestCount > 0 ? (
-                          <Badge className="ml-auto h-5 min-w-5 px-1 text-[10px] leading-5">
-                            {pendingPodRequestCount > 99 ? "99+" : pendingPodRequestCount}
-                          </Badge>
-                        ) : null}
                       </NavLink>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
@@ -266,9 +221,9 @@ export function AppSidebar() {
                       <item.icon className="h-4 w-4" />
                       <span>{item.title}</span>
                       {item.title === "Review Queue" && isAdmin && pendingReviewCount > 0 ? (
-                        <Badge className="ml-auto h-5 min-w-5 px-1 text-[10px] leading-5">
+                        <span className="ml-auto inline-flex h-5 min-w-5 items-center justify-center rounded-md bg-primary/15 px-1 text-[10px] leading-5 text-primary">
                           {pendingReviewCount > 99 ? "99+" : pendingReviewCount}
-                        </Badge>
+                        </span>
                       ) : null}
                     </NavLink>
                   </SidebarMenuButton>
