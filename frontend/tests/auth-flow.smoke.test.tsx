@@ -11,6 +11,7 @@ const updateUserMock = vi.fn();
 const getUserMock = vi.fn();
 const onAuthStateChangeMock = vi.fn();
 const signInWithOAuthMock = vi.fn();
+const fetchMock = vi.fn();
 
 vi.mock("react-router-dom", async () => {
   const actual = await vi.importActual<typeof import("react-router-dom")>("react-router-dom");
@@ -47,6 +48,13 @@ vi.mock("@/integrations/supabase/client", () => ({
 describe("Auth flow smoke", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+      text: async () => "",
+    });
+    vi.stubGlobal("fetch", fetchMock);
     getUserMock.mockResolvedValue({ data: { user: null } });
     onAuthStateChangeMock.mockReturnValue({
       data: {
@@ -58,6 +66,10 @@ describe("Auth flow smoke", () => {
     signInMock.mockResolvedValue({ data: { user: null }, error: null });
     resetPasswordMock.mockResolvedValue({ error: null });
     updateUserMock.mockResolvedValue({ error: null });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it("shows sign-in by default and submits email/password", async () => {
@@ -90,8 +102,10 @@ describe("Auth flow smoke", () => {
     fireEvent.change(screen.getByLabelText("Work Email"), { target: { value: "user@example.com" } });
     fireEvent.click(screen.getByRole("button", { name: "Send reset link" }));
 
-    await waitFor(() => {
-      expect(resetPasswordMock).toHaveBeenCalled();
-    });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const [url, options] = fetchMock.mock.calls[0] as [string, { method?: string; body?: string }];
+    expect(url).toContain("/api/v1/auth/password-reset/request");
+    expect(options?.method).toBe("POST");
+    expect(options?.body).toContain("\"email\":\"user@example.com\"");
   });
 });

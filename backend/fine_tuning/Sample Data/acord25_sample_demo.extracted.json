@@ -1,0 +1,50 @@
+{
+  "form_type": "ACORD 25",
+  "certificate_number": "CHI-2026-04471 REVISION NUMBER: 1",
+  "producer": {
+    "name": "INSURED",
+    "name_confidence": 0.85,
+    "contact_name": "FEIN: 36-4821059 SIC: 1521 NAICS: 236115 Sandra M. Holbrook",
+    "agency_customer_id": "ACU-20291-B"
+  },
+  "insured": {
+    "name": "or be endorsed. If SUBROGATION IS WAIVED, subject to the",
+    "name_confidence": 0.85
+  },
+  "other_named_insureds": [],
+  "holder": {
+    "name": "NOT"
+  },
+  "lines_of_business_indicated": [],
+  "coverages": [
+    {
+      "block_confidence": 0.51,
+      "policy_number": "LIMITS",
+      "policy_number_confidence": 0.85,
+      "effective_date_confidence": 0.0,
+      "expiration_date_confidence": 0.0,
+      "insurers": []
+    }
+  ],
+  "premises": [],
+  "prior_carriers": [],
+  "loss_history": [],
+  "additional_interests": [],
+  "description_of_operations": "LOCATIONS / VEHICLES",
+  "extraction_meta": {
+    "form_type_detected": "ACORD 25",
+    "blank_in_document": [],
+    "not_applicable_to_form_type": [
+      "other_named_insureds",
+      "policy_info",
+      "premises",
+      "prior_carriers"
+    ],
+    "all_checked_items": [],
+    "remarks": [],
+    "extraction_engine": "pdfplumber",
+    "base_confidence": 0.85
+  },
+  "overall_confidence": 0.595,
+  "raw_text": "DATE (MM/DD/YYYY)\nCERTIFICATE OF LIABILITY INSURANCE\n03/15/2026\nACORDTHIS CERTIFICATE IS ISSUED AS A MATTER OF INFORMATION ONLY AND CONFERS NO RIGHTS UPON THE CERTIFICATE HOLDER. THIS CERTIFICATE DOES NOT\nAFFIRMATIVELY OR NEGATIVELY AMEND, EXTEND OR ALTER THE COVERAGE AFFORDED BY THE POLICIES BELOW. THIS CERTIFICATE OF INSURANCE DOES NOT\nCONSTITUTE A CONTRACT BETWEEN THE ISSUING INSURER(S), AUTHORIZED REPRESENTATIVE OR PRODUCER, AND THE CERTIFICATE HOLDER.\nIMPORTANT: If the certificate holder is an ADDITIONAL INSURED, the policy(ies) must have ADDITIONAL INSURED provisions or be endorsed. If SUBROGATION IS WAIVED, subject to the\nterms and conditions of the policy, certain policies may require an endorsement. A statement on this certificate does not confer rights to the certificate holder in lieu of such endorsement(s).\nPRODUCER INSURED\nWestfield Insurance Partners, LLC Apex Construction Group, Inc.\n1250 Commerce Boulevard, Suite 400 c/o Marcus T. Reilly, CFO\nChicago, IL 60601 4820 West Industrial Parkway\nPhone: (312) 555-0188 Fax: (312) 555-0199 Naperville, IL 60563\nEmail: certificates@westfieldins.com Phone: (630) 555-0244 Fax: (630) 555-0255\nCONTACT NAME: Sandra M. Holbrook FEIN: 36-4821059 SIC: 1521 NAICS: 236115\nPHONE: (312) 555-0188 FAX: (312) 555-0199 ENTITY TYPE: nCorporation LLC Partnership\nPRODUCER LICENSE #: IL-3847291 NPN: 7482910\nAGENCY CUSTOMER ID: ACU-20291-B\nINSURER(S) AFFORDING COVERAGE NAIC #\nINSURER A: Continental Casualty Company (CNA) 20443\nINSURER B: Zurich American Insurance Company 16535\nINSURER C: Employers Mutual Casualty Company 21415\nINSURER D:\nINSURER E:\nINSURER F:\nCOVERAGES CERTIFICATE NUMBER: CHI-2026-04471 REVISION NUMBER: 1\nTHIS IS TO CERTIFY THAT THE POLICIES OF INSURANCE LISTED BELOW HAVE BEEN ISSUED TO THE INSURED NAMED ABOVE FOR THE POLICY PERIOD INDICATED. NOTWITHSTANDING ANY REQUIREMENT,\nTERM OR CONDITION OF ANY CONTRACT OR OTHER DOCUMENT WITH RESPECT TO WHICH THIS CERTIFICATE MAY BE ISSUED OR MAY PERTAIN, THE INSURANCE AFFORDED BY THE POLICIES\nDESCRIBED HEREIN IS SUBJECT TO ALL THE TERMS, EXCLUSIONS AND CONDITIONS OF SUCH POLICIES. LIMITS SHOWN MAY HAVE BEEN REDUCED BY PAID CLAIMS.\nTYPE OF INSURANCE ADDL SUBR POLICY NUMBER POLICY EFF POLICY EXP LIMITS\nINSD WVD (MM/DD/YYYY) (MM/DD/YYYY)\nCOMMERCIAL GENERAL LIABILITY\nX CLAIMS-MADE OCCUR EACH OCCURRENCE\nX Contractual Liability $1,000,000\nX Personal & Adv Injury n n GL 7821-04-53920 04/01/2026 04/01/2027 DAMAGE TO RENTED PREMISES (Ea occ)\nX Products-Comp/Op Agg $300,000\nMED EXP (Any one person) $10,000\nAUTOMOBILE LIABILITY PERSONAL & ADV INJURY\n$1,000,000\nX ANY AUTO GCOENMEBRINAELD A SGIGNRGELEG ALTIMEIT (Ea accident)\nOWNED AUTOS ONLY HIRED AUTnOS ONLY CA 7821-04-53921 04/01/2026 04/01/2027 $$21,,000000,,000000\nSCHEDULED AUTOS NON-OWNED AUTOS ONLY PBROODDILUYC INTSJU-CROYM (PPe/Or Ppe ArsGoGn) $500,000\nUMBRELLA LIAB / EXCESS LIAB\nB $O2D,0IL0Y0, 0IN0J0URY (Per accident) $1,000,000\nPROPERTY DAMAGE (Per accident) $500,000\nX OCCUR CLAIMS-MADE EACH OCCURRENCE\nX Excess over GL & Auto n n UMB 7821-04-53922 04/01/2026 04/01/2027 $5,000,000\nAGGREGATE\n$5,000,000\nWORKERS COMPENSATION AND EMPLOYERS' LIABILITY\nDEDUCTIBLE: $10,000\nX WC STATUTORY LIMITS E.L. EACH ACCIDENT\nStates: IL, IN, WI n WC 7821-04-53923 04/01/2026 04/01/2027 $1,000,000\nE.L. DISEASE \u2013 EA EMPLOYEE $1,000,000\nE.L. DISEASE \u2013 POLICY LIMIT $1,000,000\nBUILDERS RISK PER OCCURRENCE\nSpecial Form, RC Value n BR 7821-04-53924 04/01/2026 04/01/2027 $3,500,000\nDEDUCTIBLE: $25,000\nDESCRIPTION OF OPERATIONS / LOCATIONS / VEHICLES\nGeneral contracting and construction services for residential and commercial projects.\nProject: Lakeview Mixed-Use Development \u2014 2840 N. Sheffield Ave., Chicago, IL 60657.\nCity of Chicago, Department of Buildings is named as Additional Insured on the General Liability\nand Umbrella/Excess Liability policies per written contract. Waiver of Subrogation applies to GL and WC.\nCertificate Holder is included as Additional Insured where required by written contract.\n30-Day notice of cancellation applies; 10-Day notice for non-payment of premium.\nCERTIFICATE HOLDER CANCELLATION\nCity of Chicago \u2013 Department of Buildings SHOULD ANY OF THE ABOVE DESCRIBED POLICIES BE CANCELLED BEFORE\n121 N. LaSalle Street, Room 900 THE EXPIRATION DATE THEREOF, NOTICE WILL BE DELIVERED IN\nChicago, IL 60602 ACCORDANCE WITH THE POLICY PROVISIONS.\nAUTHORIZED REPRESENTATIVE\nn ADDITIONAL INSURED n WAIVER OF SUBROGATION\nSandra M. Holbrook / Westfield Insurance Partners, LLC\nACORD 25 (2016/03) \u00a9 1988-2016 ACORD CORPORATION. All rights reserved. The ACORD name and logo are registered marks of ACORD"
+}

@@ -28,6 +28,7 @@ import {
   getOllamaModelName,
   listOllamaModels,
 } from "@/lib/ollama";
+import { extractAcord } from "@/lib/acordWorkflowApi";
 
 interface ActivatedModel {
   id: string;
@@ -167,6 +168,26 @@ export default function Playground() {
     setResult("");
 
     try {
+      // ACORD: main backend orchestrates RunPod then proxies to ML /api/acord/extract
+      if (data?.type === "acord-parser" && data.file instanceof File && !(useLocalModel && isElectronApp)) {
+        const formTypeHint = String(data.formType ?? "125");
+        try {
+          const acordResp = await extractAcord(data.file, formTypeHint);
+          // Keep as plain JSON text so the ACORD tab can render Fields/Edit/Changes reliably.
+          setResult(JSON.stringify(acordResp, null, 2));
+          setIsRunning(false);
+          return;
+        } catch (e: any) {
+          toast({
+            title: "ACORD extract failed",
+            description: e?.message ? String(e.message) : "Failed to extract ACORD form",
+            variant: "destructive",
+          });
+          setIsRunning(false);
+          return;
+        }
+      }
+
       // Check if we should use local model
       if (useLocalModel && isElectronApp) {
         if (!ollamaReady) {
@@ -273,11 +294,17 @@ export default function Playground() {
   const renderModelUI = () => {
     if (!selectedModel) return null;
 
+    // Pods sometimes get different model_id values, but the pod UI should still be ACORD.
+    if (
+      selectedModel === "acord-parser" ||
+      selectedModelData?.model_name?.toLowerCase().includes("acord")
+    ) {
+      return <ACORDParserUI modelId={selectedModel} onRun={handleRun} isRunning={isRunning} result={result} />;
+    }
+
     switch (selectedModel) {
       case "policy-comparison":
         return <PolicyComparisonUI modelId={selectedModel} onRun={handleRun} isRunning={isRunning} result={result} />;
-      case "acord-parser":
-        return <ACORDParserUI modelId={selectedModel} onRun={handleRun} isRunning={isRunning} result={result} />;
       case "claims-fnol":
         return <ClaimsFNOLUI onRun={handleRun} isRunning={isRunning} result={result} />;
       case "document-retrieval":
@@ -443,7 +470,11 @@ export default function Playground() {
         {renderModelUI()}
 
         {/* Send to Review button - shown when there's output */}
-        {result && !isRunning && selectedModelData && (
+        {result &&
+          !isRunning &&
+          selectedModelData &&
+          selectedModel !== "acord-parser" &&
+          !selectedModelData.model_name.toLowerCase().includes("acord") && (
           <div className="flex justify-end">
             <SendToReviewButton
               podModelId={selectedModel}
@@ -452,7 +483,7 @@ export default function Playground() {
               result={result}
             />
           </div>
-        )}
+          )}
 
         {isElectronApp && (
           <LocalModelManager activatedModels={models} />

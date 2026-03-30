@@ -18,6 +18,7 @@ import {
   CalendarClock,
   Zap,
   ClipboardCheck,
+  FileSearch,
 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useState, useEffect, useCallback } from "react";
@@ -73,6 +74,7 @@ const items = [
 
 const adminItems = [
   { title: "Admin Dashboard", url: "/admin", icon: Shield },
+  { title: "Training Review", url: "/admin/acord-queue", icon: FileSearch },
   { title: "Users", url: "/users", icon: Users },
   { title: "Devices", url: "/devices", icon: Monitor },
   { title: "Pending Approvals", url: "/devices/pending", icon: Clock },
@@ -188,7 +190,7 @@ export function AppSidebar() {
                     <SidebarMenuButton asChild tooltip={item.title}>
                       <NavLink 
                         to={item.url}
-                        end={item.url === "/devices"}
+                        end={item.url === "/devices" || item.url === "/admin"}
                         onClick={handleNavClick}
                         className="hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
                         activeClassName="bg-sidebar-primary text-sidebar-primary-foreground font-medium"

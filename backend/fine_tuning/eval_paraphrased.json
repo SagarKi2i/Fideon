@@ -1,0 +1,27 @@
+[
+  {
+    "instruction": "Explain the purpose of ACORD Form 125.",
+    "input": "",
+    "output": "{\"in_scope\": true, \"extracted_text\": \"ACORD Form 125 collects general information about a business applying for commercial insurance coverage.\"}"
+  },
+  {
+    "instruction": "What does ACORD Form 126 collect?",
+    "input": "",
+    "output": "{\"in_scope\": true, \"extracted_text\": \"ACORD Form 126 includes information about business operations, premises details, liability exposures, and requested liability coverage.\"}"
+  },
+  {
+    "instruction": "Describe the role of underwriting in insurance.",
+    "input": "",
+    "output": "{\"in_scope\": true, \"extracted_text\": \"Underwriting assesses the risk associated with an applicant and determines whether insurance coverage should be issued and at what premium.\"}"
+  },
+  {
+    "instruction": "What is the meaning of a policy limit?",
+    "input": "",
+    "output": "{\"in_scope\": true, \"extracted_text\": \"A policy limit is the maximum amount an insurer will pay for a covered loss.\"}"
+  },
+  {
+    "instruction": "Why are ACORD forms important in insurance applications?",
+    "input": "",
+    "output": "{\"in_scope\": true, \"extracted_text\": \"ACORD forms provide a standardized structure for collecting insurance application data, improving efficiency and consistency.\"}"
+  }
+]
