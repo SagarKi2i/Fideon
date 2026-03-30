@@ -592,7 +592,10 @@ async def admin_dashboard_stats(authorization: Optional[str] = Header(default=No
     admin_user_ids = {str(r.get("user_id")) for r in (admin_role_rows or []) if r.get("user_id")}
     non_admin_user_ids = [uid for uid in tenant_user_ids if uid not in admin_user_ids]
 
-    # Devices: include only devices registered by non-admin users (or unknown/NULL registrant).
+    # Devices: we use device status to compute Online/Offline *for tenant users*.
+    # Card rule: "Total Devices" should reflect the count of tenant users (excluding admin/global_admin),
+    # not raw device row count. Online/Offline are derived from whether a user has any online/offline
+    # device rows in that tenant.
     device_rows = await postgrest_get(
         "devices",
         f"select=id,status,registered_by,registered_at&tenant_id=eq.{tenant_id_q}",
@@ -601,15 +604,27 @@ async def admin_dashboard_stats(authorization: Optional[str] = Header(default=No
     non_admin_user_id_set = set(non_admin_user_ids)
     for d in device_rows or []:
         registered_by = d.get("registered_by")
-        if registered_by is None:
-            included_device_rows.append(d)
-            continue
-        if str(registered_by) in non_admin_user_id_set:
+        if registered_by is not None and str(registered_by) in non_admin_user_id_set:
             included_device_rows.append(d)
 
-    total_devices = len(included_device_rows)
-    online_devices = sum(1 for d in included_device_rows if d.get("status") == "online")
-    offline_devices = sum(1 for d in included_device_rows if d.get("status") == "offline")
+    # Total devices card = tenant non-admin user count.
+    total_devices = len(non_admin_user_ids)
+
+    # Online/Offline cards = user-level status.
+    user_has_online_device: set[str] = set()
+    user_has_offline_device: set[str] = set()
+    for d in included_device_rows:
+        uid = d.get("registered_by")
+        if uid is None:
+            continue
+        uid_str = str(uid)
+        if d.get("status") == "online":
+            user_has_online_device.add(uid_str)
+        if d.get("status") == "offline":
+            user_has_offline_device.add(uid_str)
+
+    online_devices = len(user_has_online_device)
+    offline_devices = len(user_has_offline_device)
     included_device_ids = [str(d.get("id")) for d in included_device_rows if d.get("id")]
 
     devices_created_this_week = 0
