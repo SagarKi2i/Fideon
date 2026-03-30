@@ -89,11 +89,37 @@ async def get_system_activity(
             f"select=user_id&tenant_id=eq.{tid_q}",
         )
         tenant_user_ids = [str(r["user_id"]) for r in tenant_users if r.get("user_id")]
+
+        # Role-based subject filtering:
+        # - admin: show logs for all tenant users + tenant admins, but exclude global_admin subjects
+        # - global_admin: show all tenant subjects
+        excluded_subject_user_ids: list[str] = []
+        if role == "admin" and tenant_user_ids:
+            tenant_user_ids_encoded = ",".join(quote(uid, safe="") for uid in tenant_user_ids)
+            global_admin_subject_rows = await postgrest_get(
+                "user_roles",
+                (
+                    "select=user_id"
+                    f"&user_id=in.({tenant_user_ids_encoded})"
+                    "&role=eq.global_admin"
+                ),
+            )
+            excluded_subject_user_ids = [
+                str(r.get("user_id"))
+                for r in (global_admin_subject_rows or [])
+                if r.get("user_id") is not None
+            ]
+
         max_ids_for_or = 80
         if tenant_user_ids and len(tenant_user_ids) <= max_ids_for_or:
             query += f"&or={_admin_tenant_or_user_ids_filter(str(tenant_id), tenant_user_ids)}"
         else:
             query += f"&tenant_id=eq.{tid_q}"
+
+        if excluded_subject_user_ids:
+            # Apply as an AND filter so it excludes rows from both OR/tenant_id branches.
+            excluded_encoded = "%2C".join(excluded_subject_user_ids)
+            query += f"&user_id=not.in.({excluded_encoded})"
 
     if action:
         query += f"&action=ilike.*{quote(action, safe='')}*"
@@ -147,11 +173,34 @@ async def get_auth_activity(
             f"select=user_id&tenant_id=eq.{tid_q}",
         )
         tenant_user_ids = [str(r["user_id"]) for r in tenant_users if r.get("user_id")]
+
+        # Role-based subject filtering for auth_audit as well.
+        excluded_subject_user_ids: list[str] = []
+        if role == "admin" and tenant_user_ids:
+            tenant_user_ids_encoded = ",".join(quote(uid, safe="") for uid in tenant_user_ids)
+            global_admin_subject_rows = await postgrest_get(
+                "user_roles",
+                (
+                    "select=user_id"
+                    f"&user_id=in.({tenant_user_ids_encoded})"
+                    "&role=eq.global_admin"
+                ),
+            )
+            excluded_subject_user_ids = [
+                str(r.get("user_id"))
+                for r in (global_admin_subject_rows or [])
+                if r.get("user_id") is not None
+            ]
+
         max_ids_for_or = 80
         if tenant_user_ids and len(tenant_user_ids) <= max_ids_for_or:
             query += f"&or={_admin_tenant_or_user_ids_filter(str(tenant_id), tenant_user_ids)}"
         else:
             query += f"&tenant_id=eq.{tid_q}"
+
+        if excluded_subject_user_ids:
+            excluded_encoded = "%2C".join(excluded_subject_user_ids)
+            query += f"&user_id=not.in.({excluded_encoded})"
 
     if event:
         query += f"&event=ilike.*{quote(event, safe='')}*"
