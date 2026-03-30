@@ -151,91 +151,53 @@ export default function AdminDashboard() {
 
   const fetchDashboardStats = useCallback(async () => {
     try {
-      const dayMs = 24 * 60 * 60 * 1000;
-      const yesterdayIso = new Date(Date.now() - dayMs).toISOString();
-      const weekAgoIso = new Date(Date.now() - (7 * dayMs)).toISOString();
-      const thirtyDaysFromNowIso = new Date(Date.now() + (30 * dayMs)).toISOString();
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) throw new Error('Missing auth session');
 
-      const [
-        { count: totalDevicesCount, error: totalDevicesError },
-        { count: onlineDevicesCount, error: onlineDevicesError },
-        { count: offlineDevicesCount, error: offlineDevicesError },
-        { count: expiringSoonCount, error: expiringSoonError },
-        { count: syncFailuresCount, error: syncFailuresError },
-        { count: assignedModelsCount, error: assignedModelsError },
-        { count: pendingPodRequestsCount, error: pendingReqError },
-        { count: usageTodayCount, error: usageTodayError },
-        { count: usageYesterdayCount, error: usageYesterdayError },
-        { count: devicesCreatedThisWeekCount, error: devicesWeekError },
-        dashboardStatsResp,
-      ] = await Promise.all([
-        supabase.from('devices').select('*', { count: 'exact', head: true }),
-        supabase.from('devices').select('*', { count: 'exact', head: true }).eq('status', 'online'),
-        supabase.from('devices').select('*', { count: 'exact', head: true }).eq('status', 'offline'),
-        supabase
-          .from('device_licenses')
-          .select('*', { count: 'exact', head: true })
-          .lte('expires_at', thirtyDaysFromNowIso),
-        supabase
-          .from('device_sync_logs')
-          .select('*', { count: 'exact', head: true })
-          .eq('status', 'failed')
-          .gte('created_at', yesterdayIso),
-        supabase.from('activated_models').select('*', { count: 'exact', head: true }),
-        supabase.from('pod_activation_requests').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
-        supabase.from('chat_messages').select('*', { count: 'exact', head: true }).gte('created_at', yesterdayIso),
-        supabase
-          .from('chat_messages')
-          .select('*', { count: 'exact', head: true })
-          .gte('created_at', new Date(Date.now() - (2 * dayMs)).toISOString())
-          .lt('created_at', yesterdayIso),
-        supabase.from('devices').select('*', { count: 'exact', head: true }).gte('registered_at', weekAgoIso),
-        (async () => {
-          const { data: { session } } = await supabase.auth.getSession();
-          if (!session?.access_token) throw new Error('Missing auth session');
-          const resp = await fetch(apiUrl('/api/admin/dashboard-stats'), {
-            method: 'GET',
-            headers: {
-              Authorization: `Bearer ${session.access_token}`,
-            },
-          });
-          if (!resp.ok) {
-            const msg = await resp.text();
-            throw new Error(msg || 'Failed to fetch admin dashboard stats');
-          }
-          return resp.json() as Promise<{ total_devices?: number; total_models_assigned?: number }>;
-        })(),
-      ]);
+      const resp = await fetch(apiUrl('/api/admin/dashboard-stats'), {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+        },
+      });
+      if (!resp.ok) {
+        const msg = await resp.text();
+        throw new Error(msg || 'Failed to fetch admin dashboard stats');
+      }
 
-      if (assignedModelsError) throw assignedModelsError;
-      if (pendingReqError) throw pendingReqError;
-      if (usageTodayError) throw usageTodayError;
-      if (usageYesterdayError) throw usageYesterdayError;
-      if (devicesWeekError) throw devicesWeekError;
-      if (totalDevicesError) throw totalDevicesError;
-      if (onlineDevicesError) throw onlineDevicesError;
-      if (offlineDevicesError) throw offlineDevicesError;
-      if (expiringSoonError) throw expiringSoonError;
-      if (syncFailuresError) throw syncFailuresError;
+      const dashboardStatsResp = (await resp.json()) as {
+        total_devices?: number;
+        online_devices?: number;
+        offline_devices?: number;
+        pending_approvals?: number;
+        expiring_soon?: number;
+        sync_failures?: number;
+        total_models_assigned?: number;
+        usage_today?: number;
+        usage_yesterday?: number;
+        devices_created_this_week?: number;
+      };
 
-      const usageToday = usageTodayCount ?? 0;
-      const usageYesterday = usageYesterdayCount ?? 0;
-      const onlineDevices = onlineDevicesCount ?? 0;
-      const offlineDevices = offlineDevicesCount ?? 0;
+      const usageToday = Number(dashboardStatsResp?.usage_today ?? 0);
+      const usageYesterday = Number(dashboardStatsResp?.usage_yesterday ?? 0);
+      const onlineDevices = Number(dashboardStatsResp?.online_devices ?? 0);
+      const offlineDevices = Number(dashboardStatsResp?.offline_devices ?? 0);
       const usageTrend = getUsageTrendText(usageToday, usageYesterday);
-      const syncFailures = syncFailuresCount ?? 0;
+      const syncFailures = Number(dashboardStatsResp?.sync_failures ?? 0);
       const systemHealthText = getSystemHealthText(syncFailures, onlineDevices);
 
       setStats({
-        totalDevices: Number(dashboardStatsResp?.total_devices ?? totalDevicesCount ?? 0),
+        totalDevices: Number(dashboardStatsResp?.total_devices ?? 0),
         onlineDevices,
         offlineDevices,
-        pendingApprovals: pendingPodRequestsCount ?? 0,
-        expiringSoon: expiringSoonCount ?? 0,
+        pendingApprovals: Number(dashboardStatsResp?.pending_approvals ?? 0),
+        expiringSoon: Number(dashboardStatsResp?.expiring_soon ?? 0),
         syncFailures,
-        totalModelsAssigned: Number(dashboardStatsResp?.total_models_assigned ?? assignedModelsCount ?? 0),
+        totalModelsAssigned: Number(dashboardStatsResp?.total_models_assigned ?? 0),
         totalUsageToday: usageToday,
-        deviceGrowthTrend: devicesCreatedThisWeekCount ? `+${devicesCreatedThisWeekCount} this week` : null,
+        deviceGrowthTrend: dashboardStatsResp?.devices_created_this_week
+          ? `+${dashboardStatsResp?.devices_created_this_week} this week`
+          : null,
         usageTrend,
         systemHealthText,
       });
@@ -305,6 +267,15 @@ export default function AdminDashboard() {
     };
     window.addEventListener(REALTIME_DEVICE_EVENT, handleDeviceRealtime);
 
+    const handleDashboardStatsRefresh = () => {
+      // Used by admin actions (approve/allocate) to ensure card updates immediately.
+      void fetchDashboardStats();
+      if (showQrPairingInsights) {
+        void fetchPairingInsights();
+      }
+    };
+    window.addEventListener('dashboard-stats-refresh', handleDashboardStatsRefresh);
+
     const pairingChannel = showQrPairingInsights
       ? supabase
           .channel('admin-device-pairings-live')
@@ -344,6 +315,7 @@ export default function AdminDashboard() {
         window.clearTimeout(refreshTimerRef.current);
       }
       window.removeEventListener(REALTIME_DEVICE_EVENT, handleDeviceRealtime);
+      window.removeEventListener('dashboard-stats-refresh', handleDashboardStatsRefresh);
       if (pairingChannel) supabase.removeChannel(pairingChannel);
       supabase.removeChannel(adminStatsChannel);
     };

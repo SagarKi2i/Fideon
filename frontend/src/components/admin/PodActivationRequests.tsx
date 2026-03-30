@@ -105,6 +105,7 @@ export function PodActivationRequests() {
       });
 
       void loadRequests();
+      window.dispatchEvent(new CustomEvent("dashboard-stats-refresh"));
 
       // Audit: admin/global_admin approving a pod request (best-effort, non-blocking).
       void (async () => {
@@ -183,6 +184,7 @@ export function PodActivationRequests() {
       setReviewRejectionReason("");
 
       void loadRequests();
+      window.dispatchEvent(new CustomEvent("dashboard-stats-refresh"));
 
       // Audit: admin/global_admin rejecting a pod request (best-effort, non-blocking).
       void (async () => {

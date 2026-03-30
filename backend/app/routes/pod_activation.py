@@ -202,6 +202,13 @@ async def list_activation_requests(
         return {"requests": []}
     encoded_user_ids = ",".join(quote(str(uid), safe="") for uid in user_ids)
 
+    # Dashboard rule: do not include requester/admin requests in admin queue metrics.
+    admin_role_rows = await postgrest_get(
+        "user_roles",
+        f"select=user_id,role&user_id=in.({encoded_user_ids})&role=in.(admin,global_admin)",
+    )
+    admin_user_ids = {str(r.get("user_id")) for r in (admin_role_rows or []) if r.get("user_id")}
+
     app_users = await postgrest_get(
         "app_users",
         f"select=user_id,full_name,email,tenant_id&user_id=in.({encoded_user_ids})",
@@ -221,6 +228,8 @@ async def list_activation_requests(
     enriched: list[dict[str, object]] = []
     for r in rows:
         uid = r.get("user_id")
+        if uid and str(uid) in admin_user_ids:
+            continue
         u = user_map.get(str(uid)) if uid else None
         if not u:
             # Tenant isolation defense-in-depth: if we can't resolve tenant for the requester, don't return it.

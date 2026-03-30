@@ -1,4 +1,5 @@
 import datetime
+import base64
 import json
 import secrets
 import string
@@ -46,6 +47,25 @@ async def _get_requester_role(authorization: Optional[str]) -> tuple[dict, Optio
         "app_users", f"select=tenant_id&user_id=eq.{quote(requester['id'], safe='')}&limit=1"
     )
     requester_tenant_id = requester_profiles[0].get("tenant_id") if requester_profiles else None
+
+    # For global_admin accounts, tenant_id might be NULL in app_users.
+    # In that case, fall back to decoding the tenant_id claim from the JWT.
+    if requester_tenant_id is None and authorization and authorization.lower().startswith("bearer "):
+        try:
+            token = authorization.split(" ", 1)[1]
+            parts = token.split(".")
+            if len(parts) >= 2:
+                payload_b64 = parts[1]
+                # Add base64 padding if required
+                payload_b64 += "=" * (-len(payload_b64) % 4)
+                payload_raw = base64.urlsafe_b64decode(payload_b64.encode("utf-8")).decode("utf-8")
+                payload = json.loads(payload_raw)
+                claim_tenant_id = payload.get("tenant_id")
+                if claim_tenant_id:
+                    requester_tenant_id = str(claim_tenant_id)
+        except Exception:
+            # Best-effort fallback; don't block admin flows.
+            pass
     return requester, requester_role, requester_tenant_id
 
 
@@ -97,7 +117,13 @@ async def _update_password_for_existing_user(
     return user
 
 
-async def _create_auth_user(email: str, password: str, full_name: Optional[str], role: str) -> dict:
+async def _create_auth_user(
+    email: str,
+    password: str,
+    full_name: Optional[str],
+    role: str,
+    user_metadata: Optional[dict] = None,
+) -> dict:
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             f"{SUPABASE_URL}/auth/v1/admin/users",
@@ -110,6 +136,7 @@ async def _create_auth_user(email: str, password: str, full_name: Optional[str],
                     "user_metadata": {
                         "full_name": full_name or "",
                         "requested_role": role,
+                        **(user_metadata or {}),
                     },
                 }
             ),
@@ -147,7 +174,79 @@ async def _finalize_user_creation(
 ) -> dict:
     """Create auth user + assign role + audit log. Returns user dict."""
     actual_password = password or _generate_temp_password()
-    user_data = await _create_auth_user(email, actual_password, full_name, role)
+
+    # Prepare onboarding metadata so the DB triggers can:
+    # - assign app_users.tenant_id + onboarding metadata (plan/device/profile)
+    # - create the initial devices row(s)
+    # - create an activated_models row for a default model (we intentionally omit default_model_id)
+    onboarding_metadata: dict = {}
+    if tenant_id:
+        try:
+            tenant_id_str = str(tenant_id)
+
+            tenants = await postgrest_get(
+                "tenants",
+                f"select=id,name,plan&is_active=eq.true&id=eq.{quote(tenant_id_str, safe='')}&limit=1",
+            )
+            tenant_row = tenants[0] if tenants else {}
+            tenant_name = tenant_row.get("name")
+            tenant_plan = tenant_row.get("plan")
+
+            # Device template:
+            # Prefer a device owned by the requester in this tenant; otherwise any device in the tenant.
+            devices_template = await postgrest_get(
+                "devices",
+                (
+                    "select=device_name,os_type,app_version,metadata"
+                    f"&tenant_id=eq.{quote(tenant_id_str, safe='')}"
+                    f"&registered_by=eq.{quote(str(requester_id), safe='')}"
+                    "&limit=1"
+                ),
+            )
+            if not devices_template:
+                devices_template = await postgrest_get(
+                    "devices",
+                    (
+                        "select=device_name,os_type,app_version,metadata"
+                        f"&tenant_id=eq.{quote(tenant_id_str, safe='')}"
+                        "&limit=1"
+                    ),
+                )
+
+            device_name: Optional[str] = None
+            device_profile: dict = {}
+            if devices_template:
+                d = devices_template[0] or {}
+                device_name = d.get("device_name")
+                md = d.get("metadata") or {}
+                device_profile_from_md = md.get("device_profile") if isinstance(md, dict) else None
+                if isinstance(device_profile_from_md, dict):
+                    device_profile = dict(device_profile_from_md)
+                # Ensure required keys exist for triggers.
+                device_profile["device_name"] = device_profile.get("device_name") or device_name
+                if not device_profile.get("os_name"):
+                    device_profile["os_name"] = d.get("os_type") or ""
+                if not device_profile.get("app_version"):
+                    device_profile["app_version"] = d.get("app_version") or ""
+
+            # Fallback if no device template exists.
+            if not device_name:
+                device_name = f"{tenant_name or 'TENANT'}_DEVICE"
+            device_profile.setdefault("device_name", device_name)
+            device_profile.setdefault("os_name", device_profile.get("os_name") or "")
+            device_profile.setdefault("app_version", device_profile.get("app_version") or "")
+
+            onboarding_metadata = {
+                "tenant_name": tenant_name,
+                "plan": tenant_plan,
+                "device_name": device_name,
+                "device_profile": device_profile,
+            }
+        except Exception:
+            # If onboarding metadata resolution fails, still create the user.
+            onboarding_metadata = {}
+
+    user_data = await _create_auth_user(email, actual_password, full_name, role, user_metadata=onboarding_metadata)
     if not user_data.get("id"):
         raise HTTPException(status_code=500, detail="Auth user created without a valid user id")
     inherited_models_count = 0
@@ -166,15 +265,36 @@ async def _finalize_user_creation(
             except Exception:
                 pass
         if tenant_id:
-            await postgrest_patch(
-                "app_users",
-                f"user_id=eq.{quote(user_data['id'], safe='')}",
-                {"tenant_id": tenant_id},
-            )
+            # Trigger should already set tenant_id based on tenant_name, but keep as a best-effort fix.
+            try:
+                await postgrest_patch(
+                    "app_users",
+                    f"user_id=eq.{quote(user_data['id'], safe='')}",
+                    {"tenant_id": tenant_id},
+                )
+            except Exception:
+                pass
+
+            # Ensure newly created devices (created by signup triggers) are in the intended tenant.
+            # Devices are looked up by tenant-scoped RLS, so tenant_id must align.
+            try:
+                await postgrest_patch(
+                    "devices",
+                    f"registered_by=eq.{quote(user_data['id'], safe='')}",
+                    {"tenant_id": tenant_id},
+                )
+            except Exception:
+                pass
         # Inherit tenant model access for the newly created user.
         # We copy distinct model assignments that already exist within the tenant.
         if tenant_id:
             try:
+                existing_models = await postgrest_get(
+                    "activated_models",
+                    f"select=model_id&user_id=eq.{quote(str(user_data['id']), safe='')}",
+                )
+                existing_model_ids = {str(r.get("model_id")) for r in (existing_models or []) if r.get("model_id")}
+
                 tenant_users = await postgrest_get(
                     "app_users",
                     f"select=user_id&tenant_id=eq.{quote(str(tenant_id), safe='')}",
@@ -195,17 +315,25 @@ async def _finalize_user_creation(
                             continue
                         if model_id in seen_model_ids:
                             continue
+                        if model_id in existing_model_ids:
+                            seen_model_ids.add(model_id)
+                            continue
                         seen_model_ids.add(model_id)
-                        await postgrest_insert(
-                            "activated_models",
-                            {
-                                "user_id": user_data["id"],
-                                "model_id": model_id,
-                                "model_name": model_name,
-                                "domain": domain,
-                            },
-                        )
-                        inherited_models_count += 1
+                        try:
+                            await postgrest_insert(
+                                "activated_models",
+                                {
+                                    "user_id": user_data["id"],
+                                    "model_id": model_id,
+                                    "model_name": model_name,
+                                    "domain": domain,
+                                },
+                            )
+                            existing_model_ids.add(model_id)
+                            inherited_models_count += 1
+                        except Exception:
+                            # Best-effort: don't block creation if a single model insert fails.
+                            continue
             except Exception:
                 # Best effort: user creation must not fail if model inheritance fails.
                 pass
@@ -425,36 +553,187 @@ async def admin_dashboard_stats(authorization: Optional[str] = Header(default=No
     if not requester_tenant_id:
         raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
 
+    def _iso_utc(dt: datetime.datetime) -> str:
+        # Supabase / PostgREST handles timestamptz in ISO-8601; keep UTC Z suffix.
+        return dt.astimezone(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    day_ago = now - datetime.timedelta(days=1)
+    two_days_ago = now - datetime.timedelta(days=2)
+    week_ago = now - datetime.timedelta(days=7)
+    thirty_days_from_now = now + datetime.timedelta(days=30)
+
+    tenant_id_str = str(requester_tenant_id)
+    tenant_id_q = quote(tenant_id_str, safe="")
+
+    # Tenant user ids (including admins), then exclude admin/global_admin for dashboard metrics.
+    tenant_users = await postgrest_get("app_users", f"select=user_id&tenant_id=eq.{tenant_id_q}")
+    tenant_user_ids = [str(row.get("user_id")) for row in (tenant_users or []) if row.get("user_id")]
+
+    if not tenant_user_ids:
+        return {
+            "total_devices": 0,
+            "online_devices": 0,
+            "offline_devices": 0,
+            "pending_approvals": 0,
+            "expiring_soon": 0,
+            "sync_failures": 0,
+            "total_models_assigned": 0,
+            "usage_today": 0,
+            "usage_yesterday": 0,
+            "devices_created_this_week": 0,
+        }
+
+    encoded_tenant_user_ids = ",".join(quote(uid, safe="") for uid in tenant_user_ids)
+    admin_role_rows = await postgrest_get(
+        "user_roles",
+        f"select=user_id,role&user_id=in.({encoded_tenant_user_ids})&role=in.(admin,global_admin)",
+    )
+    admin_user_ids = {str(r.get("user_id")) for r in (admin_role_rows or []) if r.get("user_id")}
+    non_admin_user_ids = [uid for uid in tenant_user_ids if uid not in admin_user_ids]
+
+    # Devices: include only devices registered by non-admin users (or unknown/NULL registrant).
     device_rows = await postgrest_get(
         "devices",
-        (
-            "select=id"
-            f"&tenant_id=eq.{quote(requester_tenant_id, safe='')}"
-        ),
+        f"select=id,status,registered_by,registered_at&tenant_id=eq.{tenant_id_q}",
     )
-    total_devices = len(device_rows or [])
+    included_device_rows: list[dict] = []
+    non_admin_user_id_set = set(non_admin_user_ids)
+    for d in device_rows or []:
+        registered_by = d.get("registered_by")
+        if registered_by is None:
+            included_device_rows.append(d)
+            continue
+        if str(registered_by) in non_admin_user_id_set:
+            included_device_rows.append(d)
 
-    tenant_users = await postgrest_get(
-        "app_users",
-        (
-            "select=user_id"
-            f"&tenant_id=eq.{quote(requester_tenant_id, safe='')}"
-        ),
-    )
-    tenant_user_ids = [str(row.get("user_id")) for row in tenant_users if row.get("user_id")]
+    total_devices = len(included_device_rows)
+    online_devices = sum(1 for d in included_device_rows if d.get("status") == "online")
+    offline_devices = sum(1 for d in included_device_rows if d.get("status") == "offline")
+    included_device_ids = [str(d.get("id")) for d in included_device_rows if d.get("id")]
 
+    devices_created_this_week = 0
+    for d in included_device_rows:
+        ra = d.get("registered_at")
+        if not isinstance(ra, str):
+            continue
+        try:
+            ra_dt = datetime.datetime.fromisoformat(ra.replace("Z", "+00:00"))
+            ra_dt = ra_dt.astimezone(datetime.timezone.utc)
+            if ra_dt >= week_ago:
+                devices_created_this_week += 1
+        except Exception:
+            # Best effort: if timestamp parsing fails, ignore that device.
+            continue
+
+    # Pending approvals: pod activation requests for tenant non-admin users only.
+    pending_approvals = 0
+    if non_admin_user_ids:
+        encoded_non_admin_user_ids = ",".join(quote(uid, safe="") for uid in non_admin_user_ids)
+        par_rows = await postgrest_get(
+            "pod_activation_requests",
+            (
+                f"select=id"
+                f"&tenant_id=eq.{tenant_id_q}"
+                f"&status=eq.pending"
+                f"&user_id=in.({encoded_non_admin_user_ids})"
+            ),
+        )
+        pending_approvals = len(par_rows or [])
+
+    # Expiring soon: device licenses for devices owned by tenant non-admin users only.
+    expiring_soon = 0
+    if included_device_ids:
+        encoded_device_ids = ",".join(quote(did, safe="") for did in included_device_ids)
+        now_iso = _iso_utc(now)
+        thirty_iso = _iso_utc(thirty_days_from_now)
+        license_rows = await postgrest_get(
+            "device_licenses",
+            (
+                f"select=id"
+                f"&device_id=in.({encoded_device_ids})"
+                f"&expires_at=not.is.null"
+                f"&expires_at=gte.{quote(now_iso, safe='')}"
+                f"&expires_at=lte.{quote(thirty_iso, safe='')}"
+            ),
+        )
+        expiring_soon = len(license_rows or [])
+
+    # Sync failures: failed sync logs in last 24h for non-admin owned devices.
+    sync_failures = 0
+    if included_device_ids:
+        encoded_device_ids = ",".join(quote(did, safe="") for did in included_device_ids)
+        day_ago_iso = _iso_utc(day_ago)
+        dsl_rows = await postgrest_get(
+            "device_sync_logs",
+            (
+                f"select=id"
+                f"&tenant_id=eq.{tenant_id_q}"
+                f"&status=eq.failed"
+                f"&created_at=gte.{quote(day_ago_iso, safe='')}"
+                f"&device_id=in.({encoded_device_ids})"
+            ),
+        )
+        sync_failures = len(dsl_rows or [])
+
+    # Models assigned: activated models for tenant non-admin users.
     total_models_assigned = 0
-    if tenant_user_ids:
-        encoded_user_ids = ",".join(quote(uid, safe="") for uid in tenant_user_ids)
+    if non_admin_user_ids:
+        encoded_non_admin_user_ids = ",".join(quote(uid, safe="") for uid in non_admin_user_ids)
         model_rows = await postgrest_get(
             "activated_models",
-            f"select=id&user_id=in.({encoded_user_ids})",
+            f"select=id&user_id=in.({encoded_non_admin_user_ids})",
         )
         total_models_assigned = len(model_rows or [])
 
+    # Usage today / yesterday: chat messages from conversations owned by tenant non-admin users.
+    usage_today = 0
+    usage_yesterday = 0
+    if non_admin_user_ids:
+        encoded_non_admin_user_ids = ",".join(quote(uid, safe="") for uid in non_admin_user_ids)
+        conv_rows = await postgrest_get(
+            "chat_conversations",
+            f"select=id&user_id=in.({encoded_non_admin_user_ids})",
+        )
+        conversation_ids = [str(r.get("id")) for r in (conv_rows or []) if r.get("id")]
+
+        if conversation_ids:
+            encoded_conversation_ids = ",".join(quote(cid, safe="") for cid in conversation_ids)
+            day_ago_iso = _iso_utc(day_ago)
+            two_days_ago_iso = _iso_utc(two_days_ago)
+
+            usage_today_rows = await postgrest_get(
+                "chat_messages",
+                (
+                    f"select=id"
+                    f"&conversation_id=in.({encoded_conversation_ids})"
+                    f"&created_at=gte.{quote(day_ago_iso, safe='')}"
+                ),
+            )
+            usage_today = len(usage_today_rows or [])
+
+            usage_yesterday_rows = await postgrest_get(
+                "chat_messages",
+                (
+                    f"select=id"
+                    f"&conversation_id=in.({encoded_conversation_ids})"
+                    f"&created_at=gte.{quote(two_days_ago_iso, safe='')}"
+                    f"&created_at=lt.{quote(day_ago_iso, safe='')}"
+                ),
+            )
+            usage_yesterday = len(usage_yesterday_rows or [])
+
     return {
         "total_devices": total_devices,
+        "online_devices": online_devices,
+        "offline_devices": offline_devices,
+        "pending_approvals": pending_approvals,
+        "expiring_soon": expiring_soon,
+        "sync_failures": sync_failures,
         "total_models_assigned": total_models_assigned,
+        "usage_today": usage_today,
+        "usage_yesterday": usage_yesterday,
+        "devices_created_this_week": devices_created_this_week,
     }
 
 

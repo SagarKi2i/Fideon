@@ -178,6 +178,7 @@ export function ModelAllocationSection() {
       toast({ title: 'Model Allocated', description: `${model.name} allocated successfully` });
       setSelectedModelId('');
       fetchAllocatedModels(selectedUserId);
+      window.dispatchEvent(new CustomEvent("dashboard-stats-refresh"));
     } catch (error) {
       console.error('Error allocating model:', error);
       toast({
@@ -206,6 +207,7 @@ export function ModelAllocationSection() {
 
       toast({ title: 'Model Removed', description: `${modelName} deallocated successfully` });
       fetchAllocatedModels(selectedUserId);
+      window.dispatchEvent(new CustomEvent("dashboard-stats-refresh"));
     } catch (error) {
       console.error('Error deallocating model:', error);
       toast({
