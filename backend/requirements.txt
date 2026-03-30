@@ -1,6 +1,8 @@
 # Single source of truth for backend dependencies.
 # Install with: pip install -r requirements.txt
 #
+# Docker API images use requirements.docker.txt + CPU PyTorch (see Dockerfile) to avoid multi-GB CUDA wheels.
+#
 # --- System packages (Ubuntu/Debian) ---
 # Install before pip packages when running OCR/PDF flows:
 # apt update && apt install -y \
