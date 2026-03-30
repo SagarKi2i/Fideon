@@ -72,3 +72,5 @@ jobs:
       component: frontend
       image_sha: ${{ github.sha }}
     secrets: inherit
+
+# demo: trigger pr checks

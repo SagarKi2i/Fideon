@@ -8,6 +8,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         curl \
+        tesseract-ocr \
+        tesseract-ocr-eng \
+        tesseract-ocr-hin \
+        tesseract-ocr-mar \
+        poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 1001 appuser \
@@ -19,7 +24,7 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir gunicorn uvicorn[standard]
+    && pip install --no-cache-dir gunicorn uvicorn[standard] pgvector
 
 COPY . .
 
