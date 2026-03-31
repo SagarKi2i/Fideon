@@ -27,6 +27,7 @@ type AcordExtractJobStatusResponse = {
 const LOG = "[acordWorkflowApi]";
 let _refreshInFlight: Promise<string | null> | null = null;
 const ACORD_STATUS_POLL_MS = 30_000;
+const ACORD_STATUS_TIMEOUT_MS = 30 * 60 * 1000;
 
 /** Returns true if the JWT access token's exp claim is in the past. */
 function isTokenExpired(accessToken: string): boolean {
@@ -156,7 +157,7 @@ export async function extractAcord(
     }
     return await syncResp.json();
   };
-  const deadline = Date.now() + 10 * 60 * 1000;
+  const deadline = Date.now() + ACORD_STATUS_TIMEOUT_MS;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, ACORD_STATUS_POLL_MS));
     // Refresh auth header for long-running jobs; initial token can expire mid-poll.
