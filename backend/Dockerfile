@@ -15,11 +15,13 @@ RUN groupadd --gid 1001 appuser \
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY requirements.docker.txt .
 
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir gunicorn uvicorn[standard]
+    && pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir -r requirements.docker.txt \
+    && pip install --no-cache-dir gunicorn uvicorn[standard] \
+    && rm -rf /root/.cache/pip
 
 COPY . .
 
