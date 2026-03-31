@@ -125,31 +125,25 @@ jobs:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Deploy container (Azure CLI — no Kudu)
-        uses: azure/cli@v2
+        shell: bash
         env:
-          # Must match Azure Login step so the container can read auth context,
-          # but also ensures the directory is clean for this run.
           AZURE_CONFIG_DIR: ${{ runner.temp }}/azure-config
-        with:
-          # Pin for reproducibility; avoid placeholder values.
-          azcliversion: 2.61.0
-          inlineScript: |
-            set -e
-            rm -rf "${AZURE_CONFIG_DIR:-}" 2>/dev/null || true
-            mkdir -p "${AZURE_CONFIG_DIR:-$HOME/.azure}"
-            az account set --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
-            APP="${{ steps.target.outputs.app }}"
-            RG="${{ vars.AZURE_RESOURCE_GROUP }}"
-            IMAGE="${{ inputs.acr_login_server }}/${{ inputs.component }}:${{ inputs.image_sha }}"
-            REG_URL="https://${{ inputs.acr_login_server }}"
-            echo "Setting container image: $IMAGE"
-            az webapp config container set \
-              --name "$APP" \
-              --resource-group "$RG" \
-              --container-image-name "$IMAGE" \
-              --container-registry-url "$REG_URL" \
-              --container-registry-user "${{ secrets.AZURE_CR_USERNAME }}" \
-              --container-registry-password "${{ secrets.AZURE_CR_PASSWORD }}"
+        run: |
+          set -e
+          mkdir -p "${AZURE_CONFIG_DIR:-$HOME/.azure}"
+          az account set --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
+          APP="${{ steps.target.outputs.app }}"
+          RG="${{ vars.AZURE_RESOURCE_GROUP }}"
+          IMAGE="${{ inputs.acr_login_server }}/${{ inputs.component }}:${{ inputs.image_sha }}"
+          REG_URL="https://${{ inputs.acr_login_server }}"
+          echo "Setting container image: $IMAGE"
+          az webapp config container set \
+            --name "$APP" \
+            --resource-group "$RG" \
+            --container-image-name "$IMAGE" \
+            --container-registry-url "$REG_URL" \
+            --container-registry-user "${{ secrets.AZURE_CR_USERNAME }}" \
+            --container-registry-password "${{ secrets.AZURE_CR_PASSWORD }}"
 
       - name: App Service settings & restart
         shell: bash
