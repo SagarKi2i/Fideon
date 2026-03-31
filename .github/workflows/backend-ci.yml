@@ -39,17 +39,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Docker build installs a large Python stack; reclaim runner disk so pip inside build doesn't hit ENOSPC.
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@v1.3.1
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          swap-storage: true
-
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
@@ -62,45 +51,20 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install --retries 5 --timeout 120 -r requirements.txt
-          pip install pytest pytest-cov flake8 pgvector
-
-      - name: AI runtime config import smoke test
-        working-directory: backend
-        run: |
-          python - <<'PY'
-          from app.core import config
-          assert isinstance(config.OPENAI_MODEL, str)
-          assert isinstance(config.GROQ_MODEL_CHAT, str)
-          assert isinstance(config.RUNPOD_ML_HEALTH_PATH, str)
-          print("AI runtime config import smoke test passed")
-          PY
+          pip install pytest pytest-cov flake8
 
       - name: Lint
         working-directory: backend
         continue-on-error: true
-        # Rules live in backend/.flake8 — keep CI and local runs aligned.
-        run: flake8 . --count --statistics
+        run: flake8 . --count --max-line-length=120 --extend-ignore=E501,F401 --per-file-ignores=app/llm_fallback/models.py:F811 --statistics
 
       - name: Test
         working-directory: backend
         run: |
           if find . -name "test_*.py" -o -name "*_test.py" | grep -q .; then
-            # fine_tuning/tests below import fine_tuning.acord125_pipeline, which is not in this tree (ML-Akshay layout mismatch); skip until backend test imports are fixed.
-            pytest --cov=. --cov-report=xml \
-              --ignore=fine_tuning/tests/test_clean_ocr.py \
-              --ignore=fine_tuning/tests/test_ocr_extract.py \
-              --ignore=fine_tuning/tests/test_postprocess.py
+            pytest --cov=. --cov-report=xml
           else
             echo "No test files found — skipping (non-blocking)"
-          fi
-
-      - name: AI dataset pipeline tests
-        working-directory: backend
-        run: |
-          if [ -f "fine_tuning/tests/test_multiform_dataset.py" ]; then
-            pytest -q fine_tuning/tests/test_multiform_dataset.py
-          else
-            echo "AI dataset test file not found — skipping"
           fi
 
       - name: SonarQube Scan

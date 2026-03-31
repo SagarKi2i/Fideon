@@ -19,7 +19,6 @@
 #
 # azure/login@v2: do not pass subscription-id (or client-id/tenant-id) together with creds — the
 # action ignores creds and then requires separate client-id/tenant-id/client-secret.
-# Note: no-op update to trigger fresh CI/CD runs.
 
 on:
   workflow_call:
@@ -48,7 +47,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
     environment: ${{ inputs.environment }}
     steps:
       - uses: actions/checkout@v4
@@ -118,59 +117,28 @@ jobs:
 
       - name: Azure Login
         uses: azure/login@v2
-        env:
-          # Avoid MSAL cache incompatibilities inside azure/cli container by using
-          # a fresh Azure config dir per workflow run.
-          AZURE_CONFIG_DIR: ${{ runner.temp }}/azure-config
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Azure preflight - subscription access
-        shell: bash
-        env:
-          SUB: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-        run: |
-          set -e
-          SUB_TRIM="$(echo "${SUB:-}" | tr -d '[:space:]')"
-          if [ -z "$SUB_TRIM" ]; then
-            echo "::error::AZURE_SUBSCRIPTION_ID is empty (Environment variable). Set it in GitHub -> Environments -> ${{ inputs.environment }} -> Variables."
-            exit 1
-          fi
-          echo "Checking Azure subscription access for subscriptionId=$SUB_TRIM"
-          # If the SP has no subscription access, this will be empty.
-          IDS="$(az account list --query "[].id" -o tsv 2>/dev/null || true)"
-          if [ -z "$IDS" ]; then
-            echo "::error::Azure login succeeded but returned zero subscriptions. The service principal likely has no RBAC role assignment on the subscription."
-            exit 1
-          fi
-          if ! echo "$IDS" | tr '\t' '\n' | grep -qx "$SUB_TRIM"; then
-            echo "::error::Configured AZURE_SUBSCRIPTION_ID is not accessible to this service principal."
-            echo "Available subscription IDs (from az account list):"
-            echo "$IDS" | tr '\t' '\n'
-            exit 1
-          fi
-          az account set --subscription "$SUB_TRIM"
-
       - name: Deploy container (Azure CLI — no Kudu)
-        shell: bash
-        env:
-          AZURE_CONFIG_DIR: ${{ runner.temp }}/azure-config
-        run: |
-          set -e
-          mkdir -p "${AZURE_CONFIG_DIR:-$HOME/.azure}"
-          az account set --subscription "$(echo "${{ vars.AZURE_SUBSCRIPTION_ID }}" | tr -d '[:space:]')"
-          APP="${{ steps.target.outputs.app }}"
-          RG="${{ vars.AZURE_RESOURCE_GROUP }}"
-          IMAGE="${{ inputs.acr_login_server }}/${{ inputs.component }}:${{ inputs.image_sha }}"
-          REG_URL="https://${{ inputs.acr_login_server }}"
-          echo "Setting container image: $IMAGE"
-          az webapp config container set \
-            --name "$APP" \
-            --resource-group "$RG" \
-            --container-image-name "$IMAGE" \
-            --container-registry-url "$REG_URL" \
-            --container-registry-user "${{ secrets.AZURE_CR_USERNAME }}" \
-            --container-registry-password "${{ secrets.AZURE_CR_PASSWORD }}"
+        uses: azure/cli@v2
+        with:
+          azcliversion: agentazcliversion
+          inlineScript: |
+            set -e
+            az account set --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
+            APP="${{ steps.target.outputs.app }}"
+            RG="${{ vars.AZURE_RESOURCE_GROUP }}"
+            IMAGE="${{ inputs.acr_login_server }}/${{ inputs.component }}:${{ inputs.image_sha }}"
+            REG_URL="https://${{ inputs.acr_login_server }}"
+            echo "Setting container image: $IMAGE"
+            az webapp config container set \
+              --name "$APP" \
+              --resource-group "$RG" \
+              --container-image-name "$IMAGE" \
+              --container-registry-url "$REG_URL" \
+              --container-registry-user "${{ secrets.AZURE_CR_USERNAME }}" \
+              --container-registry-password "${{ secrets.AZURE_CR_PASSWORD }}"
 
       - name: App Service settings & restart
         shell: bash
@@ -187,38 +155,6 @@ jobs:
           NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
           NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
           CORS_ALLOWED_ORIGINS: ${{ secrets.CORS_ALLOWED_ORIGINS }}
-          # AI/runtime provider and orchestration configuration (optional by design).
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          GROQ_MODEL_CHAT: ${{ secrets.GROQ_MODEL_CHAT }}
-          GROQ_MODEL_HELP: ${{ secrets.GROQ_MODEL_HELP }}
-          GROQ_MODEL_WORKFLOW: ${{ secrets.GROQ_MODEL_WORKFLOW }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CLAUDE_MODEL: ${{ secrets.CLAUDE_MODEL }}
-          HUGGINGFACE_API_KEY: ${{ secrets.HUGGINGFACE_API_KEY }}
-          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
-          FIDEON_SECRET_KEY: ${{ secrets.FIDEON_SECRET_KEY }}
-          RUNPOD_OPENAI_COMPAT_URL: ${{ secrets.RUNPOD_OPENAI_COMPAT_URL }}
-          RUNPOD_GENERATE_URL: ${{ secrets.RUNPOD_GENERATE_URL }}
-          RUNPOD_MODEL_LLAMA: ${{ secrets.RUNPOD_MODEL_LLAMA }}
-          RUNPOD_MODEL_MISTRAL: ${{ secrets.RUNPOD_MODEL_MISTRAL }}
-          RUNPOD_POD_ID: ${{ secrets.RUNPOD_POD_ID }}
-          RUNPOD_PROXY_BASE_URL: ${{ secrets.RUNPOD_PROXY_BASE_URL }}
-          RUNPOD_SSH_HOST: ${{ secrets.RUNPOD_SSH_HOST }}
-          RUNPOD_SSH_USER: ${{ secrets.RUNPOD_SSH_USER }}
-          RUNPOD_SSH_PORT: ${{ secrets.RUNPOD_SSH_PORT }}
-          RUNPOD_SSH_KEY_PATH: ${{ secrets.RUNPOD_SSH_KEY_PATH }}
-          RUNPOD_SSH_PRIVATE_KEY: ${{ secrets.RUNPOD_SSH_PRIVATE_KEY }}
-          RUNPOD_REMOTE_START_SCRIPT: ${{ secrets.RUNPOD_REMOTE_START_SCRIPT }}
-          RUNPOD_SSH_ENABLED: ${{ secrets.RUNPOD_SSH_ENABLED }}
-          OFFLINE_LLM_FALLBACK_ENABLED: ${{ secrets.OFFLINE_LLM_FALLBACK_ENABLED }}
-          LLM_CACHE_BACKEND: ${{ secrets.LLM_CACHE_BACKEND }}
-          MOMENTO_API_KEY: ${{ secrets.MOMENTO_API_KEY }}
-          LLM_SEMANTIC_CACHE_ENABLED: ${{ secrets.LLM_SEMANTIC_CACHE_ENABLED }}
-          PERSONAL_API_KEY_PEPPER: ${{ secrets.PERSONAL_API_KEY_PEPPER }}
         run: |
           set -e
           az account set --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
@@ -290,30 +226,6 @@ jobs:
             fi
           fi
 
-          # Sync optional AI settings if present in the environment secrets.
-          # This keeps current behavior intact while enabling AI runtime in production/staging/dev.
-          for key in \
-            OPENAI_API_KEY OPENAI_MODEL \
-            GROQ_API_KEY GROQ_MODEL_CHAT GROQ_MODEL_HELP GROQ_MODEL_WORKFLOW \
-            GEMINI_API_KEY GEMINI_MODEL \
-            ANTHROPIC_API_KEY CLAUDE_MODEL \
-            HUGGINGFACE_API_KEY \
-            RUNPOD_API_KEY FIDEON_SECRET_KEY RUNPOD_OPENAI_COMPAT_URL RUNPOD_GENERATE_URL \
-            RUNPOD_MODEL_LLAMA RUNPOD_MODEL_MISTRAL RUNPOD_POD_ID RUNPOD_PROXY_BASE_URL \
-            RUNPOD_SSH_HOST RUNPOD_SSH_USER RUNPOD_SSH_PORT RUNPOD_SSH_KEY_PATH RUNPOD_SSH_PRIVATE_KEY \
-            RUNPOD_REMOTE_START_SCRIPT RUNPOD_SSH_ENABLED OFFLINE_LLM_FALLBACK_ENABLED \
-            LLM_CACHE_BACKEND MOMENTO_API_KEY LLM_SEMANTIC_CACHE_ENABLED PERSONAL_API_KEY_PEPPER
-          do
-            value="${!key:-}"
-            if [ -n "$value" ]; then
-              SETTINGS+=("${key}=${value}")
-            fi
-          done
-
-          if [ -z "$OPENAI_API_KEY" ] && [ -z "$GROQ_API_KEY" ] && [ -z "$RUNPOD_API_KEY" ] && [ -z "$GEMINI_API_KEY" ] && [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "::warning::No AI provider/orchestrator secrets detected for backend deploy. Core API will run, but AI routes may fail until environment secrets are configured."
-          fi
-
           az webapp config appsettings set \
             --name "$APP" \
             --resource-group "$RG" \
@@ -338,9 +250,9 @@ jobs:
             exit 1
           fi
 
-          # Backend: larger image + gunicorn/spaCy/transformers cold start; allow ample warm-up.
+          # Backend: larger image + gunicorn/spaCy cold start; allow more time than frontend.
           if [ "$COMPONENT" = "backend" ]; then
-            ATTEMPTS=40
+            ATTEMPTS=18
             SLEEP_SEC=15
             CURL_MAX=25
           else
@@ -370,10 +282,7 @@ jobs:
           done
 
           # One non-fatal diagnostic (no -f): surface HTTP code or 000 if TCP/ TLS failed
-          HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" --max-time "$CURL_MAX" "$CURL_URL" 2>/dev/null)
-          if [ -z "$HTTP_CODE" ]; then
-            HTTP_CODE="000"
-          fi
+          HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" --max-time "$CURL_MAX" "$CURL_URL" 2>/dev/null || echo "000")
           echo "::error::Health check exhausted retries. Last HTTP status: ${HTTP_CODE} (000 = no response — container down, wrong port, or still starting). webapp=${TARGET_APP} component=${COMPONENT}"
           if [ "$COMPONENT" = "backend" ]; then
             echo "Hints: Azure Portal → App Service → Log stream / Container logs. Confirm WEBSITES_PORT=8080 and required app settings (DEVICE_JWT_SECRET, SUPABASE_*). Default probe is GET /health."
@@ -381,30 +290,3 @@ jobs:
             echo "Hints: Confirm WEBSITES_PORT=3000, image listens on 3000, and NEXT_PUBLIC_* synced from GitHub Environment if the app needs them at runtime."
           fi
           exit 1
-
-      - name: Backend deploy diagnostics (on failure)
-        if: failure() && inputs.component == 'backend'
-        shell: bash
-        env:
-          APP: ${{ steps.target.outputs.app }}
-          RG: ${{ vars.AZURE_RESOURCE_GROUP }}
-        run: |
-          set +e
-          az account set --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
-          echo "=== Web app state ==="
-          az webapp show --name "$APP" --resource-group "$RG" --query "{state:state, defaultHostName:defaultHostName, linuxFxVersion:siteConfig.linuxFxVersion}" -o table
-
-          echo "=== Runtime app settings presence ==="
-          az webapp config appsettings list --name "$APP" --resource-group "$RG" \
-            --query "[?name=='WEBSITES_PORT' || name=='DEVICE_JWT_SECRET' || name=='SUPABASE_URL' || name=='SUPABASE_SERVICE_ROLE_KEY' || name=='SUPABASE_ANON_KEY' || name=='CORS_ALLOWED_ORIGINS'].{name:name,hasValue:value != null && value != ''}" -o table
-
-          echo "=== Enable container logging (best effort; needed for tail) ==="
-          az webapp log config \
-            --name "$APP" \
-            --resource-group "$RG" \
-            --docker-container-logging filesystem \
-            --level information \
-            2>/dev/null || true
-
-          echo "=== Container logs (best effort) ==="
-          timeout 45s az webapp log tail --name "$APP" --resource-group "$RG" || true
