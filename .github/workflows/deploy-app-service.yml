@@ -82,7 +82,7 @@ jobs:
           if [ "$COMPONENT" = "frontend" ]; then
             APP="${{ vars.AZURE_WEBAPP_FRONTEND }}"
             CUSTOM_HEALTH="$HEALTH_URL_FE"
-            DEFAULT_HEALTH="https://${APP}.azurewebsites.net/"
+            DEFAULT_HEALTH="https://${APP}.azurewebsites.net/api/health"
           else
             APP="${{ vars.AZURE_WEBAPP_BACKEND }}"
             CUSTOM_HEALTH="$HEALTH_URL_BE"
@@ -266,7 +266,7 @@ jobs:
               # (env CURL_URL is often fully redacted when it matches a registered secret).
               if [ "$HEALTH_DISPLAY_AS_DEFAULT" = "true" ]; then
                 if [ "$COMPONENT" = "frontend" ]; then
-                  echo "Healthy: https://${TARGET_APP}.azurewebsites.net/"
+                  echo "Healthy: https://${TARGET_APP}.azurewebsites.net/api/health"
                 else
                   echo "Healthy: https://${TARGET_APP}.azurewebsites.net/health"
                 fi
