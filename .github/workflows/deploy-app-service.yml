@@ -123,7 +123,7 @@ jobs:
       - name: Deploy container (Azure CLI — no Kudu)
         uses: azure/cli@v2
         with:
-          azcliversion: agentazcliversion
+          azcliversion: 2.61.0
           inlineScript: |
             set -e
             az account set --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
@@ -282,7 +282,10 @@ jobs:
           done
 
           # One non-fatal diagnostic (no -f): surface HTTP code or 000 if TCP/ TLS failed
-          HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" --max-time "$CURL_MAX" "$CURL_URL" 2>/dev/null || echo "000")
+          HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" --max-time "$CURL_MAX" "$CURL_URL" 2>/dev/null)
+          if [ -z "$HTTP_CODE" ]; then
+            HTTP_CODE="000"
+          fi
           echo "::error::Health check exhausted retries. Last HTTP status: ${HTTP_CODE} (000 = no response — container down, wrong port, or still starting). webapp=${TARGET_APP} component=${COMPONENT}"
           if [ "$COMPONENT" = "backend" ]; then
             echo "Hints: Azure Portal → App Service → Log stream / Container logs. Confirm WEBSITES_PORT=8080 and required app settings (DEVICE_JWT_SECRET, SUPABASE_*). Default probe is GET /health."
@@ -305,7 +308,15 @@ jobs:
 
           echo "=== Runtime app settings presence ==="
           az webapp config appsettings list --name "$APP" --resource-group "$RG" \
-            --query "[?name=='WEBSITES_PORT' || name=='DEVICE_JWT_SECRET' || name=='SUPABASE_URL' || name=='SUPABASE_SERVICE_ROLE_KEY' || name=='SUPABASE_ANON_KEY' || name=='CORS_ALLOWED_ORIGINS'].{name:name,hasValue:length(value)>`0`}" -o table
+            --query "[?name=='WEBSITES_PORT' || name=='DEVICE_JWT_SECRET' || name=='SUPABASE_URL' || name=='SUPABASE_SERVICE_ROLE_KEY' || name=='SUPABASE_ANON_KEY' || name=='CORS_ALLOWED_ORIGINS'].{name:name,hasValue:value != null && value != ''}" -o table
+
+          echo "=== Enable container logging (best effort; needed for tail) ==="
+          az webapp log config \
+            --name "$APP" \
+            --resource-group "$RG" \
+            --docker-container-logging filesystem \
+            --level information \
+            2>/dev/null || true
 
           echo "=== Container logs (best effort) ==="
           timeout 45s az webapp log tail --name "$APP" --resource-group "$RG" || true
