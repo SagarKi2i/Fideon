@@ -19,6 +19,7 @@
 #
 # azure/login@v2: do not pass subscription-id (or client-id/tenant-id) together with creds — the
 # action ignores creds and then requires separate client-id/tenant-id/client-secret.
+# Note: no-op update to trigger fresh CI/CD runs.
 
 on:
   workflow_call:
