@@ -124,6 +124,32 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
+      - name: Azure preflight - subscription access
+        shell: bash
+        env:
+          SUB: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -e
+          SUB_TRIM="$(echo "${SUB:-}" | tr -d '[:space:]')"
+          if [ -z "$SUB_TRIM" ]; then
+            echo "::error::AZURE_SUBSCRIPTION_ID is empty (Environment variable). Set it in GitHub -> Environments -> ${{ inputs.environment }} -> Variables."
+            exit 1
+          fi
+          echo "Checking Azure subscription access for subscriptionId=$SUB_TRIM"
+          # If the SP has no subscription access, this will be empty.
+          IDS="$(az account list --query "[].id" -o tsv 2>/dev/null || true)"
+          if [ -z "$IDS" ]; then
+            echo "::error::Azure login succeeded but returned zero subscriptions. The service principal likely has no RBAC role assignment on the subscription."
+            exit 1
+          fi
+          if ! echo "$IDS" | tr '\t' '\n' | grep -qx "$SUB_TRIM"; then
+            echo "::error::Configured AZURE_SUBSCRIPTION_ID is not accessible to this service principal."
+            echo "Available subscription IDs (from az account list):"
+            echo "$IDS" | tr '\t' '\n'
+            exit 1
+          fi
+          az account set --subscription "$SUB_TRIM"
+
       - name: Deploy container (Azure CLI — no Kudu)
         shell: bash
         env:
@@ -131,7 +157,7 @@ jobs:
         run: |
           set -e
           mkdir -p "${AZURE_CONFIG_DIR:-$HOME/.azure}"
-          az account set --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
+          az account set --subscription "$(echo "${{ vars.AZURE_SUBSCRIPTION_ID }}" | tr -d '[:space:]')"
           APP="${{ steps.target.outputs.app }}"
           RG="${{ vars.AZURE_RESOURCE_GROUP }}"
           IMAGE="${{ inputs.acr_login_server }}/${{ inputs.component }}:${{ inputs.image_sha }}"
