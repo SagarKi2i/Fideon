@@ -59,6 +59,10 @@ class AcordExtractStartResponse(BaseModel):
 class AcordExtractJobStatusResponse(BaseModel):
     job_id: str
     status: str = Field(..., description="queued|running|succeeded|failed")
+    phase: Optional[str] = Field(
+        default=None,
+        description="queued|warming_model|generate_extracting|completed|failed",
+    )
     result: Optional[AcordExtractResponse] = None
     error: Optional[str] = None
 

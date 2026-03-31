@@ -1071,6 +1071,7 @@ async def _set_extract_job(job_id: str, patch: dict[str, Any]) -> None:
             f"job_id=eq.{quote(job_id, safe='')}",
             {
                 "status": persisted.get("status"),
+                "phase": persisted.get("phase"),
                 "error": persisted.get("error"),
                 "result": persisted.get("result"),
             },
@@ -1098,9 +1099,12 @@ async def _run_extract_job(
         content_type,
         form_type_hint,
     )
-    await _set_extract_job(job_id, {"status": "running"})
+    await _set_extract_job(job_id, {"status": "running", "phase": "warming_model"})
     try:
+        logger.info("ACORD[extract/job] phase=warming_model job_id=%s", job_id)
         await _ensure_runpod_ready_for_acord()
+        logger.info("ACORD[extract/job] phase=generate_extracting job_id=%s", job_id)
+        await _set_extract_job(job_id, {"status": "running", "phase": "generate_extracting"})
         upload = UploadFile(filename=filename, file=io.BytesIO(contents))
         resp = await _run_extract_and_persist(
             file=upload,
@@ -1108,13 +1112,16 @@ async def _run_extract_job(
             form_type_hint=form_type_hint,
             source_mime=content_type,
         )
-        await _set_extract_job(job_id, {"status": "succeeded", "result": resp.model_dump(mode="json"), "error": None})
+        await _set_extract_job(
+            job_id,
+            {"status": "succeeded", "phase": "completed", "result": resp.model_dump(mode="json"), "error": None},
+        )
         elapsed = round(asyncio.get_event_loop().time() - started_at, 2)
         logger.info("ACORD[extract/job] succeeded: job_id=%s elapsed_s=%s", job_id, elapsed)
     except Exception as exc:
         elapsed = round(asyncio.get_event_loop().time() - started_at, 2)
         logger.exception("ACORD[extract/job] failed: job_id=%s elapsed_s=%s", job_id, elapsed)
-        await _set_extract_job(job_id, {"status": "failed", "error": str(exc)[:2000]})
+        await _set_extract_job(job_id, {"status": "failed", "phase": "failed", "error": str(exc)[:2000]})
 
 
 @router.post("/parse", response_model=AcordFormSummary)
@@ -1220,6 +1227,7 @@ async def start_extract_acord_endpoint(
                 "job_id": job_id,
                 "user_id": str(user_id),
                 "status": "queued",
+                "phase": "queued",
                 "error": None,
                 "result": None,
             },
@@ -1236,6 +1244,7 @@ async def start_extract_acord_endpoint(
         {
             "job_id": job_id,
             "status": "queued",
+            "phase": "queued",
             "user_id": str(user_id),
             "error": None,
             "result": None,
@@ -1269,7 +1278,7 @@ async def get_extract_acord_status(
     try:
         rows = await postgrest_get(
             _EXTRACT_JOB_TABLE,
-            f"select=job_id,user_id,status,error,result&job_id=eq.{quote(job_id, safe='')}&limit=1",
+            f"select=job_id,user_id,status,phase,error,result&job_id=eq.{quote(job_id, safe='')}&limit=1",
         )
         if rows:
             row = rows[0]
@@ -1277,6 +1286,7 @@ async def get_extract_acord_status(
                 "job_id": row.get("job_id"),
                 "user_id": row.get("user_id"),
                 "status": row.get("status"),
+                "phase": row.get("phase"),
                 "error": row.get("error"),
                 "result": row.get("result"),
             }
@@ -1304,6 +1314,7 @@ async def get_extract_acord_status(
     return AcordExtractJobStatusResponse(
         job_id=job_id,
         status=str(job.get("status") or "queued"),
+        phase=(str(job.get("phase")) if job.get("phase") else None),
         result=(AcordExtractResponse(**result) if isinstance(result, dict) else None),
         error=(str(job.get("error")) if job.get("error") else None),
     )
