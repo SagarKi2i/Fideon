@@ -156,6 +156,38 @@ jobs:
           NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
           NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
           CORS_ALLOWED_ORIGINS: ${{ secrets.CORS_ALLOWED_ORIGINS }}
+          # AI/runtime provider and orchestration configuration (optional by design).
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL_CHAT: ${{ secrets.GROQ_MODEL_CHAT }}
+          GROQ_MODEL_HELP: ${{ secrets.GROQ_MODEL_HELP }}
+          GROQ_MODEL_WORKFLOW: ${{ secrets.GROQ_MODEL_WORKFLOW }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_MODEL: ${{ secrets.CLAUDE_MODEL }}
+          HUGGINGFACE_API_KEY: ${{ secrets.HUGGINGFACE_API_KEY }}
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          FIDEON_SECRET_KEY: ${{ secrets.FIDEON_SECRET_KEY }}
+          RUNPOD_OPENAI_COMPAT_URL: ${{ secrets.RUNPOD_OPENAI_COMPAT_URL }}
+          RUNPOD_GENERATE_URL: ${{ secrets.RUNPOD_GENERATE_URL }}
+          RUNPOD_MODEL_LLAMA: ${{ secrets.RUNPOD_MODEL_LLAMA }}
+          RUNPOD_MODEL_MISTRAL: ${{ secrets.RUNPOD_MODEL_MISTRAL }}
+          RUNPOD_POD_ID: ${{ secrets.RUNPOD_POD_ID }}
+          RUNPOD_PROXY_BASE_URL: ${{ secrets.RUNPOD_PROXY_BASE_URL }}
+          RUNPOD_SSH_HOST: ${{ secrets.RUNPOD_SSH_HOST }}
+          RUNPOD_SSH_USER: ${{ secrets.RUNPOD_SSH_USER }}
+          RUNPOD_SSH_PORT: ${{ secrets.RUNPOD_SSH_PORT }}
+          RUNPOD_SSH_KEY_PATH: ${{ secrets.RUNPOD_SSH_KEY_PATH }}
+          RUNPOD_SSH_PRIVATE_KEY: ${{ secrets.RUNPOD_SSH_PRIVATE_KEY }}
+          RUNPOD_REMOTE_START_SCRIPT: ${{ secrets.RUNPOD_REMOTE_START_SCRIPT }}
+          RUNPOD_SSH_ENABLED: ${{ secrets.RUNPOD_SSH_ENABLED }}
+          OFFLINE_LLM_FALLBACK_ENABLED: ${{ secrets.OFFLINE_LLM_FALLBACK_ENABLED }}
+          LLM_CACHE_BACKEND: ${{ secrets.LLM_CACHE_BACKEND }}
+          MOMENTO_API_KEY: ${{ secrets.MOMENTO_API_KEY }}
+          LLM_SEMANTIC_CACHE_ENABLED: ${{ secrets.LLM_SEMANTIC_CACHE_ENABLED }}
+          PERSONAL_API_KEY_PEPPER: ${{ secrets.PERSONAL_API_KEY_PEPPER }}
         run: |
           set -e
           az account set --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
@@ -225,6 +257,30 @@ jobs:
             if [ -n "$FE_APP" ]; then
               SETTINGS+=("CORS_ALLOWED_ORIGINS=https://${FE_APP}.azurewebsites.net,http://localhost:3000,http://localhost:3003")
             fi
+          fi
+
+          # Sync optional AI settings if present in the environment secrets.
+          # This keeps current behavior intact while enabling AI runtime in production/staging/dev.
+          for key in \
+            OPENAI_API_KEY OPENAI_MODEL \
+            GROQ_API_KEY GROQ_MODEL_CHAT GROQ_MODEL_HELP GROQ_MODEL_WORKFLOW \
+            GEMINI_API_KEY GEMINI_MODEL \
+            ANTHROPIC_API_KEY CLAUDE_MODEL \
+            HUGGINGFACE_API_KEY \
+            RUNPOD_API_KEY FIDEON_SECRET_KEY RUNPOD_OPENAI_COMPAT_URL RUNPOD_GENERATE_URL \
+            RUNPOD_MODEL_LLAMA RUNPOD_MODEL_MISTRAL RUNPOD_POD_ID RUNPOD_PROXY_BASE_URL \
+            RUNPOD_SSH_HOST RUNPOD_SSH_USER RUNPOD_SSH_PORT RUNPOD_SSH_KEY_PATH RUNPOD_SSH_PRIVATE_KEY \
+            RUNPOD_REMOTE_START_SCRIPT RUNPOD_SSH_ENABLED OFFLINE_LLM_FALLBACK_ENABLED \
+            LLM_CACHE_BACKEND MOMENTO_API_KEY LLM_SEMANTIC_CACHE_ENABLED PERSONAL_API_KEY_PEPPER
+          do
+            value="${!key:-}"
+            if [ -n "$value" ]; then
+              SETTINGS+=("${key}=${value}")
+            fi
+          done
+
+          if [ -z "$OPENAI_API_KEY" ] && [ -z "$GROQ_API_KEY" ] && [ -z "$RUNPOD_API_KEY" ] && [ -z "$GEMINI_API_KEY" ] && [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::warning::No AI provider/orchestrator secrets detected for backend deploy. Core API will run, but AI routes may fail until environment secrets are configured."
           fi
 
           az webapp config appsettings set \

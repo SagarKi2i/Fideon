@@ -64,6 +64,17 @@ jobs:
           pip install --retries 5 --timeout 120 -r requirements.txt
           pip install pytest pytest-cov flake8 pgvector
 
+      - name: AI runtime config import smoke test
+        working-directory: backend
+        run: |
+          python - <<'PY'
+          from app.core import config
+          assert isinstance(config.OPENAI_MODEL, str)
+          assert isinstance(config.GROQ_MODEL_CHAT, str)
+          assert isinstance(config.RUNPOD_ML_HEALTH_PATH, str)
+          print("AI runtime config import smoke test passed")
+          PY
+
       - name: Lint
         working-directory: backend
         continue-on-error: true
@@ -81,6 +92,15 @@ jobs:
               --ignore=fine_tuning/tests/test_postprocess.py
           else
             echo "No test files found — skipping (non-blocking)"
+          fi
+
+      - name: AI dataset pipeline tests
+        working-directory: backend
+        run: |
+          if [ -f "fine_tuning/tests/test_multiform_dataset.py" ]; then
+            pytest -q fine_tuning/tests/test_multiform_dataset.py
+          else
+            echo "AI dataset test file not found — skipping"
           fi
 
       - name: SonarQube Scan
