@@ -47,7 +47,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     environment: ${{ inputs.environment }}
     steps:
       - uses: actions/checkout@v4
@@ -123,7 +123,8 @@ jobs:
       - name: Deploy container (Azure CLI — no Kudu)
         uses: azure/cli@v2
         with:
-          azcliversion: agentazcliversion
+          # Pin for reproducibility; avoid placeholder values.
+          azcliversion: 2.61.0
           inlineScript: |
             set -e
             az account set --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
@@ -250,9 +251,9 @@ jobs:
             exit 1
           fi
 
-          # Backend: larger image + gunicorn/spaCy cold start; allow more time than frontend.
+          # Backend: larger image + gunicorn/spaCy/transformers cold start; allow ample warm-up.
           if [ "$COMPONENT" = "backend" ]; then
-            ATTEMPTS=18
+            ATTEMPTS=40
             SLEEP_SEC=15
             CURL_MAX=25
           else
@@ -282,7 +283,10 @@ jobs:
           done
 
           # One non-fatal diagnostic (no -f): surface HTTP code or 000 if TCP/ TLS failed
-          HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" --max-time "$CURL_MAX" "$CURL_URL" 2>/dev/null || echo "000")
+          HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" --max-time "$CURL_MAX" "$CURL_URL" 2>/dev/null)
+          if [ -z "$HTTP_CODE" ]; then
+            HTTP_CODE="000"
+          fi
           echo "::error::Health check exhausted retries. Last HTTP status: ${HTTP_CODE} (000 = no response — container down, wrong port, or still starting). webapp=${TARGET_APP} component=${COMPONENT}"
           if [ "$COMPONENT" = "backend" ]; then
             echo "Hints: Azure Portal → App Service → Log stream / Container logs. Confirm WEBSITES_PORT=8080 and required app settings (DEVICE_JWT_SECRET, SUPABASE_*). Default probe is GET /health."
@@ -290,3 +294,30 @@ jobs:
             echo "Hints: Confirm WEBSITES_PORT=3000, image listens on 3000, and NEXT_PUBLIC_* synced from GitHub Environment if the app needs them at runtime."
           fi
           exit 1
+
+      - name: Backend deploy diagnostics (on failure)
+        if: failure() && inputs.component == 'backend'
+        shell: bash
+        env:
+          APP: ${{ steps.target.outputs.app }}
+          RG: ${{ vars.AZURE_RESOURCE_GROUP }}
+        run: |
+          set +e
+          az account set --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
+          echo "=== Web app state ==="
+          az webapp show --name "$APP" --resource-group "$RG" --query "{state:state, defaultHostName:defaultHostName, linuxFxVersion:siteConfig.linuxFxVersion}" -o table
+
+          echo "=== Runtime app settings presence ==="
+          az webapp config appsettings list --name "$APP" --resource-group "$RG" \
+            --query "[?name=='WEBSITES_PORT' || name=='DEVICE_JWT_SECRET' || name=='SUPABASE_URL' || name=='SUPABASE_SERVICE_ROLE_KEY' || name=='SUPABASE_ANON_KEY' || name=='CORS_ALLOWED_ORIGINS'].{name:name,hasValue:value != null && value != ''}" -o table
+
+          echo "=== Enable container logging (best effort; needed for tail) ==="
+          az webapp log config \
+            --name "$APP" \
+            --resource-group "$RG" \
+            --docker-container-logging filesystem \
+            --level information \
+            2>/dev/null || true
+
+          echo "=== Container logs (best effort) ==="
+          timeout 45s az webapp log tail --name "$APP" --resource-group "$RG" || true

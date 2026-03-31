@@ -67,7 +67,8 @@ jobs:
       - name: Lint
         working-directory: backend
         continue-on-error: true
-        run: flake8 . --count --max-line-length=120 --extend-ignore=E501,F401 --per-file-ignores=app/llm_fallback/models.py:F811 --statistics
+        # Rules live in backend/.flake8 — keep CI and local runs aligned.
+        run: flake8 . --count --statistics
 
       - name: Test
         working-directory: backend

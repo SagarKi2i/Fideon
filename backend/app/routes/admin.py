@@ -11,6 +11,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 
 from app.core.config import SUPABASE_URL
 from app.core.supabase import (
+    admin_list_users,
     insert_audit_log,
     postgrest_get,
     postgrest_insert,

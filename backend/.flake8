@@ -1,0 +1,23 @@
+# Single source of truth for flake8 (local + CI). ML/LLM/fine_tuning trees are
+# intentionally relaxed: line length and style noise are not worth blocking deploys.
+[flake8]
+max-line-length = 120
+exclude =
+    .git,
+    .venv,
+    venv,
+    __pycache__,
+    *.egg-info,
+    build,
+    dist,
+    .eggs
+extend-ignore =
+    E501,
+    F401,
+    E203,
+    W391,
+    E302,
+    E402,
+    F841,
+per-file-ignores =
+    app/llm_fallback/models.py: F811
