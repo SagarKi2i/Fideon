@@ -26,6 +26,7 @@ type AcordExtractJobStatusResponse = {
 
 const LOG = "[acordWorkflowApi]";
 let _refreshInFlight: Promise<string | null> | null = null;
+const ACORD_STATUS_POLL_MS = 30_000;
 
 /** Returns true if the JWT access token's exp claim is in the past. */
 function isTokenExpired(accessToken: string): boolean {
@@ -142,12 +143,30 @@ export async function extractAcord(
   }
 
   const statusUrl = apiUrl(`/api/acord/extract/status/${encodeURIComponent(startPayload.job_id)}`);
+  const runSyncFallback = async (): Promise<AcordExtractResponse> => {
+    const syncUrl = formTypeHint
+      ? apiUrl(`/api/acord/extract?form_type_hint=${encodeURIComponent(formTypeHint)}`)
+      : apiUrl("/api/acord/extract");
+    const fallbackForm = new FormData();
+    fallbackForm.append("file", file);
+    const syncResp = await fetch(syncUrl, { method: "POST", headers, body: fallbackForm });
+    if (!syncResp.ok) {
+      const syncBody = await syncResp.text();
+      throw new Error(syncBody || `Extract failed (${syncResp.status})`);
+    }
+    return await syncResp.json();
+  };
   const deadline = Date.now() + 10 * 60 * 1000;
   while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await new Promise((resolve) => setTimeout(resolve, ACORD_STATUS_POLL_MS));
     const pollResp = await fetch(statusUrl, { headers });
     if (!pollResp.ok) {
       const body = await pollResp.text();
+      // Multi-instance/restart case: async job cache can be missing on this node.
+      // Fall back to sync extraction to avoid a hard user-facing failure.
+      if (pollResp.status === 404 && /job not found/i.test(body)) {
+        return await runSyncFallback();
+      }
       throw new Error(body || `Extract status failed (${pollResp.status})`);
     }
     const st = await pollResp.json() as AcordExtractJobStatusResponse;

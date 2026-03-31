@@ -83,6 +83,7 @@ ACORD_POD_ID = os.getenv("ACORD_POD_ID", "acord_form_understanding")
 _POD_COLLECTION_CACHE: dict[str, str] = {}
 _EXTRACT_JOBS: dict[str, dict[str, Any]] = {}
 _EXTRACT_JOBS_LOCK = asyncio.Lock()
+_EXTRACT_JOB_TABLE = "acord_extract_jobs"
 
 configure_tesseract_runtime()
 
@@ -1047,15 +1048,30 @@ async def _run_extract_and_persist(
 
 
 async def _set_extract_job(job_id: str, patch: dict[str, Any]) -> None:
+    persisted: dict[str, Any] = {}
     async with _EXTRACT_JOBS_LOCK:
         cur = dict(_EXTRACT_JOBS.get(job_id) or {})
         cur.update(patch)
         _EXTRACT_JOBS[job_id] = cur
+        persisted = dict(cur)
         if len(_EXTRACT_JOBS) > 500:
             # Keep memory bounded for long-running processes.
             for old_id in list(_EXTRACT_JOBS.keys())[:100]:
                 if old_id != job_id:
                     _EXTRACT_JOBS.pop(old_id, None)
+    try:
+        await postgrest_patch(
+            _EXTRACT_JOB_TABLE,
+            f"job_id=eq.{quote(job_id, safe='')}",
+            {
+                "status": persisted.get("status"),
+                "error": persisted.get("error"),
+                "result": persisted.get("result"),
+            },
+        )
+    except Exception:
+        # Keep requests non-blocking if DB storage is temporarily unavailable.
+        logger.warning("ACORD[extract/job] db patch failed: job_id=%s", job_id)
 
 
 async def _run_extract_job(
@@ -1174,6 +1190,20 @@ async def start_extract_acord_endpoint(
             "result": None,
         },
     )
+    try:
+        await postgrest_insert(
+            _EXTRACT_JOB_TABLE,
+            {
+                "job_id": job_id,
+                "created_by": str(user_id),
+                "status": "queued",
+                "error": None,
+                "result": None,
+            },
+        )
+    except Exception:
+        # Keep async extraction available even if DB insert fails.
+        logger.warning("ACORD[extract/job] db insert failed: job_id=%s", job_id)
     asyncio.create_task(
         _run_extract_job(
             job_id=job_id,
@@ -1198,6 +1228,26 @@ async def get_extract_acord_status(
         raise HTTPException(status_code=401, detail="Unauthorized")
     async with _EXTRACT_JOBS_LOCK:
         job = dict(_EXTRACT_JOBS.get(job_id) or {})
+    if not job:
+        try:
+            rows = await postgrest_get(
+                _EXTRACT_JOB_TABLE,
+                f"select=job_id,created_by,status,error,result&job_id=eq.{quote(job_id, safe='')}&limit=1",
+            )
+            if rows:
+                row = rows[0]
+                job = {
+                    "job_id": row.get("job_id"),
+                    "user_id": row.get("created_by"),
+                    "status": row.get("status"),
+                    "error": row.get("error"),
+                    "result": row.get("result"),
+                }
+                # Re-warm local cache for subsequent polls.
+                async with _EXTRACT_JOBS_LOCK:
+                    _EXTRACT_JOBS[job_id] = dict(job)
+        except Exception:
+            logger.warning("ACORD[extract/job] db read failed: job_id=%s", job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if str(job.get("user_id") or "") != user_id:
