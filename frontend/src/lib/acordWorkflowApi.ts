@@ -159,7 +159,9 @@ export async function extractAcord(
   const deadline = Date.now() + 10 * 60 * 1000;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, ACORD_STATUS_POLL_MS));
-    const pollResp = await fetch(statusUrl, { headers });
+    // Refresh auth header for long-running jobs; initial token can expire mid-poll.
+    const pollHeaders = await authHeader();
+    const pollResp = await fetch(statusUrl, { headers: pollHeaders });
     if (!pollResp.ok) {
       const body = await pollResp.text();
       // Multi-instance/restart case: async job cache can be missing on this node.
