@@ -117,16 +117,26 @@ jobs:
 
       - name: Azure Login
         uses: azure/login@v2
+        env:
+          # Avoid MSAL cache incompatibilities inside azure/cli container by using
+          # a fresh Azure config dir per workflow run.
+          AZURE_CONFIG_DIR: ${{ runner.temp }}/azure-config
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Deploy container (Azure CLI — no Kudu)
         uses: azure/cli@v2
+        env:
+          # Must match Azure Login step so the container can read auth context,
+          # but also ensures the directory is clean for this run.
+          AZURE_CONFIG_DIR: ${{ runner.temp }}/azure-config
         with:
           # Pin for reproducibility; avoid placeholder values.
           azcliversion: 2.61.0
           inlineScript: |
             set -e
+            rm -rf "${AZURE_CONFIG_DIR:-}" 2>/dev/null || true
+            mkdir -p "${AZURE_CONFIG_DIR:-$HOME/.azure}"
             az account set --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
             APP="${{ steps.target.outputs.app }}"
             RG="${{ vars.AZURE_RESOURCE_GROUP }}"
