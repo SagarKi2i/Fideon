@@ -1,5 +1,7 @@
 export function getApiBaseUrl(): string {
-  const configured = (process.env.NEXT_PUBLIC_API_URL || "").trim();
+  const configuredRaw = (process.env.NEXT_PUBLIC_API_URL || "").trim();
+  // Normalize configured base URL so "/api/..." joins never produce "//api/...".
+  const configured = configuredRaw.replace(/\/+$/, "");
   const hasWindow = typeof window !== "undefined";
   const host = hasWindow ? window.location.hostname : "";
   const protocol = hasWindow ? window.location.protocol : "http:";
