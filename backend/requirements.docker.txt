@@ -50,3 +50,4 @@ pgvector
 # --- Inference (CPU); torch is preinstalled in Dockerfile ---
 transformers>=4.36.0
 huggingface-hub
+peft>=0.7.0
