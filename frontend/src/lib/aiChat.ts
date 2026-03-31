@@ -1,5 +1,6 @@
 import { supabase } from "@/integrations/supabase/client";
 import { buildApiRequestError, notAuthenticatedError, readJsonSafe } from "@/lib/httpErrors";
+import { getApiBaseUrl } from "@/lib/apiBaseUrl";
 
 type Message = { role: "user" | "assistant"; content: string };
 
@@ -82,7 +83,7 @@ export async function streamChat({
       throw notAuthenticatedError();
     }
 
-    const configuredApiUrl = (process.env.NEXT_PUBLIC_API_URL ?? "").trim();
+    const base = getApiBaseUrl();
     const vmHostApiUrl =
       typeof window !== "undefined"
         ? `${window.location.protocol}//${window.location.hostname}:8080`
@@ -90,7 +91,7 @@ export async function streamChat({
     const candidateUrls = Array.from(
       new Set(
         [
-          configuredApiUrl ? `${configuredApiUrl}/api/chat` : "",
+          `${base}/api/chat`,
           vmHostApiUrl ? `${vmHostApiUrl}/api/chat` : "",
           "/api/chat",
           "http://localhost:8080/api/chat",

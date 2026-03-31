@@ -8,6 +8,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         curl \
+        tesseract-ocr \
+        tesseract-ocr-eng \
+        tesseract-ocr-hin \
+        tesseract-ocr-mar \
+        poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 1001 appuser \
@@ -15,11 +20,13 @@ RUN groupadd --gid 1001 appuser \
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY requirements.docker.txt .
 
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir gunicorn uvicorn[standard]
+    && pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir -r requirements.docker.txt \
+    && pip install --no-cache-dir gunicorn uvicorn[standard] \
+    && rm -rf /root/.cache/pip
 
 COPY . .
 
@@ -32,5 +39,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
 
 EXPOSE 8080
 
-CMD ["gunicorn", "main:app", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "2", "--worker-class", "uvicorn.workers.UvicornWorker", "--access-logfile", "-", "--error-logfile", "-", "--log-level", "info"]
+CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "2", "--worker-class", "uvicorn.workers.UvicornWorker", "--access-logfile", "-", "--error-logfile", "-", "--log-level", "info"]
 

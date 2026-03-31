@@ -86,8 +86,20 @@ export function useUserRole() {
 
     fetchUserRole();
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_, session) => {
-      setUser(session?.user ?? null);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      // Keep user during transient auth churn. Only clear on explicit terminal events.
+      if (!session?.user) {
+        if (event === "SIGNED_OUT") {
+          setUser(null);
+          setRole(null);
+          setLoading(false);
+          return;
+        }
+        // For INITIAL_SESSION/TOKEN_REFRESH_FAILED/etc, preserve current user state.
+        fetchUserRole();
+        return;
+      }
+      setUser(session.user);
       fetchUserRole();
     });
 
