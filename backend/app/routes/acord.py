@@ -88,6 +88,12 @@ _EXTRACT_JOB_TABLE = "acord_extract_jobs"
 configure_tesseract_runtime()
 
 
+def _auth_debug_meta(authorization: str | None) -> dict[str, Any]:
+    has_auth = bool((authorization or "").strip())
+    is_bearer = bool((authorization or "").lower().startswith("bearer "))
+    return {"has_auth": has_auth, "is_bearer": is_bearer}
+
+
 async def _ensure_runpod_ready_for_acord() -> None:
     """
     Ensure RunPod pod is resumed and ML HTTP is ready before ACORD extraction.
@@ -1069,9 +1075,9 @@ async def _set_extract_job(job_id: str, patch: dict[str, Any]) -> None:
                 "result": persisted.get("result"),
             },
         )
-    except Exception:
-        # Keep requests non-blocking if DB storage is temporarily unavailable.
-        logger.warning("ACORD[extract/job] db patch failed: job_id=%s", job_id)
+    except Exception as exc:
+        # Keep requests non-blocking, but include reason for operators.
+        logger.warning("ACORD[extract/job] db patch failed: job_id=%s error=%s", job_id, exc)
 
 
 async def _run_extract_job(
@@ -1083,6 +1089,15 @@ async def _run_extract_job(
     contents: bytes,
     form_type_hint: Optional[str],
 ) -> None:
+    started_at = asyncio.get_event_loop().time()
+    logger.info(
+        "ACORD[extract/job] started: job_id=%s user_id=%s filename=%s content_type=%s form_type_hint=%s",
+        job_id,
+        user_id,
+        filename,
+        content_type,
+        form_type_hint,
+    )
     await _set_extract_job(job_id, {"status": "running"})
     try:
         await _ensure_runpod_ready_for_acord()
@@ -1094,8 +1109,11 @@ async def _run_extract_job(
             source_mime=content_type,
         )
         await _set_extract_job(job_id, {"status": "succeeded", "result": resp.model_dump(mode="json"), "error": None})
+        elapsed = round(asyncio.get_event_loop().time() - started_at, 2)
+        logger.info("ACORD[extract/job] succeeded: job_id=%s elapsed_s=%s", job_id, elapsed)
     except Exception as exc:
-        logger.exception("ACORD[extract/job] failed: job_id=%s", job_id)
+        elapsed = round(asyncio.get_event_loop().time() - started_at, 2)
+        logger.exception("ACORD[extract/job] failed: job_id=%s elapsed_s=%s", job_id, elapsed)
         await _set_extract_job(job_id, {"status": "failed", "error": str(exc)[:2000]})
 
 
@@ -1136,6 +1154,13 @@ async def extract_acord_endpoint(
     This is the workflow-aware version of `/api/acord/parse`.
     Pass `?form_type_hint=125` when the user has selected a form type in the UI.
     """
+    logger.info(
+        "ACORD[extract] request: filename=%s content_type=%s form_type_hint=%s auth=%s",
+        file.filename,
+        file.content_type,
+        form_type_hint,
+        _auth_debug_meta(authorization),
+    )
     user = await verify_user(authorization)
     user_id = user.get("id")
     if not user_id:
@@ -1170,6 +1195,13 @@ async def start_extract_acord_endpoint(
     Start asynchronous extraction and return immediately with a job_id.
     Frontend should poll /api/acord/extract/status/{job_id}.
     """
+    logger.info(
+        "ACORD[extract/start] request: filename=%s content_type=%s form_type_hint=%s auth=%s",
+        file.filename,
+        file.content_type,
+        form_type_hint,
+        _auth_debug_meta(authorization),
+    )
     user = await verify_user(authorization)
     user_id = user.get("id")
     if not user_id:
@@ -1180,6 +1212,25 @@ async def start_extract_acord_endpoint(
         raise HTTPException(status_code=400, detail="Empty file")
 
     job_id = str(uuid.uuid4())
+    logger.info("ACORD[extract/start] creating job: job_id=%s user_id=%s", job_id, user_id)
+    try:
+        await postgrest_insert(
+            _EXTRACT_JOB_TABLE,
+            {
+                "job_id": job_id,
+                "user_id": str(user_id),
+                "status": "queued",
+                "error": None,
+                "result": None,
+            },
+        )
+    except Exception as exc:
+        # DB persistence is required for cross-instance status reliability.
+        logger.exception("ACORD[extract/job] db insert failed: job_id=%s", job_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not persist async extraction job. Verify Supabase service config. ({exc})",
+        ) from exc
     await _set_extract_job(
         job_id,
         {
@@ -1190,20 +1241,6 @@ async def start_extract_acord_endpoint(
             "result": None,
         },
     )
-    try:
-        await postgrest_insert(
-            _EXTRACT_JOB_TABLE,
-            {
-                "job_id": job_id,
-                "created_by": str(user_id),
-                "status": "queued",
-                "error": None,
-                "result": None,
-            },
-        )
-    except Exception:
-        # Keep async extraction available even if DB insert fails.
-        logger.warning("ACORD[extract/job] db insert failed: job_id=%s", job_id)
     asyncio.create_task(
         _run_extract_job(
             job_id=job_id,
@@ -1214,6 +1251,7 @@ async def start_extract_acord_endpoint(
             form_type_hint=form_type_hint,
         )
     )
+    logger.info("ACORD[extract/start] queued job: job_id=%s", job_id)
     return AcordExtractStartResponse(job_id=job_id, status="queued")
 
 
@@ -1222,35 +1260,44 @@ async def get_extract_acord_status(
     job_id: str,
     authorization: str | None = Header(default=None),
 ):
+    logger.debug("ACORD[extract/status] request: job_id=%s auth=%s", job_id, _auth_debug_meta(authorization))
     user = await verify_user(authorization)
     user_id = str(user.get("id") or "")
     if not user_id:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    async with _EXTRACT_JOBS_LOCK:
-        job = dict(_EXTRACT_JOBS.get(job_id) or {})
+    job: dict[str, Any] = {}
+    try:
+        rows = await postgrest_get(
+            _EXTRACT_JOB_TABLE,
+            f"select=job_id,user_id,status,error,result&job_id=eq.{quote(job_id, safe='')}&limit=1",
+        )
+        if rows:
+            row = rows[0]
+            job = {
+                "job_id": row.get("job_id"),
+                "user_id": row.get("user_id"),
+                "status": row.get("status"),
+                "error": row.get("error"),
+                "result": row.get("result"),
+            }
+            # Re-warm local cache for subsequent polls.
+            async with _EXTRACT_JOBS_LOCK:
+                _EXTRACT_JOBS[job_id] = dict(job)
+    except Exception as exc:
+        logger.warning("ACORD[extract/job] db read failed: job_id=%s error=%s", job_id, exc)
     if not job:
-        try:
-            rows = await postgrest_get(
-                _EXTRACT_JOB_TABLE,
-                f"select=job_id,created_by,status,error,result&job_id=eq.{quote(job_id, safe='')}&limit=1",
-            )
-            if rows:
-                row = rows[0]
-                job = {
-                    "job_id": row.get("job_id"),
-                    "user_id": row.get("created_by"),
-                    "status": row.get("status"),
-                    "error": row.get("error"),
-                    "result": row.get("result"),
-                }
-                # Re-warm local cache for subsequent polls.
-                async with _EXTRACT_JOBS_LOCK:
-                    _EXTRACT_JOBS[job_id] = dict(job)
-        except Exception:
-            logger.warning("ACORD[extract/job] db read failed: job_id=%s", job_id)
+        async with _EXTRACT_JOBS_LOCK:
+            job = dict(_EXTRACT_JOBS.get(job_id) or {})
     if not job:
+        logger.warning("ACORD[extract/status] job not found: job_id=%s user_id=%s", job_id, user_id)
         raise HTTPException(status_code=404, detail="Job not found")
     if str(job.get("user_id") or "") != user_id:
+        logger.warning(
+            "ACORD[extract/status] forbidden: job_id=%s owner_user_id=%s requester_user_id=%s",
+            job_id,
+            job.get("user_id"),
+            user_id,
+        )
         raise HTTPException(status_code=403, detail="Forbidden")
 
     result = job.get("result")

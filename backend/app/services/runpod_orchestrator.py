@@ -110,10 +110,14 @@ def _graphql_headers() -> dict[str, str]:
 
 
 async def _graphql(body: dict[str, Any]) -> dict[str, Any]:
+    q = (body.get("query") or "").strip().splitlines()
+    q_head = (q[0].strip() if q else "")[:120]
+    log.debug("runpod.graphql_request", endpoint=RUNPOD_GRAPHQL, query_head=q_head)
     async with httpx.AsyncClient(timeout=60.0) as client:
         r = await client.post(RUNPOD_GRAPHQL, json=body, headers=_graphql_headers())
         r.raise_for_status()
         data = r.json()
+    log.debug("runpod.graphql_response", has_errors=bool(data.get("errors")), has_data=bool(data.get("data")))
     if data.get("errors"):
         raise HTTPException(status_code=502, detail=str(data["errors"]))
     return data
@@ -387,6 +391,16 @@ async def ensure_runpod_ml_ready() -> None:
             detail="RunPod proxy base URL not configured (RUNPOD_PROXY_BASE_URL or RUNPOD_GENERATE_URL)",
         )
 
+    log.info(
+        "runpod.ensure_ready.begin",
+        pod_id=RUNPOD_POD_ID,
+        proxy_base=base,
+        health_paths=_health_paths_from_config(),
+        ssh_enabled=bool(RUNPOD_SSH_ENABLED),
+        ssh_host_set=bool((RUNPOD_SSH_HOST or "").strip()),
+        api_key_set=bool((RUNPOD_API_KEY or "").strip()),
+    )
+
     # RunPod HTTPS URLs are typically https://{pod_id}-{port}.proxy.runpod.net — if the hostname
     # does not contain RUNPOD_POD_ID, probes hit the wrong pod (404 on /health).
     try:
@@ -478,4 +492,4 @@ async def ensure_runpod_ml_ready() -> None:
                 f"base={base} paths={health_paths!r}. Last probe: {last_probe}"
             ),
         )
-    log.info("runpod.ml_ready", paths=health_paths)
+    log.info("runpod.ensure_ready.done", pod_id=RUNPOD_POD_ID, proxy_base=base, paths=health_paths)

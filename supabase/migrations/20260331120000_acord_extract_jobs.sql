@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS public.acord_extract_jobs (
   job_id UUID PRIMARY KEY,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  created_by UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   status TEXT NOT NULL CHECK (status IN ('queued','running','succeeded','failed')),
   error TEXT,
   result JSONB
@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS public.acord_extract_jobs (
 ALTER TABLE public.acord_extract_jobs ADD COLUMN IF NOT EXISTS job_id UUID;
 ALTER TABLE public.acord_extract_jobs ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();
 ALTER TABLE public.acord_extract_jobs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
-ALTER TABLE public.acord_extract_jobs ADD COLUMN IF NOT EXISTS created_by UUID;
+ALTER TABLE public.acord_extract_jobs ADD COLUMN IF NOT EXISTS user_id UUID;
 ALTER TABLE public.acord_extract_jobs ADD COLUMN IF NOT EXISTS status TEXT;
 ALTER TABLE public.acord_extract_jobs ADD COLUMN IF NOT EXISTS error TEXT;
 ALTER TABLE public.acord_extract_jobs ADD COLUMN IF NOT EXISTS result JSONB;
@@ -37,12 +37,12 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1
     FROM pg_constraint
-    WHERE conname = 'acord_extract_jobs_created_by_fkey'
+    WHERE conname = 'acord_extract_jobs_user_id_fkey'
       AND conrelid = 'public.acord_extract_jobs'::regclass
   ) THEN
     ALTER TABLE public.acord_extract_jobs
-      ADD CONSTRAINT acord_extract_jobs_created_by_fkey
-      FOREIGN KEY (created_by) REFERENCES auth.users(id) ON DELETE CASCADE;
+      ADD CONSTRAINT acord_extract_jobs_user_id_fkey
+      FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
   END IF;
 END $$;
 
@@ -63,7 +63,7 @@ BEGIN
   END IF;
 END $$;
 
-CREATE INDEX IF NOT EXISTS idx_acord_extract_jobs_created_by ON public.acord_extract_jobs(created_by);
+CREATE INDEX IF NOT EXISTS idx_acord_extract_jobs_user_id ON public.acord_extract_jobs(user_id);
 CREATE INDEX IF NOT EXISTS idx_acord_extract_jobs_status ON public.acord_extract_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_acord_extract_jobs_created_at ON public.acord_extract_jobs(created_at DESC);
 
@@ -79,20 +79,20 @@ DROP POLICY IF EXISTS "Users can view own acord extract jobs" ON public.acord_ex
 CREATE POLICY "Users can view own acord extract jobs"
   ON public.acord_extract_jobs
   FOR SELECT
-  USING (auth.uid() = created_by);
+  USING (auth.uid() = user_id);
 
 DROP POLICY IF EXISTS "Users can insert own acord extract jobs" ON public.acord_extract_jobs;
 CREATE POLICY "Users can insert own acord extract jobs"
   ON public.acord_extract_jobs
   FOR INSERT
-  WITH CHECK (auth.uid() = created_by);
+  WITH CHECK (auth.uid() = user_id);
 
 DROP POLICY IF EXISTS "Users can update own acord extract jobs" ON public.acord_extract_jobs;
 CREATE POLICY "Users can update own acord extract jobs"
   ON public.acord_extract_jobs
   FOR UPDATE
-  USING (auth.uid() = created_by)
-  WITH CHECK (auth.uid() = created_by);
+  USING (auth.uid() = user_id)
+  WITH CHECK (auth.uid() = user_id);
 
 DROP POLICY IF EXISTS "Admins can manage acord extract jobs" ON public.acord_extract_jobs;
 CREATE POLICY "Admins can manage acord extract jobs"
