@@ -112,19 +112,34 @@ export function Layout({ children }: LayoutProps) {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       (event, session) => {
         setUser(session?.user ?? null);
-        if (!session?.user && event !== 'INITIAL_SESSION') {
+        // Avoid forcing logout on TOKEN_REFRESH_FAILED during brief network/proxy blips.
+        // Signed-out is the real terminal state.
+        // USER_DELETED exists at runtime but may be missing from AuthChangeEvent typings in some @supabase/supabase-js versions.
+        if (
+          !session?.user &&
+          (event === "SIGNED_OUT" || (event as string) === "USER_DELETED")
+        ) {
           navigate("/auth");
         }
       }
     );
 
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (!session) {
-        navigate("/auth");
-      } else {
+    supabase.auth
+      .getSession()
+      .then(({ data: { session } }) => {
+        if (!session) {
+          // If session isn't available immediately (e.g. refresh in-flight),
+          // don't hard-redirect; allow ProtectedRoute/useUserRole to decide.
+          // This prevents a "logout after 4-5 seconds" UX regression.
+          setUser(null);
+          return;
+        }
         setUser(session.user);
-      }
-    });
+      })
+      .catch(() => {
+        // Rare: auth storage / lock races; avoid crashing the layout.
+        setUser(null);
+      });
 
     return () => subscription.unsubscribe();
   }, [navigate]);
@@ -185,6 +200,7 @@ export function Layout({ children }: LayoutProps) {
   const pathSegments = location.pathname.split("/").filter(Boolean);
   const routeLabelMap: Record<string, string> = {
     admin: "Admin Dashboard",
+    "acord-queue": "Training Review",
     users: "Users",
     devices: "Devices",
     pending: "Pending Approvals",

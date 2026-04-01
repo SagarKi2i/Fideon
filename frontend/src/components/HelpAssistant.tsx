@@ -6,6 +6,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
+import { getApiBaseUrl } from "@/lib/apiBaseUrl";
 
 interface Message {
   id: string;
@@ -36,10 +37,11 @@ function normalizeSseLine(line: string): string | null {
   return normalizedLine.slice(6).trim();
 }
 
-function getHelpAssistantUrls(configuredApiUrl: string, vmHostApiUrl: string): string[] {
+function getHelpAssistantUrls(vmHostApiUrl: string): string[] {
+  const base = getApiBaseUrl();
   return Array.from(
     new Set([
-      configuredApiUrl ? `${configuredApiUrl}/api/help-assistant` : "",
+      `${base}/api/help-assistant`,
       vmHostApiUrl ? `${vmHostApiUrl}/api/help-assistant` : "",
       "/api/help-assistant",
       "http://localhost:8080/api/help-assistant",
@@ -102,12 +104,11 @@ export function HelpAssistant() {
     let assistantContent = "";
 
     try {
-      const configuredApiUrl = (process.env.NEXT_PUBLIC_API_URL ?? "").trim();
       const vmHostApiUrl =
         typeof window !== "undefined"
           ? `${window.location.protocol}//${window.location.hostname}:8080`
           : "";
-      const candidateUrls = getHelpAssistantUrls(configuredApiUrl, vmHostApiUrl);
+      const candidateUrls = getHelpAssistantUrls(vmHostApiUrl);
 
       const { data: { session } } = await supabase.auth.getSession();
       const bearerToken =
@@ -176,7 +177,8 @@ export function HelpAssistant() {
       console.error("Help assistant error:", error);
       toast({
         title: "Assistant unavailable",
-        description: "Unable to reach help service. Ensure backend is reachable on port 8080 (or set NEXT_PUBLIC_API_URL).",
+        description:
+          "Unable to reach help service. Set NEXT_PUBLIC_API_URL to your FastAPI base URL (e.g. RunPod https proxy) or run the backend locally.",
         variant: "destructive",
       });
       if (!assistantContent) {

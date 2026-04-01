@@ -46,6 +46,10 @@ DEVICE_JWT_SECRET = os.getenv("DEVICE_JWT_SECRET", "")
 CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000")
 TRUST_PROXY_HEADERS = _env_bool("TRUST_PROXY_HEADERS", default=False)
 LEGACY_DEVICE_TOKEN_APIS_ENABLED = _env_bool("LEGACY_DEVICE_TOKEN_APIS_ENABLED", default=False)
+# Mount POST /generate (app/routes/local_generate.py) for ACORD_USE_OFFLINE_LLM + OFFLINE_LLM_GENERATE_URL on same port.
+ENABLE_LOCAL_GENERATE = _env_bool("ENABLE_LOCAL_GENERATE", default=False)
+# If True, block startup until the local model is loaded (RunPod cold start; avoids first-request timeout).
+ENABLE_LOCAL_GENERATE_WARMUP = _env_bool("ENABLE_LOCAL_GENERATE_WARMUP", default=False)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_OPENAI_COMPAT_URL = os.getenv("GROQ_OPENAI_COMPAT_URL", "https://api.groq.com/openai/v1/chat/completions")
 GROQ_MODEL_CHAT = os.getenv("GROQ_MODEL_CHAT", DEFAULT_GROQ_MODEL)
@@ -63,6 +67,86 @@ RUNPOD_GENERATE_URL = os.getenv("RUNPOD_GENERATE_URL", "https://8e7k92f9vcuxzh-8
 RUNPOD_MODEL_LLAMA = os.getenv("RUNPOD_MODEL_LLAMA", "meta-llama/Meta-Llama-3.1-8B-Instruct")
 RUNPOD_MODEL_MISTRAL = os.getenv("RUNPOD_MODEL_MISTRAL", "mistralai/Mistral-7B-Instruct-v0.3")
 OFFLINE_LLM_FALLBACK_ENABLED = os.getenv("OFFLINE_LLM_FALLBACK_ENABLED", "false")
+# RunPod GraphQL (podResume / podStop / pod status). Uses RUNPOD_API_KEY as Bearer.
+RUNPOD_POD_ID = os.getenv("RUNPOD_POD_ID", "").strip()
+# Optional: ML server origin for health checks. If empty, derived from RUNPOD_GENERATE_URL (strip /generate).
+RUNPOD_PROXY_BASE_URL = os.getenv("RUNPOD_PROXY_BASE_URL", "").strip()
+# Aliases (e.g. llm-gateway): POD_ID, PROXY_URL
+if not RUNPOD_POD_ID:
+    RUNPOD_POD_ID = (os.getenv("POD_ID") or "").strip()
+if not RUNPOD_PROXY_BASE_URL:
+    RUNPOD_PROXY_BASE_URL = (os.getenv("PROXY_URL") or "").strip().rstrip("/")
+
+
+def runpod_proxy_base_url() -> str:
+    """HTTPS origin for the RunPod-exposed ML HTTP port, no trailing slash, no /generate path."""
+    explicit = RUNPOD_PROXY_BASE_URL.strip().rstrip("/")
+    if explicit:
+        return explicit
+    gen = (RUNPOD_GENERATE_URL or "").strip().rstrip("/")
+    if gen.endswith("/generate"):
+        return gen[: -len("/generate")]
+    return gen
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+# SSH: optional — if RUNPOD_SSH_HOST is set, orchestrator runs RUNPOD_REMOTE_START_SCRIPT on the pod.
+# Prefer RUNPOD_*; aliases SSH_HOST, SSH_PORT, SSH_USER, SSH_KEY_PATH (control_server / llm-gateway style).
+RUNPOD_SSH_HOST = os.getenv("RUNPOD_SSH_HOST", "").strip()
+RUNPOD_SSH_USER = (os.getenv("RUNPOD_SSH_USER") or os.getenv("SSH_USER") or "root").strip() or "root"
+_ssh_port_raw = (os.getenv("RUNPOD_SSH_PORT") or os.getenv("SSH_PORT") or "").strip()
+RUNPOD_SSH_PORT = int(_ssh_port_raw) if _ssh_port_raw else 22
+RUNPOD_SSH_KEY_PATH = (os.getenv("RUNPOD_SSH_KEY_PATH") or os.getenv("SSH_KEY_PATH") or "").strip()
+# PEM body (BEGIN … END …). Use in production instead of a local file path. Set via platform secret manager.
+RUNPOD_SSH_PRIVATE_KEY = (os.getenv("RUNPOD_SSH_PRIVATE_KEY") or os.getenv("SSH_PRIVATE_KEY") or "").strip()
+if not RUNPOD_SSH_HOST:
+    RUNPOD_SSH_HOST = (os.getenv("SSH_HOST") or "").strip()
+RUNPOD_REMOTE_START_SCRIPT = os.getenv("RUNPOD_REMOTE_START_SCRIPT", "/workspace/start_backend.sh").strip()
+# When false, orchestrator never runs SSH (even if RUNPOD_SSH_HOST is set). HTTP-first: GraphQL
+# resume + poll pod RUNNING + GET {proxy}{RUNPOD_ML_HEALTH_PATH} until 200.
+RUNPOD_SSH_ENABLED = _env_bool("RUNPOD_SSH_ENABLED", default=False)
+RUNPOD_SSH_MAX_RETRIES = _env_int("RUNPOD_SSH_MAX_RETRIES", 20)
+RUNPOD_SSH_RETRY_DELAY_SEC = _env_float("RUNPOD_SSH_RETRY_DELAY_SEC", 5.0)
+# After GraphQL reports RUNNING: optional extra wait before first ML HTTP check (proxy / GPU).
+RUNPOD_POST_RESUME_GRACE_SEC = _env_float("RUNPOD_POST_RESUME_GRACE_SEC", 45.0)
+# When ML HTTP is still down and SSH runs next: wait before Paramiko (sshd / port readiness).
+RUNPOD_PRE_SSH_DELAY_SEC = _env_float("RUNPOD_PRE_SSH_DELAY_SEC", 60.0)
+# Wait for ML HTTP readiness (GET {proxy}{RUNPOD_ML_HEALTH_PATH}) after pod RUNNING / optional SSH.
+RUNPOD_ML_READY_TIMEOUT_SEC = _env_float("RUNPOD_ML_READY_TIMEOUT_SEC", 600.0)
+# Path on ML server (Akshay backend) for document extract.
+RUNPOD_ML_ACORD_EXTRACT_PATH = os.getenv("RUNPOD_ML_ACORD_EXTRACT_PATH", "/api/acord/extract").strip()
+# Readiness GET path(s) on ML (comma-separated, tried in order). Prefer /health — always present on
+# this FastAPI app; /docs returns 404 if OpenAPI UI is disabled (common in some deploys).
+RUNPOD_ML_HEALTH_PATH = os.getenv(
+    "RUNPOD_ML_HEALTH_PATH",
+    "/health,/readyz,/docs,/openapi.json",
+).strip() or "/health"
+# Poll GraphQL until desiredStatus == RUNNING (after resume or cold start).
+RUNPOD_POD_RUNNING_TIMEOUT_SEC = _env_float("RUNPOD_POD_RUNNING_TIMEOUT_SEC", 300.0)
+RUNPOD_POD_RUNNING_POLL_INITIAL_SEC = _env_float("RUNPOD_POD_RUNNING_POLL_INITIAL_SEC", 3.0)
+RUNPOD_POD_RUNNING_POLL_MAX_SEC = _env_float("RUNPOD_POD_RUNNING_POLL_MAX_SEC", 20.0)
+# Exponential backoff between HTTP readiness checks toward the ML server.
+RUNPOD_ML_HEALTH_POLL_INITIAL_SEC = _env_float("RUNPOD_ML_HEALTH_POLL_INITIAL_SEC", 2.0)
+RUNPOD_ML_HEALTH_BACKOFF_MAX_SEC = _env_float("RUNPOD_ML_HEALTH_BACKOFF_MAX_SEC", 30.0)
 
 # Gemini
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
@@ -95,3 +179,4 @@ LLM_SEMANTIC_CACHE_ENABLED = os.getenv("LLM_SEMANTIC_CACHE_ENABLED", "false")
 # Optional pepper used when hashing personal API keys.
 # Keep this value stable across deploys so existing key hashes remain valid.
 PERSONAL_API_KEY_PEPPER = os.getenv("PERSONAL_API_KEY_PEPPER", "")
+
