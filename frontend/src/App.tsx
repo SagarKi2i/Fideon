@@ -33,8 +33,8 @@ import ReviewQueue from "./app-pages/ReviewQueue";
 import Activity from "./app-pages/Activity";
 import DeviceLinkConfirm from "./app-pages/DeviceLinkConfirm";
 import Users from "./app-pages/Users";
-
-
+import AdminAcordQueue from "./app-pages/AdminAcordQueue";
+import AdminAcordReview from "./app-pages/AdminAcordReview";
 
 const queryClient = new QueryClient();
 
@@ -101,6 +101,16 @@ const App = () => (
                   <Route path="/users" element={
                     <ProtectedRoute requireAdmin>
                       <Users />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/admin/acord-queue" element={
+                    <ProtectedRoute requireAdmin>
+                      <AdminAcordQueue />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/admin/acord-queue/:runId" element={
+                    <ProtectedRoute requireAdmin>
+                      <AdminAcordReview />
                     </ProtectedRoute>
                   } />
                   <Route path="/devices/:id" element={

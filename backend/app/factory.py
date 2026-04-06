@@ -11,12 +11,18 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from app.core.config import CORS_ALLOWED_ORIGINS, DEVICE_JWT_SECRET
+from app.core.config import (
+    CORS_ALLOWED_ORIGINS,
+    DEVICE_JWT_SECRET,
+    ENABLE_LOCAL_GENERATE,
+    ENABLE_LOCAL_GENERATE_WARMUP,
+)
 from app.core.limiter import limiter
 
 from app.logger import setup_logging
 from app.routes.activity import router as activity_router
 from app.routes.admin import router as admin_router
+from app.routes.acord import router as acord_router
 from app.routes.chat import router as chat_router
 from app.routes.device import router as device_router
 from app.routes.decision_reviews import router as decision_reviews_router
@@ -25,6 +31,8 @@ from app.routes.health import router as health_router
 from app.routes.help_assistant import router as help_router
 from app.routes.pod_activation import router as pod_activation_router
 from app.routes.password_reset import router as password_reset_router
+from app.routes.ml_acord_proxy import router as ml_acord_proxy_router
+from app.routes.runpod_control import router as runpod_control_router
 from app.routes.settings import router as settings_router
 from app.routes.tenants import router as tenants_router
 from app.routes.workflow_ai import router as workflow_router
@@ -89,6 +97,10 @@ async def _lifespan(app: FastAPI):
             "Using SUPABASE_SERVICE_ROLE_KEY as a signing secret is not permitted "
             "because a compromised device token would grant service-role privileges."
         )
+    if ENABLE_LOCAL_GENERATE and ENABLE_LOCAL_GENERATE_WARMUP:
+        from app.routes.local_generate import startup_warmup
+
+        await startup_warmup()
     task = asyncio.create_task(_offline_detector_loop())
     log.info("startup.offline_detector_started", interval_s=_HEARTBEAT_INTERVAL, threshold_s=_OFFLINE_AFTER_SECONDS)
     yield
@@ -112,8 +124,10 @@ def create_app() -> FastAPI:
     # ports to avoid CORS failures when frontend runs on non-default ports.
     local_dev_origins = [
         "http://localhost:3000",
+        "http://localhost:3001",
         "http://localhost:3003",
         "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
         "http://127.0.0.1:3003",
     ]
     for origin in local_dev_origins:
@@ -132,6 +146,7 @@ def create_app() -> FastAPI:
     app.include_router(chat_router)
     app.include_router(help_router)
     app.include_router(workflow_router)
+    app.include_router(acord_router)
     app.include_router(device_router)
     app.include_router(decision_reviews_router)
     app.include_router(federated_router)
@@ -140,6 +155,22 @@ def create_app() -> FastAPI:
     app.include_router(password_reset_router)
     app.include_router(tenants_router)
     app.include_router(settings_router)
+    app.include_router(runpod_control_router)
+    app.include_router(ml_acord_proxy_router)
+
+    if ENABLE_LOCAL_GENERATE:
+        from app.routes.local_generate import router as local_generate_router
+
+        app.include_router(local_generate_router)
+
+    @app.get("/", include_in_schema=False)
+    async def root():
+        """Human-friendly root when opening the pod proxy URL; orchestrator probes use /health."""
+        return {
+            "service": "Fideon FastAPI Backend",
+            "health": "/health",
+            "docs": "/docs",
+        }
 
     # Configure structured logging and HTTP request audit logs
     setup_logging(app)

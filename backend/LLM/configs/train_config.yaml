@@ -1,0 +1,34 @@
+#
+# Training configuration for LoRA / QLoRA fine‑tuning.
+#
+# This file is intended to drive `training/train_lora.py`.
+#
+
+base_model: "Qwen/Qwen2.5-14B-Instruct"
+load_in_4bit: true
+
+domains:
+  - insurance
+  - banking
+  - legal
+  - healthcare
+  - travel
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - v_proj
+
+training:
+  batch_size: 4
+  learning_rate: 2e-4
+  num_epochs: 3
+  max_seq_length: 2048
+
+logging:
+  mlflow_experiment: "llm_rag_lora"
+  wandb_project: "llm-rag-lora"
+

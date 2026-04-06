@@ -4,11 +4,15 @@
   "private": true,
   "main": "dist/main.js",
   "scripts": {
-    "build": "tsc",
+    "postinstall": "node scripts/patch-next-electron-rsc.cjs",
+    "build": "tsc && node scripts/patch-next-electron-rsc.cjs",
     "start": "electron .",
     "dev": "npm run build && npm start",
+    "prepack": "node scripts/pre-dist.cjs",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder"
+    "predist": "node scripts/pre-dist.cjs",
+    "dist": "electron-builder",
+    "dist:full": "npm run --prefix ../frontend build && npm run build && npm run dist"
   },
   "devDependencies": {
     "@types/node": "^22.16.5",
@@ -18,10 +22,10 @@
   },
   "dependencies": {
     "dotenv": "^17.3.1",
-    "next": "14.2.35",
-    "react": "18.3.1",
-    "react-dom": "18.3.1",
-    "next-electron-rsc": "^0.3.0"
+    "next": "^14.2.32",
+    "next-electron-rsc": "^0.3.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
   },
   "build": {
     "appId": "com.fideon.os",
@@ -33,15 +37,17 @@
     },
     "files": [
       {
+        "from": ".",
+        "filter": [
+          "package.json"
+        ]
+      },
+      {
         "from": "dist",
         "to": "dist",
         "filter": [
           "**/*"
         ]
-      },
-      {
-        "from": "package.json",
-        "to": "package.json"
       },
       {
         "from": "../frontend/.next/standalone",
@@ -74,7 +80,8 @@
     ],
     "win": {
       "target": "nsis",
-      "icon": "build/icon-256.png"
+      "icon": "build/icon-256.png",
+      "signAndEditExecutable": false
     },
     "mac": {
       "target": "dmg",
@@ -85,6 +92,12 @@
         "AppImage"
       ],
       "icon": "build/icon-256.png"
-    }
+    },
+    "extraResources": [
+      {
+        "from": "build/icon-256.png",
+        "to": "icon-256.png"
+      }
+    ]
   }
 }

@@ -1,0 +1,18 @@
+[job] job_id=d15b9291-f958-4f6c-a9b5-d5df6cbbad23 run_id=e0d61417-6e0f-44da-8a7b-0db8dad068a0 started_at=2026-03-30T13:20:45.290360+00:00
+[env] cwd=D:\i2i Internship\Fideon Project\Fideon Main\backend
+[env] python=D:\i2i Internship\Fideon Project\Fideon Main\.venv\Scripts\python.exe
+[env] gpu=NVIDIA GeForce RTX 2050, 4096, 84, 0
+[cfg] config_path=fine_tuning/config.yaml
+[cfg] env.ACORD_TRAINING_MIN_RECORDS=19
+[cfg] env.FT_ACORD_HOLDOUT_EVAL_ENABLED=true
+[cfg] env.FT_ACORD_HOLDOUT_MIN=2
+[cfg] env.FT_ACORD_HOLDOUT_RATIO=0.10
+[cfg] env.FT_QUALITY_GATE_ENFORCE_ACORD=false
+[cfg] env.FT_ACORD_QG_REQUIRE_OOS=false
+[cfg] env.ACORD_EXPORT_AUGMENT_PROMPTS=true
+[cmd] D:\i2i Internship\Fideon Project\Fideon Main\.venv\Scripts\python.exe -m fine_tuning.export_approved_acord_dataset --limit 500 --out D:\i2i Internship\Fideon Project\Fideon Main\backend\fine_tuning\runs\acord_train_e0d61417-6e0f-44da-8a7b-0db8dad068a0.jsonl --holdout-out D:\i2i Internship\Fideon Project\Fideon Main\backend\fine_tuning\runs\acord_holdout_e0d61417-6e0f-44da-8a7b-0db8dad068a0.jsonl
+[cfg] base_model=/workspace/models/qwen2.5-14b-instruct local_files_only=True use_auth_token=False
+[cfg] evaluation.run_baseline_eval=False
+[cfg] output_dir=qwen25_vl72b_lora_adapter
+[cfg] training.num_epochs=10
+[train] epochs=10 lr=3e-05 lora_r=8 warmup=0.15 grad_accum=4 max_grad_norm=0.3

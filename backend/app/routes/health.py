@@ -35,6 +35,18 @@ async def healthy_alias():
     return {"ok": True}
 
 
+@router.get("/readyz")
+async def readyz():
+    """Kubernetes-style readiness; RunPod ML HTTP probes may use RUNPOD_ML_HEALTH_PATH=/readyz."""
+    return {"status": "ok"}
+
+
+@router.get("/livez")
+async def livez():
+    """Kubernetes-style liveness."""
+    return {"status": "ok"}
+
+
 def _is_enabled(value: str) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 

@@ -168,8 +168,10 @@ CREATE POLICY "Users can delete their own comparisons"
   USING (auth.uid() = user_id);
 
 -- Create storage bucket for documents
-INSERT INTO storage.buckets (id, name, public)
-VALUES ('documents', 'documents', false)
+-- Your VM's storage schema does not include a `public` column on `storage.buckets`
+-- (it has: id, name, owner, created_at, updated_at). Insert bucket without owner/public.
+INSERT INTO storage.buckets (id, name)
+VALUES ('documents', 'documents')
 ON CONFLICT (id) DO NOTHING;
 
 -- Storage policies for documents bucket
