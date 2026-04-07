@@ -36,6 +36,9 @@ def _load_local_env_file() -> None:
 _load_local_env_file()
 
 DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+# Default LLM model name used by legacy RAG helpers (LLM/rag/*).
+# Prefer the chat model env if provided, otherwise fall back to Groq default.
+DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "") or os.getenv("GROQ_MODEL_CHAT", "") or DEFAULT_GROQ_MODEL
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
@@ -109,6 +112,12 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+# Device online/offline tracking
+# Devices heartbeat every 60s. After N missed beats, a background sweep marks them offline.
+DEVICE_OFFLINE_DETECTOR_ENABLED = _env_bool("DEVICE_OFFLINE_DETECTOR_ENABLED", default=True)
+DEVICE_OFFLINE_AFTER_SECONDS = _env_float("DEVICE_OFFLINE_AFTER_SECONDS", default=180.0)
+DEVICE_OFFLINE_DETECTOR_POLL_SECONDS = _env_float("DEVICE_OFFLINE_DETECTOR_POLL_SECONDS", default=30.0)
+
 # SSH: optional — if RUNPOD_SSH_HOST is set, orchestrator runs RUNPOD_REMOTE_START_SCRIPT on the pod.
 # Prefer RUNPOD_*; aliases SSH_HOST, SSH_PORT, SSH_USER, SSH_KEY_PATH (control_server / llm-gateway style).
 RUNPOD_SSH_HOST = os.getenv("RUNPOD_SSH_HOST", "").strip()
@@ -157,6 +166,25 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_CHAT_COMPLETIONS_URL = os.getenv("OPENAI_CHAT_COMPLETIONS_URL", "https://api.openai.com/v1/chat/completions")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
+# Primary model name for structured extraction flows that are OpenAI-compatible.
+# Used by pod extraction and some ACORD pipelines as a fallback when OPENAI_MODEL
+# isn't explicitly configured.
+DEFAULT_PRIMARY_LLM_MODEL = (
+    os.getenv("DEFAULT_PRIMARY_LLM_MODEL", "").strip()
+    or (OPENAI_MODEL or "").strip()
+    or (DEFAULT_LLM_MODEL or "").strip()
+    or DEFAULT_GROQ_MODEL
+)
+
+# Offline / local model endpoint configuration (used by pod_extraction and some routes).
+OFFLINE_LLM_GENERATE_URL = os.getenv("OFFLINE_LLM_GENERATE_URL", "").strip()
+OFFLINE_LLM_AUTH_TOKEN = os.getenv("OFFLINE_LLM_AUTH_TOKEN", "").strip()
+OFFLINE_LLM_MODEL_NAME = os.getenv("OFFLINE_LLM_MODEL_NAME", "").strip()
+try:
+    OFFLINE_LLM_HTTP_TIMEOUT_SECONDS = float(os.getenv("OFFLINE_LLM_HTTP_TIMEOUT_SECONDS", "120").strip() or "120")
+except ValueError:
+    OFFLINE_LLM_HTTP_TIMEOUT_SECONDS = 120.0
+
 # Anthropic Claude
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MESSAGES_URL = os.getenv("ANTHROPIC_MESSAGES_URL", "https://api.anthropic.com/v1/messages")
@@ -179,4 +207,17 @@ LLM_SEMANTIC_CACHE_ENABLED = os.getenv("LLM_SEMANTIC_CACHE_ENABLED", "false")
 # Optional pepper used when hashing personal API keys.
 # Keep this value stable across deploys so existing key hashes remain valid.
 PERSONAL_API_KEY_PEPPER = os.getenv("PERSONAL_API_KEY_PEPPER", "")
+
+# Webhooks
+# Used to encrypt webhook signing secrets at rest in DB.
+# Must be a stable, high-entropy secret (recommended: 32 urlsafe base64 bytes).
+WEBHOOK_SECRET_ENCRYPTION_KEY = os.getenv("WEBHOOK_SECRET_ENCRYPTION_KEY", "").strip()
+WEBHOOK_WORKER_ENABLED = _env_bool("WEBHOOK_WORKER_ENABLED", default=True)
+WEBHOOK_MAX_ATTEMPTS = _env_int("WEBHOOK_MAX_ATTEMPTS", 3)
+WEBHOOK_RETRY_BASE_SECONDS = _env_float("WEBHOOK_RETRY_BASE_SECONDS", 2.0)
+WEBHOOK_RETRY_MAX_SECONDS = _env_float("WEBHOOK_RETRY_MAX_SECONDS", 60.0)
+
+# MLflow Tracking Server (REST API) — optional; used by /api/v1/model-registry/sync-mlflow
+MLFLOW_TRACKING_URI = (os.getenv("MLFLOW_TRACKING_URI") or "").strip().rstrip("/")
+MLFLOW_API_TOKEN = (os.getenv("MLFLOW_API_TOKEN") or "").strip()
 

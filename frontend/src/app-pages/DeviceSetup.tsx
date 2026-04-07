@@ -2,7 +2,6 @@ import { useState, useEffect } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
@@ -14,18 +13,15 @@ import {
   RefreshCw,
   Trash2,
   WifiOff,
-  Wifi
+  Wifi,
+  Copy
 } from "lucide-react";
 import {
   fetchDeviceModels,
   performDeviceCheckin,
-  getStoredDeviceToken,
-  setStoredDeviceToken,
-  clearStoredDeviceToken,
   getStoredDeviceJwt,
   setStoredDeviceJwt,
   clearStoredDeviceJwt,
-  registerDeviceV1,
   type DeviceModel,
 } from "@/lib/deviceApi";
 import {
@@ -37,10 +33,10 @@ import {
   type OllamaModel,
   type PullProgress,
 } from "@/lib/ollama";
+import { linkDeviceById } from "@/lib/deviceLinkApi";
 
 export default function DeviceSetup() {
   const { toast } = useToast();
-  const [deviceToken, setDeviceToken] = useState("");
   const [isConnected, setIsConnected] = useState(false);
   const [allocatedModels, setAllocatedModels] = useState<DeviceModel[]>([]);
   const [localModels, setLocalModels] = useState<OllamaModel[]>([]);
@@ -49,20 +45,18 @@ export default function DeviceSetup() {
   const [downloadProgress, setDownloadProgress] = useState<Record<string, PullProgress>>({});
   const [isElectronApp, setIsElectronApp] = useState(false);
   const [deviceJwt, setDeviceJwt] = useState("");
+  const [deviceId, setDeviceId] = useState<string | null>(null);
+  const [manualDisconnected, setManualDisconnected] = useState(false);
 
   useEffect(() => {
-    checkElectron();
-    const stored = getStoredDeviceToken();
+    void checkElectron();
     const storedJwt = getStoredDeviceJwt();
-    if (stored) {
-      setDeviceToken(stored);
-      if (storedJwt) {
-        setDeviceJwt(storedJwt);
-        setIsConnected(true);
-        loadDeviceModels(storedJwt);
-      }
+    if (storedJwt) {
+      setDeviceJwt(storedJwt);
+      setIsConnected(true);
+      void loadDeviceModels(storedJwt);
     }
-    checkOllama();
+    void checkOllama();
   }, []);
 
   // Background heartbeat: every 60s, report device + local model status to cloud.
@@ -89,6 +83,31 @@ export default function DeviceSetup() {
   const checkElectron = async () => {
     const result = await isElectron();
     setIsElectronApp(result);
+    if (manualDisconnected) return;
+    if (result && window.electron?.device?.getAuth) {
+      try {
+        const res = await window.electron.device.getAuth();
+        if (res?.success) {
+          setDeviceId(res.device_id ?? null);
+          if (res.device_jwt) {
+            setStoredDeviceJwt(res.device_jwt);
+            setDeviceJwt(res.device_jwt);
+            setIsConnected(true);
+            await loadDeviceModels(res.device_jwt);
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+    if (result && window.electron?.device?.getDeviceId && !deviceId) {
+      try {
+        const res = await window.electron.device.getDeviceId();
+        if (res?.success) setDeviceId(res.device_id ?? null);
+      } catch {
+        // ignore
+      }
+    }
   };
 
   const checkOllama = async () => {
@@ -100,55 +119,18 @@ export default function DeviceSetup() {
     }
   };
 
-  const handleConnect = async () => {
-    if (!deviceToken.trim()) {
-      toast({
-        title: "Error",
-        description: "Please enter a device token",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    setLoading(true);
-    try {
-      const reg = await registerDeviceV1({
-        device_token: deviceToken,
-        device_name: "Edge Device",
-        os_type: navigator.platform,
-        app_version: "1.0.0",
-      });
-      setStoredDeviceToken(deviceToken);
-      setStoredDeviceJwt(reg.device_token);
-      setDeviceJwt(reg.device_token);
-
-      await loadDeviceModels(reg.device_token);
-      setIsConnected(true);
-      toast({
-        title: "Connected",
-        description: "Successfully connected to Fideon OS",
-      });
-    } catch (error: any) {
-      toast({
-        title: "Connection Failed",
-        description: error.message,
-        variant: "destructive",
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const handleDisconnect = () => {
-    clearStoredDeviceToken();
     clearStoredDeviceJwt();
-    setDeviceToken("");
     setDeviceJwt("");
     setIsConnected(false);
     setAllocatedModels([]);
+    setManualDisconnected(true);
+    if (window.electron?.device?.clearAuth) {
+      void window.electron.device.clearAuth();
+    }
     toast({
       title: "Disconnected",
-      description: "Device token cleared",
+      description: "Device auth cleared. Click Refresh to re-connect.",
     });
   };
 
@@ -158,7 +140,35 @@ export default function DeviceSetup() {
   };
 
   const handleRefresh = async () => {
-    if (!deviceJwt) return;
+    if (!deviceJwt) {
+      setManualDisconnected(false);
+      if (window.electron?.device?.ensureAuth) {
+        try {
+          setLoading(true);
+          const res = await window.electron.device.ensureAuth();
+          if (res?.success && res.device_jwt) {
+            setStoredDeviceJwt(res.device_jwt);
+            setDeviceJwt(res.device_jwt);
+            setIsConnected(true);
+            if (res.device_id) setDeviceId(res.device_id);
+            await loadDeviceModels(res.device_jwt);
+          } else {
+            throw new Error(res?.error || "Could not register device");
+          }
+        } catch (e) {
+          toast({
+            title: "Reconnect failed",
+            description: e instanceof Error ? e.message : "Unknown error",
+            variant: "destructive",
+          });
+        } finally {
+          setLoading(false);
+        }
+        return;
+      }
+      await checkElectron();
+      return;
+    }
     setLoading(true);
     try {
       await loadDeviceModels(deviceJwt);
@@ -288,6 +298,67 @@ export default function DeviceSetup() {
         </p>
       </div>
 
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Monitor className="h-5 w-5" />
+            Link this device to your account
+          </CardTitle>
+          <CardDescription>
+            Link this device to your tenant using your current login session.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          <Label>Device ID</Label>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <Input value={deviceId ?? "Not registered yet"} readOnly className="font-mono text-xs" />
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!deviceId}
+              onClick={async () => {
+                if (!deviceId) return;
+                try {
+                  await navigator.clipboard.writeText(deviceId);
+                  toast({ title: "Copied", description: "Device ID copied to clipboard." });
+                } catch {
+                  toast({ title: "Copy failed", description: "Please copy manually.", variant: "destructive" });
+                }
+              }}
+            >
+              <Copy className="h-4 w-4 mr-2" />
+              Copy
+            </Button>
+            <Button
+              type="button"
+              className="bg-gradient-primary"
+              disabled={!deviceId || loading}
+              onClick={async () => {
+                if (!deviceId) return;
+                try {
+                  setLoading(true);
+                  await linkDeviceById(deviceId);
+                  toast({ title: "Device linked", description: "This device is now connected to your tenant." });
+                } catch (e) {
+                  toast({
+                    title: "Link failed",
+                    description: e instanceof Error ? e.message : "Unknown error",
+                    variant: "destructive",
+                  });
+                } finally {
+                  setLoading(false);
+                }
+              }}
+            >
+              Link now
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            If this shows “Not registered yet”, click Refresh below to register/reconnect, then link.
+          </p>
+        </CardContent>
+      </Card>
+
       {/* Connection Card */}
       <Card>
         <CardHeader>
@@ -296,52 +367,41 @@ export default function DeviceSetup() {
             Device Connection
           </CardTitle>
           <CardDescription>
-            Enter the device token from your admin dashboard to connect
+            This device auto-connects using its device JWT (no manual token needed).
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          {!isConnected ? (
-            <div className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="token">Device Token</Label>
-                <PasswordInput
-                  id="token"
-                  value={deviceToken}
-                  onChange={(e) => setDeviceToken(e.target.value)}
-                  placeholder="Enter your device token"
-                />
-              </div>
-              <Button onClick={handleConnect} disabled={loading}>
-                {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                Connect Device
-              </Button>
-            </div>
-          ) : (
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                {isConnected ? (
                   <Badge variant="default" className="bg-green-500">
                     <CheckCircle2 className="mr-1 h-3 w-3" />
                     Connected
                   </Badge>
-                  <span className="text-sm text-muted-foreground">
-                    {allocatedModels.length} model(s) allocated
-                  </span>
-                </div>
-                <div className="flex gap-2">
-                  <Button variant="outline" size="sm" onClick={handleRefresh} disabled={loading}>
-                    <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={handleSync} disabled={loading}>
-                    Sync Status
-                  </Button>
-                  <Button variant="destructive" size="sm" onClick={handleDisconnect}>
-                    Disconnect
-                  </Button>
-                </div>
+                ) : (
+                  <Badge variant="secondary">
+                    <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                    Connecting…
+                  </Badge>
+                )}
+                <span className="text-sm text-muted-foreground">
+                  {allocatedModels.length} model(s) allocated
+                </span>
+              </div>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={handleRefresh} disabled={loading}>
+                  <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+                </Button>
+                <Button variant="outline" size="sm" onClick={handleSync} disabled={loading || !deviceJwt}>
+                  Sync Status
+                </Button>
+                <Button variant="destructive" size="sm" onClick={handleDisconnect}>
+                  Disconnect
+                </Button>
               </div>
             </div>
-          )}
+          </div>
         </CardContent>
       </Card>
 

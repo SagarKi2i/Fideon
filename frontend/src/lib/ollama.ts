@@ -147,6 +147,18 @@ declare global {
       network: {
         checkStatus: () => Promise<{ online: boolean }>;
       };
+      device?: {
+        getDeviceId: () => Promise<{ success: boolean; device_id: string | null; error?: string }>;
+        getAuth?: () => Promise<{ success: boolean; device_id: string | null; device_jwt: string | null; error?: string }>;
+        clearAuth?: () => Promise<{ success: boolean; error?: string }>;
+        ensureAuth?: () => Promise<{ success: boolean; device_id?: string | null; device_jwt?: string | null; error?: string }>;
+      };
+      webhooks?: {
+        getReceiver: () => Promise<{ success: boolean; url?: string; error?: string }>;
+        setSigningSecret: (secret: string) => Promise<{ success: boolean; error?: string }>;
+        onEvent: (callback: (evt: any) => void) => void;
+        removeEventListener: () => void;
+      };
     };
   }
 }

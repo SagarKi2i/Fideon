@@ -1,11 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "standalone",
-  experimental: {
-    outputFileTracingIncludes: {
-      "*": ["public/**/*", ".next/static/**/*"],
-    },
-  },
   webpack: (config) => {
     config.resolve.alias = {
       ...(config.resolve.alias || {}),

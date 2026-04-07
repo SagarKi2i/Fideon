@@ -6,7 +6,7 @@ BACKEND = ROOT / "backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-from fine_tuning.acord125_pipeline.clean_ocr import clean_ocr_text, before_after_example
+from fine_tuning.acord_form_pipeline.clean_ocr import clean_ocr_text, before_after_example
 
 
 def test_removes_noise_and_normalizes_labels():

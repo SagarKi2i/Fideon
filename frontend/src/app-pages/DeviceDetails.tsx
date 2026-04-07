@@ -36,6 +36,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { formatDistanceToNow, format } from "date-fns";
+import { apiUrl } from "@/lib/apiBaseUrl";
 
 interface Device {
   id: string;
@@ -103,6 +104,42 @@ export default function DeviceDetails() {
     checkAccess();
   }, [id]);
 
+  // Live refresh: device status / last_seen_at / model sync updates.
+  useEffect(() => {
+    if (!id) return;
+
+    const channel = supabase
+      .channel(`device-details-live-${id}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "devices", filter: `id=eq.${id}` },
+        () => {
+          loadDeviceData();
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "device_models", filter: `device_id=eq.${id}` },
+        () => {
+          loadDeviceData();
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "device_sync_logs", filter: `device_id=eq.${id}` },
+        () => {
+          loadDeviceData();
+        },
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+    // loadDeviceData is stable enough here; we intentionally refresh on any change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
   const checkAccess = async () => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
@@ -116,14 +153,14 @@ export default function DeviceDetails() {
         .select("role")
         .eq("user_id", user.id);
 
-      const isAdmin = roles?.some(r => r.role === "admin");
+      const isAdmin = roles?.some(r => r.role === "admin" || r.role === "global_admin");
       if (!isAdmin) {
         toast({
           title: "Access Denied",
           description: "Only administrators can access device details",
           variant: "destructive",
         });
-        navigate("/devices");
+        navigate("/");
         return;
       }
 
@@ -138,48 +175,34 @@ export default function DeviceDetails() {
     if (!id) return;
 
     try {
-      const [deviceRes, modelsRes, syncLogsRes, usageLogsRes, availableModelsRes] =
-        await Promise.all([
-          supabase.from("devices").select("*").eq("id", id).maybeSingle(),
-          supabase
-            .from("device_models")
-            .select("*")
-            .eq("device_id", id)
-            .order("allocated_at", { ascending: false }),
-          supabase
-            .from("device_sync_logs")
-            .select("*")
-            .eq("device_id", id)
-            .order("created_at", { ascending: false })
-            .limit(50),
-          supabase
-            .from("device_usage_logs")
-            .select("*")
-            .eq("device_id", id)
-            .order("logged_at", { ascending: false })
-            .limit(50),
-          supabase
-            .from("activated_models")
-            .select("id, model_id, model_name, domain")
-            .limit(100),
-        ]);
-
-      if (deviceRes.error) throw deviceRes.error;
-      if (!deviceRes.data) {
-        toast({
-          title: "Not Found",
-          description: "Device not found",
-          variant: "destructive",
-        });
-        navigate("/devices");
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) {
+        navigate("/auth");
         return;
       }
 
-      setDevice(deviceRes.data as Device);
-      setAllocatedModels((modelsRes.data as DeviceModel[]) || []);
-      setSyncLogs((syncLogsRes.data as SyncLog[]) || []);
-      setUsageLogs((usageLogsRes.data as UsageLog[]) || []);
-      setAvailableModels((availableModelsRes.data as AvailableModel[]) || []);
+      const resp = await fetch(apiUrl(`/api/v1/admin/devices/${encodeURIComponent(id)}`), {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+        },
+      });
+      const payload = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        const msg = (payload as any)?.error || (payload as any)?.detail || `HTTP ${resp.status}`;
+        if (resp.status === 404) {
+          toast({ title: "Not Found", description: "Device not found", variant: "destructive" });
+          navigate("/devices");
+          return;
+        }
+        throw new Error(msg);
+      }
+
+      setDevice(((payload as any)?.device || null) as Device | null);
+      setAllocatedModels((((payload as any)?.device_models || []) as DeviceModel[]) || []);
+      setSyncLogs((((payload as any)?.sync_logs || []) as SyncLog[]) || []);
+      setUsageLogs((((payload as any)?.usage_logs || []) as UsageLog[]) || []);
+      setAvailableModels((((payload as any)?.available_models || []) as AvailableModel[]) || []);
     } catch (error: any) {
       console.error("Error loading device data:", error);
       toast({

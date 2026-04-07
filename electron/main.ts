@@ -14,10 +14,20 @@ import {
   runDeleteModel,
 } from "./ollama-backend";
 import { createHandler } from "next-electron-rsc";
+import {
+  ensureDeviceAuthAndStartHeartbeat,
+  ensureDeviceAuthAsync,
+  getStoredDeviceIdAsync,
+  getStoredDeviceJwtAsync,
+  getMachineId,
+  getMachineName,
+  clearStoredDeviceJwtAsync,
+} from "./device-client";
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
+let deviceHeartbeatStopper: (() => void) | null = null;
 
 const logPath = path.join(app.getPath("userData"), "fideon-main.log");
 function log(msg: string) {
@@ -36,6 +46,46 @@ function formatUnknownError(err: unknown): string {
   } catch {
     return String(err);
   }
+}
+
+async function waitForHttpReady(
+  url: string,
+  opts?: { timeoutMs?: number; perAttemptTimeoutMs?: number; minDelayMs?: number; maxDelayMs?: number },
+): Promise<{ ok: true; status?: number } | { ok: false; reason: string }> {
+  const timeoutMs = opts?.timeoutMs ?? 60_000;
+  const perAttemptTimeoutMs = opts?.perAttemptTimeoutMs ?? 2_500;
+  const minDelayMs = opts?.minDelayMs ?? 250;
+  const maxDelayMs = opts?.maxDelayMs ?? 2_000;
+
+  const startedAt = Date.now();
+  let attempt = 0;
+  let delayMs = minDelayMs;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    attempt += 1;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), perAttemptTimeoutMs);
+    try {
+      const res = await fetch(url, {
+        method: "GET",
+        signal: controller.signal,
+        // Avoid any caching/proxy weirdness in dev.
+        headers: { "cache-control": "no-cache" },
+      });
+      clearTimeout(timer);
+      return { ok: true, status: res.status };
+    } catch (err) {
+      clearTimeout(timer);
+      const elapsed = Date.now() - startedAt;
+      log(
+        `[main] waitForHttpReady attempt=${attempt} elapsedMs=${elapsed} url=${url} err=${formatUnknownError(err)}`,
+      );
+      await new Promise((r) => setTimeout(r, delayMs));
+      delayMs = Math.min(maxDelayMs, Math.floor(delayMs * 1.4));
+    }
+  }
+
+  return { ok: false, reason: `Timed out waiting for ${url} after ${timeoutMs}ms` };
 }
 
 // Only treat *packaged* builds as production.
@@ -217,6 +267,57 @@ async function createWindow() {
   log(`[main] loading startUrl=${startUrl}`);
 
   try {
+    if (isDev) {
+      // Hitting `/` on a Next dev server can block for a long time on the very first
+      // compile ("Compiling / ..."). Probe a fast static asset instead so Electron
+      // can reliably detect readiness.
+      let probeUrl = startUrl;
+      try {
+        const u = new URL(startUrl);
+        u.pathname = "/favicon.ico";
+        u.search = "";
+        u.hash = "";
+        probeUrl = u.toString();
+      } catch {
+        // If startUrl isn't a valid URL, fall back to probing the original.
+        probeUrl = startUrl;
+      }
+
+      const ready = await waitForHttpReady(probeUrl, {
+        timeoutMs: 120_000,
+        perAttemptTimeoutMs: 10_000,
+      });
+      if (!ready.ok) {
+        const html = `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Fideon OS — Dev server not ready</title>
+    <style>
+      body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 24px; }
+      code { background: #f3f4f6; padding: 2px 6px; border-radius: 6px; }
+      .box { border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; max-width: 860px; }
+      h1 { margin: 0 0 8px; font-size: 18px; }
+      p { margin: 8px 0; line-height: 1.4; }
+      .muted { color: #6b7280; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <div class="box">
+      <h1>Frontend dev server not reachable</h1>
+      <p>Electron is trying to load <code>${startUrl}</code> but it never responded.</p>
+      <p class="muted">Probe URL: <code>${probeUrl}</code></p>
+      <p>Start the frontend first (from <code>frontend/</code>): <code>npm run dev</code> or <code>npm run electron:dev</code>.</p>
+      <p class="muted">${ready.reason}</p>
+    </div>
+  </body>
+</html>`;
+        await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+        return;
+      }
+      log(`[main] dev startUrl reachable status=${String((ready as any).status)}`);
+    }
+
     await mainWindow.loadURL(startUrl);
     // Ensure the window is visible when Next finishes wiring up.
     mainWindow.show();
@@ -242,7 +343,22 @@ app.whenReady().then(async () => {
     await nextRsc.createInterceptor({ session: session.defaultSession });
   }
 
+  try {
+    const runner = await ensureDeviceAuthAndStartHeartbeat({ log, heartbeatSeconds: 60 });
+    deviceHeartbeatStopper = runner.stop;
+  } catch (err) {
+    log(`[device] ensureDeviceAuthAndStartHeartbeat failed: ${formatUnknownError(err)}`);
+  }
+
   await createWindow();
+});
+
+app.on("before-quit", () => {
+  try {
+    deviceHeartbeatStopper?.();
+  } catch {
+    // ignore
+  }
 });
 
 app.on("window-all-closed", () => {
@@ -285,6 +401,70 @@ ipcMain.handle("ollama:deleteModel", async (_event, modelName: string) =>
 
 // IPC: simple network status placeholder
 ipcMain.handle("network:checkStatus", async () => ({ online: true }));
+
+// IPC: device info for manual linking (Pattern 2)
+ipcMain.handle("device:getDeviceId", async () => {
+  try {
+    const id = await getStoredDeviceIdAsync();
+    return { success: true, device_id: id ?? null };
+  } catch (err) {
+    return { success: false, error: String(err) };
+  }
+});
+
+ipcMain.handle("device:getAuth", async () => {
+  try {
+    const [id, jwt] = await Promise.all([getStoredDeviceIdAsync(), getStoredDeviceJwtAsync()]);
+    return { success: true, device_id: id ?? null, device_jwt: jwt ?? null };
+  } catch (err) {
+    return { success: false, error: String(err) };
+  }
+});
+
+ipcMain.handle("device:clearAuth", async () => {
+  try {
+    try {
+      deviceHeartbeatStopper?.();
+    } catch {
+      // ignore
+    } finally {
+      deviceHeartbeatStopper = null;
+    }
+    await clearStoredDeviceJwtAsync();
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: String(err) };
+  }
+});
+
+ipcMain.handle("device:ensureAuth", async () => {
+  try {
+    const auth = await ensureDeviceAuthAsync({ log });
+    // Ensure heartbeat loop is running after an explicit reconnect.
+    try {
+      const runner = await ensureDeviceAuthAndStartHeartbeat({ log, heartbeatSeconds: 60 });
+      deviceHeartbeatStopper = runner.stop;
+    } catch (err) {
+      log(`[device] ensureDeviceAuthAndStartHeartbeat failed: ${formatUnknownError(err)}`);
+    }
+    return { success: true, device_id: auth.device_id, device_jwt: auth.device_jwt };
+  } catch (err) {
+    return { success: false, error: String(err) };
+  }
+});
+
+ipcMain.handle("device:getDeviceInfo", async () => {
+  try {
+    return {
+      success: true,
+      machineName: getMachineName(),
+      machineId: getMachineId(),
+      platform: process.platform,
+    };
+  } catch (err) {
+    return { success: false, error: String(err) };
+  }
+});
 
 // IPC: auto-launch placeholder using OS login items (where supported)
 ipcMain.handle("settings:getAutoLaunch", async () => {

@@ -29,6 +29,8 @@ import {
   listOllamaModels,
 } from "@/lib/ollama";
 import { extractAcord } from "@/lib/acordWorkflowApi";
+import { extractDocumentText } from "@/lib/documentText";
+import { buildPolicyComparisonPrompt } from "@/lib/policyComparisonPrompt";
 
 interface ActivatedModel {
   id: string;
@@ -168,6 +170,58 @@ export default function Playground() {
     setResult("");
 
     try {
+      // Policy comparison: extract doc text and force structured JSON output.
+      if (data?.type === "policy-comparison" && data?.policyAFile instanceof File && data?.policyBFile instanceof File) {
+        const docAFile: File = data.policyAFile;
+        const docBFile: File = data.policyBFile;
+
+        try {
+          const [docA, docB] = await Promise.all([extractDocumentText(docAFile), extractDocumentText(docBFile)]);
+          const prompt = buildPolicyComparisonPrompt({
+            docA,
+            docB,
+            deviationThresholdPercent: 10,
+          });
+
+          if (useLocalModel && isElectronApp) {
+            const ollamaModelName = getOllamaModelName("policy-comparison");
+            await generateWithOllama(
+              ollamaModelName,
+              prompt,
+              "You are a strict JSON generator. Output ONLY valid JSON.",
+              (chunk) => setResult((prev) => prev + chunk),
+            );
+            setIsRunning(false);
+            return;
+          }
+
+          await streamChat({
+            messages: [{ role: "user" as const, content: prompt }],
+            modelId: selectedModelData?.domain,
+            onDelta: (delta) => setResult((prev) => prev + delta),
+            onDone: () => setIsRunning(false),
+            onError: (error) => {
+              console.error("Streaming error:", error);
+              toast({
+                title: "Error",
+                description: typeof error === "string" ? error : "Failed to run policy comparison",
+                variant: "destructive",
+              });
+              setIsRunning(false);
+            },
+          });
+          return;
+        } catch (e: any) {
+          toast({
+            title: "Policy comparison failed",
+            description: e?.message ? String(e.message) : "Failed to compare documents",
+            variant: "destructive",
+          });
+          setIsRunning(false);
+          return;
+        }
+      }
+
       // ACORD: main backend orchestrates RunPod then proxies to ML /api/acord/extract
       if (data?.type === "acord-parser" && data.file instanceof File && !(useLocalModel && isElectronApp)) {
         const formTypeHint = String(data.formType ?? "125");
@@ -231,7 +285,7 @@ export default function Playground() {
         );
         
         setIsRunning(false);
-      } else if (isInsuranceModel) {
+      } else if (isInsuranceModel && selectedModel !== "policy-comparison") {
         // Use mock responses for Insurance models with data context
         const contextPrompt = data.type === "generic" 
           ? data.prompt 
@@ -260,6 +314,7 @@ export default function Playground() {
 
         await streamChat({
           messages,
+          modelId: selectedModelData?.domain,
           onDelta: (delta) => {
             setResult((prev) => prev + delta);
           },
