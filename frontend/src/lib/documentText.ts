@@ -15,13 +15,11 @@ function normalizeWhitespace(input: string): string {
 
 async function extractPdfText(file: File): Promise<ExtractedDocumentText> {
   // Lazy-load to avoid increasing initial bundle size.
-  const pdfjs = await import("pdfjs-dist/legacy/build/pdf");
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
 
-  // Configure worker for Next.js bundling.
-  (pdfjs as unknown as { GlobalWorkerOptions: { workerSrc: string } }).GlobalWorkerOptions.workerSrc = new URL(
-    "pdfjs-dist/legacy/build/pdf.worker.min.mjs",
-    import.meta.url,
-  ).toString();
+  // Configure worker as a URL asset so bundlers don't try to parse/minify it.
+  const workerUrl = (await import("pdfjs-dist/legacy/build/pdf.worker.min.mjs?url")).default as string;
+  (pdfjs as unknown as { GlobalWorkerOptions: { workerSrc: string } }).GlobalWorkerOptions.workerSrc = workerUrl;
 
   const bytes = new Uint8Array(await file.arrayBuffer());
   const loadingTask = (pdfjs as unknown as { getDocument: (args: unknown) => { promise: Promise<unknown> } }).getDocument({
