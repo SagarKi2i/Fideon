@@ -7,9 +7,6 @@ const useStandalone =
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Work around occasional Windows permission locks on `.next/trace`
-  // by using a separate build output directory.
-  distDir: ".next-build",
   ...(useStandalone ? { output: "standalone" } : {}),
   ...(isWindows && !useStandalone ? { outputFileTracing: false } : {}),
   webpack: (config) => {
