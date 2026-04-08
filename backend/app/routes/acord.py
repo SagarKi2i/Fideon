@@ -23,6 +23,11 @@ from Models.acord_form_understanding.pdf_acroform import extract_acroform_fields
 from Models.acord_form_understanding.pdf_ocr import ocr_pdf_pages
 from Models.acord_form_understanding.uir import KeyValue, Table, TextBlock, UnifiedIntermediateRepresentation
 from app.core.supabase import postgrest_get, postgrest_insert, postgrest_patch, verify_user
+from app.services.webhook_engine import (
+    WEBHOOK_EVENT_INFERENCE_COMPLETE,
+    resolve_tenant_id_for_user,
+    try_emit_webhook_event,
+)
 from app.services.runpod_orchestrator import ensure_runpod_ml_ready
 from app.services.vectorstore_ingestion import ingest_text_into_vectorstore
 from app.schemas.acord_workflow import (
@@ -36,7 +41,8 @@ from app.schemas.acord_workflow import (
     ReExtractRequest,
 )
 from app.services.acord_training import create_job_row, spawn_job_runner
-from fine_tuning.acord_form_pipeline.inference_production import run_default_extraction
+# NOTE: importing fine_tuning / torch at module import time can make API startup
+# extremely slow. Import hardened inference lazily only when needed.
 
 from urllib.parse import quote
 
@@ -991,6 +997,8 @@ async def _run_extract_and_persist(
     hardened_enabled = (os.getenv("ACORD_HARDENED_INFERENCE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"})
     if hardened_enabled and (summary.raw_text or "").strip():
         try:
+            from fine_tuning.acord_form_pipeline.inference_production import run_default_extraction
+
             hardened_form = _hardened_form_type_hint(form_type_hint, str(extracted.get("form_type") or ""))
             hardened = run_default_extraction(
                 text=summary.raw_text or "",
@@ -1043,6 +1051,18 @@ async def _run_extract_and_persist(
         await _ingest_acord_into_vectorstore(doc_id, summary.raw_text or text)
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("ACORD[ingest] failed for doc_id=%s: %s", doc_id, exc)
+
+    tenant_id = await resolve_tenant_id_for_user(user_id)
+    await try_emit_webhook_event(
+        tenant_id,
+        WEBHOOK_EVENT_INFERENCE_COMPLETE,
+        {
+            "run_id": str(row["id"]),
+            "workflow": "acord",
+            "form_type": extracted.get("form_type"),
+            "overall_confidence": overall_confidence,
+        },
+    )
 
     return AcordExtractResponse(
         run_id=str(row["id"]),
@@ -1469,6 +1489,8 @@ async def re_extract_run(
     hardened_enabled = (os.getenv("ACORD_HARDENED_INFERENCE_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"})
     if hardened_enabled and (summary.raw_text or "").strip():
         try:
+            from fine_tuning.acord_form_pipeline.inference_production import run_default_extraction
+
             hardened_form = _hardened_form_type_hint(hint, str(extracted.get("form_type") or ""))
             hardened = run_default_extraction(
                 text=summary.raw_text or "",

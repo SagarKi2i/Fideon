@@ -11,6 +11,7 @@ import structlog
 from fastapi import APIRouter, Header, HTTPException, Path, Request
 
 from app.core.config import DEVICE_JWT_SECRET, LEGACY_DEVICE_TOKEN_APIS_ENABLED, SUPABASE_URL
+from app.services.webhook_engine import try_emit_device_online
 from app.core.limiter import limiter
 from app.core.supabase import (
     get_device_by_token,
@@ -94,7 +95,7 @@ async def _resolve_device_from_bearer(authorization: Optional[str]) -> tuple[str
 async def _load_active_device_row(device_id: str) -> dict[str, Any]:
     rows = await postgrest_get(
         "devices",
-        f"select=id,is_active,jwt_issued_after&id=eq.{quote(device_id, safe='')}&limit=1",
+        f"select=id,is_active,jwt_issued_after,hardware_fingerprint_hash&id=eq.{quote(device_id, safe='')}&limit=1",
     )
     if not rows:
         raise HTTPException(status_code=404, detail="Device not found")
@@ -113,6 +114,19 @@ def _enforce_not_revoked(claims: dict[str, Any], jwt_issued_after_raw: Any) -> N
         issued_after_ts = 0
     if claims.get("iat", 0) < issued_after_ts:
         raise HTTPException(status_code=401, detail="Device token has been revoked — please re-register")
+
+
+def _enforce_fingerprint_matches_device(claims: dict[str, Any], device_row: dict[str, Any]) -> None:
+    """Reject JWTs that do not match the hardware fingerprint stored for this device (stolen-token reuse)."""
+    db_fp = device_row.get("hardware_fingerprint_hash")
+    if not db_fp:
+        return
+    claim_fp = claims.get("hardware_fingerprint_hash")
+    if not claim_fp or str(claim_fp) != str(db_fp):
+        raise HTTPException(
+            status_code=401,
+            detail="Device identity mismatch — re-register with this machine's hardware fingerprint",
+        )
 
 
 async def _sync_local_models(device_id: str, local_models: Any, now: datetime) -> None:
@@ -412,6 +426,7 @@ async def register_device_v1(request: Request):  # noqa: C901
         new_value={"status": "online"},
     )
     log.info("device.registered", device_id=device["id"], is_new=is_new)
+    await try_emit_device_online(str(device["id"]), force=True)
 
     return {
         "success": True,
@@ -431,6 +446,10 @@ async def device_models_v1(authorization: Optional[str] = Header(default=None)):
     device_id = claims.get("device_id")
     if not device_id:
         raise HTTPException(status_code=401, detail="Invalid device JWT claims")
+
+    device_row = await _load_active_device_row(str(device_id))
+    _enforce_not_revoked(claims, device_row.get("jwt_issued_after"))
+    _enforce_fingerprint_matches_device(claims, device_row)
 
     models = await postgrest_get(
         "device_models",
@@ -465,6 +484,7 @@ async def device_heartbeat(request: Request, authorization: Optional[str] = Head
     device_id, claims = await _resolve_device_from_bearer(authorization)
     device_row = await _load_active_device_row(device_id)
     _enforce_not_revoked(claims, device_row.get("jwt_issued_after"))
+    _enforce_fingerprint_matches_device(claims, device_row)
 
     body: dict[str, Any] = {}
     try:
@@ -483,6 +503,7 @@ async def device_heartbeat(request: Request, authorization: Optional[str] = Head
 
     await _sync_local_models(device_id, local_models, now)
     log.debug("device.heartbeat", device_id=device_id)
+    await try_emit_device_online(device_id, force=False)
     return {"success": True, "device_id": device_id, "last_seen_at": now.isoformat()}
 
 
@@ -540,6 +561,182 @@ async def revoke_device(
     )
     log.info("device.revoked", device_id=device_id)
     return {"success": True, "device_id": device_id, "revoked_at": now.isoformat()}
+
+
+@router.post("/api/v1/devices/link")
+async def link_device_v1(request: Request, authorization: Optional[str] = Header(default=None)):
+    """
+    Link an already-registered device to the current (authenticated) user + tenant.
+
+    This is the "manual device id" pairing flow:
+    - Electron shows the device_id to the user
+    - User pastes it in the Cloud UI
+    - Backend associates the device with their tenant/user
+    """
+    user = await verify_user(authorization)
+    requester_context = await get_user_context(authorization)
+    requester_role = requester_context.get("role")
+    requester_tenant_id = requester_context.get("tenant_id")
+    if requester_role != "global_admin" and not requester_tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
+
+    body: dict[str, Any] = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    device_id = str(body.get("device_id") or "").strip()
+    if not device_id:
+        raise HTTPException(status_code=400, detail="device_id is required")
+
+    rows = await postgrest_get(
+        "devices",
+        f"select=id,tenant_id,registered_by,metadata&id=eq.{quote(device_id, safe='')}&limit=1",
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Device not found")
+    target = rows[0]
+
+    target_tenant_id = target.get("tenant_id")
+    if requester_role != "global_admin":
+        if target_tenant_id and str(target_tenant_id) != str(requester_tenant_id):
+            raise HTTPException(status_code=403, detail="Cross-tenant device access denied")
+
+    now = datetime.now(timezone.utc)
+    existing_meta = target.get("metadata") if isinstance(target.get("metadata"), dict) else {}
+    new_meta = {
+        **existing_meta,
+        "linked_via": "manual_device_id",
+        "linked_at": now.isoformat(),
+        "linked_by": user["id"],
+    }
+
+    patch: dict[str, Any] = {
+        "registered_by": user["id"],
+        "metadata": new_meta,
+    }
+    # Only set tenant_id when available; global_admin may be unscoped.
+    if requester_tenant_id:
+        patch["tenant_id"] = requester_tenant_id
+
+    await postgrest_patch(
+        "devices",
+        f"id=eq.{quote(device_id, safe='')}",
+        patch,
+    )
+
+    await insert_audit_log(
+        request=request,
+        user_id=user["id"],
+        action="device_linked",
+        resource_type="device",
+        resource_id=device_id,
+        details={"linked_via": "manual_device_id"},
+        previous_value=None,
+        new_value={"tenant_id": requester_tenant_id, "registered_by": user["id"]},
+    )
+    log.info("device.linked", device_id=device_id, user_id=user["id"], tenant_id=requester_tenant_id)
+    return {"success": True, "device_id": device_id}
+
+
+@router.get("/api/v1/admin/devices")
+async def list_devices_admin(authorization: Optional[str] = Header(default=None)):
+    """
+    Admin list of devices.
+
+    Uses service-role PostgREST calls (bypasses RLS), gated by admin auth.
+    """
+    await verify_admin(authorization)
+    requester_context = await get_user_context(authorization)
+    requester_role = requester_context.get("role")
+    requester_tenant_id = requester_context.get("tenant_id")
+
+    # Global admins can see all devices; tenant admins are tenant-scoped.
+    filters = []
+    if requester_role != "global_admin" and requester_tenant_id:
+        filters.append(f"tenant_id=eq.{quote(str(requester_tenant_id), safe='')}")
+
+    where = "&".join(filters)
+    if where:
+        where = "&" + where
+
+    rows = await postgrest_get(
+        "devices",
+        (
+            "select=id,device_name,status,last_seen_at,os_type,app_version,registered_by,tenant_id,created_at"
+            f"{where}"
+            "&order=last_seen_at.desc.nullslast"
+            "&limit=200"
+        ),
+    )
+    user_ids = sorted({str(r.get("registered_by")) for r in (rows or []) if r.get("registered_by")})
+    if user_ids:
+        encoded_ids = ",".join(quote(uid, safe="") for uid in user_ids)
+        users = await postgrest_get(
+            "app_users",
+            f"select=user_id,email,full_name&user_id=in.({encoded_ids})&limit=2000",
+        )
+        user_map = {str(u.get("user_id")): u for u in (users or []) if u.get("user_id")}
+        for r in rows or []:
+            uid = r.get("registered_by")
+            if not uid:
+                continue
+            u = user_map.get(str(uid))
+            if not u:
+                continue
+            r["registered_by_email"] = u.get("email")
+            r["registered_by_name"] = u.get("full_name")
+    return {"success": True, "devices": rows}
+
+
+@router.get("/api/v1/admin/devices/{device_id}")
+async def get_device_admin(device_id: str = Path(...), authorization: Optional[str] = Header(default=None)):
+    """
+    Admin device details view.
+    Uses service-role PostgREST calls (bypasses RLS), gated by admin auth.
+    """
+    await verify_admin(authorization)
+    requester_context = await get_user_context(authorization)
+    requester_role = requester_context.get("role")
+    requester_tenant_id = requester_context.get("tenant_id")
+
+    device_rows = await postgrest_get(
+        "devices",
+        f"select=*&id=eq.{quote(device_id, safe='')}&limit=1",
+    )
+    if not device_rows:
+        raise HTTPException(status_code=404, detail="Device not found")
+    device = device_rows[0]
+
+    if requester_role != "global_admin" and requester_tenant_id:
+        if str(device.get("tenant_id") or "") != str(requester_tenant_id):
+            raise HTTPException(status_code=403, detail="Cross-tenant device access denied")
+
+    models = await postgrest_get(
+        "device_models",
+        f"select=*&device_id=eq.{quote(device_id, safe='')}&order=allocated_at.desc&limit=500",
+    )
+    sync_logs = await postgrest_get(
+        "device_sync_logs",
+        f"select=*&device_id=eq.{quote(device_id, safe='')}&order=created_at.desc&limit=50",
+    )
+    usage_logs = await postgrest_get(
+        "device_usage_logs",
+        f"select=*&device_id=eq.{quote(device_id, safe='')}&order=logged_at.desc&limit=50",
+    )
+    available_models = await postgrest_get(
+        "activated_models",
+        "select=id,model_id,model_name,domain&limit=200",
+    )
+
+    return {
+        "success": True,
+        "device": device,
+        "device_models": models,
+        "sync_logs": sync_logs,
+        "usage_logs": usage_logs,
+        "available_models": available_models,
+    }
 
 
 @router.post("/api/devices/pairing/start")

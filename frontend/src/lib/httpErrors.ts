@@ -26,6 +26,17 @@ export function buildApiRequestError(
   fallbackMessage: string
 ): ApiRequestError {
   if (response.status === 401) {
+    // Not all 401s are "user session expired". Some endpoints intentionally return 401
+    // for device-token / device-JWT auth failures. Preserve those server messages.
+    const detail =
+      payload?.detail ||
+      payload?.error ||
+      payload?.message;
+    if (typeof detail === "string" && detail.trim()) {
+      if (/(device jwt|required|invalid device token|device token|pairing code)/i.test(detail)) {
+        return new ApiRequestError(detail, 401, payload);
+      }
+    }
     return new ApiRequestError("Your session has expired. Please sign in again.", 401, payload);
   }
   if (response.status === 403) {

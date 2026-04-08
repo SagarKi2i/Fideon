@@ -15,6 +15,7 @@ from app.core.supabase import (
     postgrest_patch,
     verify_user,
 )
+from app.services.webhook_engine import WEBHOOK_EVENT_MODEL_DEPLOYED, try_emit_webhook_event
 
 router = APIRouter()
 VALID_STATUSES = {"pending", "approved", "rejected"}
@@ -318,6 +319,16 @@ async def approve_activation_request(
                 "domain": activation_request["domain"],
             },
         )
+        await try_emit_webhook_event(
+            str(requester_tenant_id),
+            WEBHOOK_EVENT_MODEL_DEPLOYED,
+            {
+                "user_id": str(activation_request["user_id"]),
+                "model_id": str(activation_request["model_id"]),
+                "model_name": str(activation_request.get("model_name") or ""),
+                "domain": str(activation_request.get("domain") or ""),
+            },
+        )
 
     await postgrest_patch(
         "pod_activation_requests",
@@ -482,6 +493,16 @@ async def allocate_model_to_user(
         details={"target_user_id": user_id, "model_name": model_name, "domain": domain},
         previous_value=None,
         new_value={"model_id": model_id, "domain": domain},
+    )
+    await try_emit_webhook_event(
+        str(requester_tenant_id),
+        WEBHOOK_EVENT_MODEL_DEPLOYED,
+        {
+            "user_id": user_id,
+            "model_id": model_id,
+            "model_name": model_name,
+            "domain": domain,
+        },
     )
     return {"success": True, "allocation": created[0] if created else None}
 

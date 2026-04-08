@@ -45,6 +45,7 @@ import { useNavigate } from "react-router-dom";
 import { brokerModels, mgaModels, carrierModels, InsuranceModel } from "@/lib/insuranceMocks";
 import { useUserRole } from "@/hooks/useUserRole";
 import { buildApiRequestError, readJsonSafe } from "@/lib/httpErrors";
+import { authHeadersJson } from "@/lib/authHeader";
 import { Skeleton } from "@/components/ui/skeleton";
 
 interface ModelCard {
@@ -238,8 +239,7 @@ export default function Marketplace() {
 
       const response = await fetch(apiUrl("/api/pod-activation/my-activations"), {
         headers: {
-          Authorization: `Bearer ${session.access_token}`,
-          "Content-Type": "application/json",
+          ...(await authHeadersJson()),
         },
       });
       const payload = await readJsonSafe(response);
@@ -259,8 +259,7 @@ export default function Marketplace() {
 
       const response = await fetch(apiUrl("/api/pod-activation/my-requests?status=pending"), {
         headers: {
-          Authorization: `Bearer ${session.access_token}`,
-          "Content-Type": "application/json",
+          ...(await authHeadersJson()),
         },
       });
       const payload = await readJsonSafe(response);
@@ -299,8 +298,7 @@ export default function Marketplace() {
       const response = await fetch(apiUrl("/api/pod-activation/request"), {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${session.access_token}`,
-          "Content-Type": "application/json",
+          ...(await authHeadersJson()),
         },
         body: JSON.stringify({
           model_id: model.id,
@@ -310,6 +308,10 @@ export default function Marketplace() {
       });
       const payload = await readJsonSafe(response);
       if (!response.ok) {
+        if (response.status === 401) {
+          navigate("/auth");
+          return;
+        }
         if (response.status === 409) {
           toast({
             title: "Already Requested",

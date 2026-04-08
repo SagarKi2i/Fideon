@@ -2,7 +2,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Layout } from "./components/Layout";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { AuthRecoveryRedirector } from "./components/AuthRecoveryRedirector";
@@ -35,6 +35,8 @@ import DeviceLinkConfirm from "./app-pages/DeviceLinkConfirm";
 import Users from "./app-pages/Users";
 import AdminAcordQueue from "./app-pages/AdminAcordQueue";
 import AdminAcordReview from "./app-pages/AdminAcordReview";
+import ModelRegistry from "./app-pages/ModelRegistry";
+import FineTuningMonitor from "./app-pages/FineTuningMonitor";
 
 const queryClient = new QueryClient();
 
@@ -103,6 +105,11 @@ const App = () => (
                       <Users />
                     </ProtectedRoute>
                   } />
+                  <Route path="/admin/model-registry" element={
+                    <ProtectedRoute requireAdmin>
+                      <ModelRegistry />
+                    </ProtectedRoute>
+                  } />
                   <Route path="/admin/acord-queue" element={
                     <ProtectedRoute requireAdmin>
                       <AdminAcordQueue />
@@ -119,6 +126,12 @@ const App = () => (
                     </ProtectedRoute>
                   } />
                   <Route path="/device-setup" element={<DeviceSetup />} />
+                  <Route path="/webhook-demo" element={<Navigate to="/" replace />} />
+                  <Route path="/fine-tuning-monitor" element={
+                    <ProtectedRoute requireAdmin>
+                      <FineTuningMonitor />
+                    </ProtectedRoute>
+                  } />
                   <Route path="/link-devices" element={
                     <ProtectedRoute allowedRoles={["global_admin", "admin", "user", "viewer", "guest"]}>
                       <LinkDevices />

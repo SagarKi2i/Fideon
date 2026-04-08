@@ -1,138 +1,195 @@
-import asyncio
-from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
-from json import JSONDecodeError
+from __future__ import annotations
 
-import structlog
-from fastapi import FastAPI, HTTPException, Request
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from typing import Iterable, List
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from slowapi import _rate_limit_exceeded_handler
+from fastapi.exceptions import RequestValidationError
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
+from starlette.responses import PlainTextResponse
 
 from app.core.config import (
     CORS_ALLOWED_ORIGINS,
     DEVICE_JWT_SECRET,
     ENABLE_LOCAL_GENERATE,
     ENABLE_LOCAL_GENERATE_WARMUP,
+    DEVICE_OFFLINE_DETECTOR_ENABLED,
+    WEBHOOK_SECRET_ENCRYPTION_KEY,
+    WEBHOOK_WORKER_ENABLED,
 )
 from app.core.limiter import limiter
-
 from app.logger import setup_logging
-from app.routes.activity import router as activity_router
-from app.routes.admin import router as admin_router
-from app.routes.acord import router as acord_router
-from app.routes.chat import router as chat_router
-from app.routes.device import router as device_router
-from app.routes.decision_reviews import router as decision_reviews_router
-from app.routes.federated_learning import router as federated_router
-from app.routes.health import router as health_router
-from app.routes.help_assistant import router as help_router
-from app.routes.pod_activation import router as pod_activation_router
-from app.routes.password_reset import router as password_reset_router
-from app.routes.ml_acord_proxy import router as ml_acord_proxy_router
-from app.routes.runpod_control import router as runpod_control_router
-from app.routes.settings import router as settings_router
-from app.routes.tenants import router as tenants_router
-from app.routes.workflow_ai import router as workflow_router
-
-# Heartbeat period (seconds). Devices call PUT /api/v1/devices/heartbeat this often.
-_HEARTBEAT_INTERVAL = 60
-# A device is considered offline after this many missed beats.
-_MISSED_BEATS_THRESHOLD = 3
-_OFFLINE_AFTER_SECONDS = _HEARTBEAT_INTERVAL * _MISSED_BEATS_THRESHOLD  # 180 s
-
-# Circuit-breaker: after this many consecutive sweep failures, log CRITICAL.
-_DETECTOR_FAILURE_THRESHOLD = 5
 
 
-async def _offline_detector_loop() -> None:
-    """Background task: marks devices offline when last_seen_at is stale.
+def _split_origins(raw: str) -> List[str]:
+    parts = [p.strip() for p in (raw or "").split(",")]
+    out: List[str] = []
+    for p in parts:
+        if not p:
+            continue
+        out.append(p.rstrip("/"))
+    return out
 
-    Circuit breaker: consecutive failures are counted. Once the count reaches
-    _DETECTOR_FAILURE_THRESHOLD a CRITICAL log is emitted (alertable in
-    production log aggregators) so on-call can investigate. The loop always
-    continues so devices are marked offline as soon as connectivity recovers.
-    """
-    from app.core.supabase import postgrest_patch
-    from urllib.parse import quote
 
-    log = structlog.get_logger("offline_detector")
-    consecutive_failures = 0
+def _local_dev_origins() -> List[str]:
+    # Keep these in sync with README/.env.example guidance.
+    ports = (3000, 3003)
+    hosts = ("http://localhost", "http://127.0.0.1")
+    return [f"{h}:{p}" for h in hosts for p in ports]
 
-    while True:
-        await asyncio.sleep(_HEARTBEAT_INTERVAL)
-        try:
-            threshold = (datetime.now(timezone.utc) - timedelta(seconds=_OFFLINE_AFTER_SECONDS)).isoformat()
-            # Single bulk UPDATE — PostgREST applies the PATCH to every matching row.
-            await postgrest_patch(
-                "devices",
-                f"status=eq.online&last_seen_at=lt.{quote(threshold, safe='')}",
-                {"status": "offline"},
-            )
-            if consecutive_failures > 0:
-                log.info("offline_detector.sweep_recovered", after_failures=consecutive_failures)
-            consecutive_failures = 0
-            log.debug("offline_detector.sweep_ok", threshold=threshold)
-        except Exception as exc:
-            consecutive_failures += 1
-            log.error("offline_detector.sweep_failed", error=str(exc), consecutive=consecutive_failures)
-            if consecutive_failures >= _DETECTOR_FAILURE_THRESHOLD:
-                log.critical(
-                    "offline_detector.circuit_open",
-                    consecutive=consecutive_failures,
-                    msg="Offline detector has failed repeatedly — devices may appear stuck online. "
-                        "Check Supabase connectivity and SUPABASE_SERVICE_ROLE_KEY.",
-                )
+
+def _cors_origins() -> List[str]:
+    configured = _split_origins(CORS_ALLOWED_ORIGINS)
+    # Ensure local dev ports are never accidentally blocked by stale env values.
+    merged = {o for o in configured if o}
+    merged.update(_local_dev_origins())
+    return sorted(merged)
+
+
+def _require_secrets() -> None:
+    # DEVICE_JWT_SECRET is required for device registration/heartbeat JWT flow.
+    # Failing fast avoids silently issuing unverifiable tokens.
+    if not (DEVICE_JWT_SECRET or "").strip():
+        raise RuntimeError("DEVICE_JWT_SECRET is not set")
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    log = structlog.get_logger("startup")
-    if not DEVICE_JWT_SECRET.strip():
-        raise RuntimeError(
-            "DEVICE_JWT_SECRET environment variable is not set. "
-            "Set a strong, random secret dedicated to signing device JWTs. "
-            "Using SUPABASE_SERVICE_ROLE_KEY as a signing secret is not permitted "
-            "because a compromised device token would grant service-role privileges."
-        )
+    bg_tasks: list[asyncio.Task] = []
+
+    # Optional warmup to eliminate first-request cold start timeouts for local /generate.
     if ENABLE_LOCAL_GENERATE and ENABLE_LOCAL_GENERATE_WARMUP:
-        from app.routes.local_generate import startup_warmup
+        from app.routes.local_generate import startup_warmup  # local import: heavy deps
 
         await startup_warmup()
-    task = asyncio.create_task(_offline_detector_loop())
-    log.info("startup.offline_detector_started", interval_s=_HEARTBEAT_INTERVAL, threshold_s=_OFFLINE_AFTER_SECONDS)
-    yield
-    task.cancel()
+
+    if WEBHOOK_WORKER_ENABLED and (WEBHOOK_SECRET_ENCRYPTION_KEY or "").strip():
+        from app.services.webhook_engine import delivery_worker_loop
+
+        bg_tasks.append(asyncio.create_task(delivery_worker_loop(), name="webhook_delivery_worker"))
+    elif WEBHOOK_WORKER_ENABLED:
+        logging.getLogger("startup").warning(
+            "WEBHOOK_WORKER_ENABLED is true but WEBHOOK_SECRET_ENCRYPTION_KEY is unset — "
+            "webhook delivery worker not started (set key to decrypt secrets for delivery)."
+        )
+
+    if DEVICE_OFFLINE_DETECTOR_ENABLED:
+        from app.services.device_offline_detector import offline_detector_loop
+
+        bg_tasks.append(asyncio.create_task(offline_detector_loop(), name="device_offline_detector"))
+
     try:
-        await task
-    except asyncio.CancelledError:
-        pass
+        yield
+    finally:
+        for t in bg_tasks:
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+
+
+def _register_rate_limit_handlers(app: FastAPI) -> None:
+    # slowapi uses a Starlette exception; map to a simple 429 response.
+    @app.exception_handler(RateLimitExceeded)
+    async def _rate_limit_exceeded_handler(_request, _exc):  # type: ignore[no-redef]
+        return PlainTextResponse("Rate limit exceeded", status_code=429)
+
+    # Normalize API errors for frontend/tests: {"error": "..."} instead of {"detail": "..."}.
+    @app.exception_handler(HTTPException)
+    async def _http_exception_handler(_request, exc: HTTPException):  # type: ignore[no-redef]
+        detail = exc.detail
+        if isinstance(detail, (dict, list)):
+            message = str(detail)
+        else:
+            message = str(detail or "")
+        return JSONResponse(status_code=exc.status_code, content={"error": message})
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_exception_handler(_request, exc: RequestValidationError):  # type: ignore[no-redef]
+        # Keep it concise for clients; full details still appear in logs if needed.
+        return JSONResponse(status_code=422, content={"error": "Invalid request", "details": exc.errors()})
+
+
+def _include_routers(app: FastAPI) -> None:
+    # Keep imports inside to reduce import-time side effects in tooling.
+    from app.routes import (
+        acord,
+        activity,
+        admin,
+        agents,
+        chat,
+        decision_reviews,
+        device,
+        federated_learning,
+        health,
+        help_assistant,
+        ml_acord_proxy,
+        model_registry,
+        password_reset,
+        pod_activation,
+        pods,
+        runpod_control,
+        settings,
+        tenants,
+        webhooks,
+        workflow_ai,
+    )
+
+    routers: Iterable = (
+        health.router,
+        activity.router,
+        admin.router,
+        agents.router,
+        chat.router,
+        decision_reviews.router,
+        device.router,
+        federated_learning.router,
+        help_assistant.router,
+        password_reset.router,
+        pods.router,
+        pod_activation.router,
+        runpod_control.router,
+        settings.router,
+        tenants.router,
+        workflow_ai.router,
+        acord.router,
+        ml_acord_proxy.router,
+        model_registry.router,
+        webhooks.router,
+    )
+    for r in routers:
+        app.include_router(r)
+
+    if ENABLE_LOCAL_GENERATE:
+        from app.routes import local_generate
+
+        app.include_router(local_generate.router)
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Fideon FastAPI Backend", lifespan=_lifespan)
+    _require_secrets()
 
-    # Rate limiting
+    app = FastAPI(
+        title="Fideon Fabric API",
+        lifespan=_lifespan,
+    )
+
+    setup_logging(app)
+
+    # Rate limiting (slowapi)
     app.state.limiter = limiter
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
     app.add_middleware(SlowAPIMiddleware)
+    _register_rate_limit_handlers(app)
 
-    allow_origins = [o.strip() for o in CORS_ALLOWED_ORIGINS.split(",") if o.strip()]
-    # Keep explicit origins from env, but always allow localhost development
-    # ports to avoid CORS failures when frontend runs on non-default ports.
-    local_dev_origins = [
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "http://localhost:3003",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001",
-        "http://127.0.0.1:3003",
-    ]
-    for origin in local_dev_origins:
-        if origin not in allow_origins:
-            allow_origins.append(origin)
+    # CORS
+    allow_origins = _cors_origins()
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allow_origins,
@@ -141,47 +198,5 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    app.include_router(activity_router)
-    app.include_router(health_router)
-    app.include_router(chat_router)
-    app.include_router(help_router)
-    app.include_router(workflow_router)
-    app.include_router(acord_router)
-    app.include_router(device_router)
-    app.include_router(decision_reviews_router)
-    app.include_router(federated_router)
-    app.include_router(admin_router)
-    app.include_router(pod_activation_router)
-    app.include_router(password_reset_router)
-    app.include_router(tenants_router)
-    app.include_router(settings_router)
-    app.include_router(runpod_control_router)
-    app.include_router(ml_acord_proxy_router)
-
-    if ENABLE_LOCAL_GENERATE:
-        from app.routes.local_generate import router as local_generate_router
-
-        app.include_router(local_generate_router)
-
-    @app.get("/", include_in_schema=False)
-    async def root():
-        """Human-friendly root when opening the pod proxy URL; orchestrator probes use /health."""
-        return {
-            "service": "Fideon FastAPI Backend",
-            "health": "/health",
-            "docs": "/docs",
-        }
-
-    # Configure structured logging and HTTP request audit logs
-    setup_logging(app)
-
-    @app.exception_handler(JSONDecodeError)
-    async def json_decode_error_handler(_: Request, exc: JSONDecodeError):
-        # Client sent invalid JSON; return a consistent 400 instead of a 500.
-        return JSONResponse(status_code=400, content={"error": f"Invalid JSON body: {exc.msg}"})
-
-    @app.exception_handler(HTTPException)
-    async def http_exception_handler(_: Request, exc: HTTPException):
-        return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
-
+    _include_routers(app)
     return app

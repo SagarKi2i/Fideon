@@ -5,6 +5,7 @@
 # Node/Next artifacts
 **/node_modules/
 frontend/.next/
+frontend/.next-build/
 
 # Python artifacts
 **/__pycache__/

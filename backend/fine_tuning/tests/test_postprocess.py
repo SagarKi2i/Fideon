@@ -6,7 +6,7 @@ BACKEND = ROOT / "backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-from fine_tuning.acord125_pipeline.postprocess import (  # noqa: E402
+from fine_tuning.acord_form_pipeline.postprocess import (  # noqa: E402
     apply_field_position_heuristics,
     compute_confidence,
     compute_field_confidence,

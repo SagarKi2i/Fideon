@@ -17,6 +17,9 @@ PyJWT>=2.0.0
 structlog>=23.1.0,<25.0.0
 pyyaml>=6.0
 
+# --- Webhooks (HMAC signed delivery) ---
+cryptography>=42.0.0
+
 # --- RunPod orchestration / remote control ---
 paramiko>=3.4.0,<4.0.0
 

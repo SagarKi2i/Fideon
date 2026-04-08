@@ -202,6 +202,7 @@ export function Layout({ children }: LayoutProps) {
     admin: "Admin Dashboard",
     "acord-queue": "Training Review",
     users: "Users",
+    "model-registry": "Model Registry",
     devices: "Devices",
     pending: "Pending Approvals",
     marketplace: "Marketplace",
@@ -216,6 +217,7 @@ export function Layout({ children }: LayoutProps) {
     settings: "Settings",
     "link-devices": "Link Devices",
     "device-setup": "Device Setup",
+    "fine-tuning-monitor": "Fine-tuning Monitor",
     mailbox: "Mailbox",
     documents: "Documents",
   };

@@ -6,7 +6,7 @@ BACKEND = ROOT / "backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-from fine_tuning.acord125_pipeline.ocr_extract import _estimate_text_quality, detect_template  # noqa: E402
+from fine_tuning.acord_form_pipeline.ocr_extract import _estimate_text_quality, detect_template  # noqa: E402
 
 
 def test_template_detection():
