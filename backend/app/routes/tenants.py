@@ -7,7 +7,7 @@ Auth: Bearer token of an existing admin or global_admin user.
 
 Request body:
     name            str  required  Human-readable tenant display name
-    plan            str  optional  starter | growth | enterprise  (default: starter)
+    plan            str  optional  starter | professional | enterprise  (default: starter)
     slug            str  optional  Custom slug; auto-generated from name if omitted
     admin_email     str  required  Email for the default admin user
     admin_password  str  required  Password for the default admin user (min 8 chars)
@@ -46,7 +46,7 @@ from app.core.supabase import (
 router = APIRouter()
 log = structlog.get_logger("tenants")
 
-_VALID_PLANS = {"starter", "growth", "enterprise"}
+_VALID_PLANS = {"starter", "professional", "enterprise"}
 # Custom slug: lowercase, alphanumeric + hyphens, min 3 chars, no leading/trailing hyphen.
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9\-]+[a-z0-9]$")
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -68,6 +68,44 @@ async def check_email_availability(
         f"select=user_id&email=eq.{quote(normalized_email, safe='')}&limit=1",
     )
     return {"email": normalized_email, "exists": bool(rows)}
+
+
+@router.get("/api/v1/tenants/signup-config")
+@limiter.limit("60/minute")
+async def get_tenant_signup_config(
+    request: Request,  # required by slowapi
+    tenant_name: str = Query(..., min_length=2, max_length=100),
+):
+    """Public endpoint: returns pack/plan configuration for an existing tenant.
+
+    Used by the Signup wizard to:
+      - lock plan selection to the tenant's chosen plan
+      - preselect tenant agent packs and compute remaining pack capacity
+      - blur/disable packs that are not available for this tenant
+    """
+    normalized_name = tenant_name.strip()
+    if not normalized_name:
+        raise HTTPException(status_code=400, detail="'tenant_name' is required")
+
+    # Deterministic tenant resolution via RPC:
+    #   lower(trim(name)) = lower(trim(requested_tenant_name))
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/get_tenant_signup_config_exact",
+            headers=service_headers(),
+            content=json.dumps({"p_tenant_name": normalized_name}),
+        )
+
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=500, detail=resp.text)
+
+    payload = resp.json()
+    tenant_cfg = payload[0] if isinstance(payload, list) and payload else payload
+    if not tenant_cfg:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    # Shape is produced by the SQL function.
+    return tenant_cfg
 
 
 def _auto_slug(name: str, suffix: str) -> str:
@@ -136,11 +174,19 @@ async def _link_admin_user_to_tenant(admin_user_id: str, tenant_id: str, admin_f
             f"select=user_id&user_id=eq.{quote(admin_user_id, safe='')}&limit=1",
         )
         if rows:
-            await postgrest_patch(
-                "app_users",
-                f"user_id=eq.{quote(admin_user_id, safe='')}",
-                link_payload,
-            )
+            try:
+                await postgrest_patch(
+                    "app_users",
+                    f"user_id=eq.{quote(admin_user_id, safe='')}",
+                    link_payload,
+                )
+            except HTTPException as exc:
+                if exc.status_code in {400, 409} and "fideon_os_limit:seats" in str(exc.detail or "").lower():
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Tenant is at its user limit. Upgrade the plan to add more users.",
+                    ) from exc
+                raise
             return
         await sleep(0.25)
 
@@ -296,7 +342,7 @@ async def _ensure_slug_available(slug: str) -> None:
         )
 
 
-async def _create_tenant_row_or_raise(slug: str, name: str, tenant_metadata: dict) -> dict:
+async def _create_tenant_row_or_raise(slug: str, name: str, plan: str, tenant_metadata: dict) -> dict:
     try:
         rows = await postgrest_insert(
             "tenants",
@@ -304,6 +350,8 @@ async def _create_tenant_row_or_raise(slug: str, name: str, tenant_metadata: dic
                 "slug": slug,
                 "name": name,
                 "is_active": True,
+                "plan": plan,
+                "tier": plan,
                 "metadata": tenant_metadata,
             },
         )
@@ -394,7 +442,7 @@ async def create_tenant(
         "provisioning_idempotency_key": idempotency_key,
         **extra_metadata,
     }
-    tenant = await _create_tenant_row_or_raise(slug, name, tenant_metadata)
+    tenant = await _create_tenant_row_or_raise(slug, name, plan, tenant_metadata)
     tenant_id: str = tenant["id"]
     admin_user_id: Optional[str] = None
 
