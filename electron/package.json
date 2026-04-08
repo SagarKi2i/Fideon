@@ -54,13 +54,13 @@
         ]
       },
       {
-        "from": "../frontend/.next/standalone",
+        "from": "../frontend/.next-build/standalone",
         "filter": [
           "**/*"
         ]
       },
       {
-        "from": "../frontend/.next/static",
+        "from": "../frontend/.next-build/static",
         "to": ".next/static",
         "filter": [
           "**/*"
@@ -74,7 +74,7 @@
         ]
       },
       {
-        "from": "../frontend/.next",
+        "from": "../frontend/.next-build",
         "to": ".next",
         "filter": [
           "required-server-files.json",
