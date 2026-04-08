@@ -12,7 +12,7 @@ async function fileExists(p) {
 
 async function main() {
   const projectRoot = path.resolve(process.cwd());
-  const nextDir = path.join(projectRoot, ".next");
+  const nextDir = path.join(projectRoot, ".next-build");
   const target = path.join(nextDir, "required-server-files.json");
 
   // Next should generate this when output=standalone, but some builds/configs
@@ -24,6 +24,7 @@ async function main() {
   const content = {
     version: 1,
     config: {
+      // Runtime layout uses `.next/static` (Dockerfile / electron-builder), not build distDir.
       distDir: ".next",
       output: "standalone",
     },

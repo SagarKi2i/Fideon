@@ -1,10 +1,17 @@
+const isWindows = process.platform === "win32";
+// Standalone needs outputFileTracing; on Windows tracing often hits EPERM on `trace`.
+// Docker/Linux/CI use standalone. Set NEXT_STANDALONE=1 on Windows only if your
+// environment can write trace files (needed for packaged Electron builds).
+const useStandalone =
+  !isWindows || process.env.NEXT_STANDALONE === "1";
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   // Work around occasional Windows permission locks on `.next/trace`
   // by using a separate build output directory.
   distDir: ".next-build",
-  // Also disable output file tracing (writes `.next*/trace`) which can fail on some Windows setups.
-  outputFileTracing: false,
+  ...(useStandalone ? { output: "standalone" } : {}),
+  ...(isWindows && !useStandalone ? { outputFileTracing: false } : {}),
   webpack: (config) => {
     // Treat the PDF.js worker as a file asset so it isn't parsed/minified as JS.
     config.module.rules.push({
