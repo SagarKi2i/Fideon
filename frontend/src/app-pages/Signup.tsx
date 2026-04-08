@@ -556,6 +556,7 @@ export default function Signup() {
         userMetadata.workflow_addon_slots = workflowAddonSlots;
         userMetadata.max_agent_packs = activePlan?.maxPacks ?? null;
         userMetadata.max_active_models = activePlan?.maxModels ?? null;
+        userMetadata.default_model_id = null;
       }
 
       if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
