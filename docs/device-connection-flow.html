@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Device connection flows — FideonFabric</title>
+    <style>
+      :root {
+        --bg: #0f1419;
+        --surface: #1a2332;
+        --text: #e7ecf3;
+        --muted: #8b9cb3;
+        --accent: #5b9fd4;
+        --border: #2d3a4d;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.55;
+        padding: 2rem clamp(1rem, 4vw, 3rem);
+        max-width: 72rem;
+        margin-inline: auto;
+      }
+      h1 {
+        font-size: clamp(1.75rem, 4vw, 2.25rem);
+        font-weight: 650;
+        letter-spacing: -0.02em;
+        margin: 0 0 0.5rem;
+      }
+      .lede {
+        color: var(--muted);
+        font-size: 1.05rem;
+        max-width: 52ch;
+        margin-bottom: 2.5rem;
+      }
+      h2 {
+        font-size: 1.25rem;
+        font-weight: 600;
+        margin: 2.5rem 0 1rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 1px solid var(--border);
+        color: var(--accent);
+      }
+      p.note {
+        font-size: 0.9rem;
+        color: var(--muted);
+        margin: 0.75rem 0 1.25rem;
+      }
+      .diagram {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 1.25rem;
+        margin: 1rem 0 2rem;
+        overflow-x: auto;
+      }
+      .diagram .mermaid {
+        display: flex;
+        justify-content: center;
+        min-height: 120px;
+      }
+      footer {
+        margin-top: 3rem;
+        padding-top: 1.5rem;
+        border-top: 1px solid var(--border);
+        font-size: 0.85rem;
+        color: var(--muted);
+      }
+      code {
+        font-family: ui-monospace, "Cascadia Code", monospace;
+        font-size: 0.88em;
+        background: rgba(0, 0, 0, 0.35);
+        padding: 0.12em 0.35em;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Device connection flows</h1>
+    <p class="lede">
+      QR pairing has been removed from the product. Devices connect through the <strong>v1 device API</strong>
+      (fingerprint or legacy-token migration), optional <strong>legacy header-token APIs</strong> when enabled, and
+      ongoing <strong>heartbeat</strong> plus <strong>admin revoke / re-register</strong> when credentials rotate.
+    </p>
+
+    <h2>Overview: ways a device can connect</h2>
+    <p class="note">
+      Production default: <code>POST /api/v1/devices/register</code> → store JWT → <code>PUT /api/v1/devices/heartbeat</code>.
+      Legacy routes return <code>410</code> unless <code>LEGACY_DEVICE_TOKEN_APIS_ENABLED=true</code>.
+    </p>
+    <div class="diagram">
+      <div class="mermaid">
+flowchart TB
+D[Device or edge client] --> PICK{Integration style}
+PICK -->|Recommended| V1[POST api v1 devices register]
+PICK -->|Optional env flag| LEG[Legacy X-Device-Token header]
+PICK -->|Old opaque token| MIG[Same v1 register body includes device_token]
+V1 --> JWT[Response device_token is signed JWT]
+JWT --> HB[PUT api v1 devices heartbeat Bearer JWT]
+HB --> OPS[GET api v1 devices models same Bearer]
+LEG --> CK[POST api device-checkin or device-register]
+MIG --> JWT
+PICK --> REV[Admin POST api v1 devices id revoke]
+REV --> REREG[Client must call v1 register again]</div>
+    </div>
+
+    <h2>Option A — V1 register and heartbeat (primary)</h2>
+    <p class="note">
+      Idempotent by <code>hardware_fingerprint_hash</code>. Rate limit: 10/min on register, 5/min on heartbeat. Electron
+      uses <code>node-machine-id</code> (stable per-machine ID sent as <code>hardware_fingerprint</code>) and
+      <code>electron-store</code> (<code>electron/device-client.ts</code>). On heartbeat and
+      <code>GET /api/v1/devices/models</code>, the API checks that the JWT&rsquo;s
+      <code>hardware_fingerprint_hash</code> claim matches the row in <code>devices</code> (no separate &ldquo;mission
+      id&rdquo; field in this codebase).
+    </p>
+    <div class="diagram">
+      <div class="mermaid">
+flowchart TD
+R[Runtime start] --> S{Cached JWT valid?}
+S -->|Yes| H[Heartbeat loop]
+S -->|No| REG[POST v1 register JSON body]
+REG --> FP{Body contains}
+FP -->|hardware_fingerprint| U1[Hash and upsert device row]
+FP -->|device_token legacy| U2[Resolve existing row migrate fingerprint]
+U1 --> SIGN[Sign HS256 device JWT]
+U2 --> SIGN
+SIGN --> STORE[Persist JWT on device]
+STORE --> H
+H --> B1[PUT heartbeat optional local_models JSON]
+B1 --> H</div>
+    </div>
+    <div class="diagram">
+      <div class="mermaid">
+sequenceDiagram
+autonumber
+participant C as Device client
+participant API as Backend
+participant DB as Database
+C->>C: Load stored JWT if any
+alt Missing or first run
+C->>API: POST /api/v1/devices/register
+API->>DB: Upsert devices by fingerprint or legacy token
+API->>API: try_emit_device_online webhook
+API-->>C: device_token JWT, device_id, is_new
+C->>C: Save JWT
+end
+loop Each interval e.g. 60s
+C->>API: PUT /api/v1/devices/heartbeat Bearer JWT
+API->>DB: Update last_seen status online
+API-->>C: success
+end
+C->>API: GET /api/v1/devices/models Bearer JWT
+API-->>C: Allocated models list</div>
+    </div>
+
+    <h2>Option B — Legacy APIs (optional, env-gated)</h2>
+    <p class="note">
+      Opaque <code>device_token</code> on the <code>devices</code> row, passed as <code>X-Device-Token</code>. Use only
+      for older clients; disabled by default (<code>410 Gone</code> with pointer to v1).
+    </p>
+    <div class="diagram">
+      <div class="mermaid">
+flowchart LR
+L[Legacy client] --> M[GET api device-models]
+L --> C[POST api device-checkin]
+L --> R[POST api device-register]
+M --> H1[X-Device-Token header]
+C --> H1
+R --> B[JSON body device_token]
+H1 --> DB[(devices row)]
+B --> DB
+C --> SYNC[Optional local_models marks downloaded]</div>
+    </div>
+
+    <h2>Revoke and reconnect</h2>
+    <p class="note">
+      Revoke sets <code>jwt_issued_after</code>; older JWTs fail heartbeat with 401 until the device calls v1 register
+      again (new JWT).
+    </p>
+    <div class="diagram">
+      <div class="mermaid">
+sequenceDiagram
+autonumber
+participant A as Admin API caller
+participant API as Backend
+participant D as Device
+A->>API: POST /api/v1/devices/device_id/revoke Bearer user JWT
+API->>API: Deactivate device bump jwt_issued_after
+D->>API: PUT heartbeat old JWT
+API-->>D: 401 token revoked
+D->>API: POST v1 register again
+API-->>D: New JWT
+D->>API: Heartbeat succeeds</div>
+    </div>
+
+    <h2>Online / offline presence</h2>
+    <p class="note">
+      Backend treats missed heartbeats (e.g. three intervals) as offline via the offline-detector service; webhooks may
+      emit device online on register.
+    </p>
+    <div class="diagram">
+      <div class="mermaid">
+flowchart LR
+HB[Regular v1 heartbeat] --> SEEN[last_seen_at updated]
+MISS[Missed beats] --> OFF[Status offline]
+REG[Register or heartbeat returns] --> ON[Status online]</div>
+    </div>
+
+    <h2>Option comparison</h2>
+    <div class="diagram">
+      <div class="mermaid">
+flowchart TB
+subgraph optA[V1 recommended]
+A1[Bearer JWT]
+A2[Fingerprint or legacy body token]
+A3[Heartbeat models revoke]
+end
+subgraph optB[Legacy optional]
+B1[Header X-Device-Token]
+B2[No JWT]
+B3[Checkin register device-models]
+end</div>
+    </div>
+
+    <footer>
+      Source: <code>backend/app/routes/device.py</code>, <code>backend/app/core/config.py</code> (legacy flag),
+      <code>electron/device-client.ts</code>, <code>electron/main.ts</code>, <code>backend/BACKEND_API_TEST_MATRIX.md</code>.
+      Mermaid loads from CDN; open this file in a browser.
+    </footer>
+
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: "dark",
+        securityLevel: "strict",
+        themeVariables: {
+          primaryColor: "#2d4a66",
+          primaryTextColor: "#e7ecf3",
+          primaryBorderColor: "#5b9fd4",
+          lineColor: "#8b9cb3",
+          secondaryColor: "#1a2332",
+          tertiaryColor: "#0f1419",
+        },
+      });
+      await mermaid.run({ querySelector: ".mermaid" });
+    </script>
+  </body>
+</html>

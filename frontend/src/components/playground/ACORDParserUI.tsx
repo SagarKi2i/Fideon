@@ -152,7 +152,7 @@ export default function ACORDParserUI({ modelId, onRun, isRunning, result }: ACO
   const [editText, setEditText] = useState<string>("");
   const [editError, setEditError] = useState<string | null>(null);
   const [trainSubmitted, setTrainSubmitted] = useState(false);
-  const [activeTab, setActiveTab] = useState<"json" | "fields" | "edit" | "changes">("json");
+  const [activeTab, setActiveTab] = useState<"json" | "fields" | "edit" | "changes" | "split">("json");
 
   const handleRun = () => {
     if (!file) return;
@@ -343,6 +343,7 @@ export default function ACORDParserUI({ modelId, onRun, isRunning, result }: ACO
                 <TabsTrigger value="fields">Fields</TabsTrigger>
                 <TabsTrigger value="edit">Edit</TabsTrigger>
                 <TabsTrigger value="changes">Changes</TabsTrigger>
+                <TabsTrigger value="split">Split View</TabsTrigger>
               </TabsList>
 
               <TabsContent value="json" className="mt-4">
@@ -478,6 +479,112 @@ export default function ACORDParserUI({ modelId, onRun, isRunning, result }: ACO
                     Enter valid JSON in Edit tab to see changes.
                   </p>
                 )}
+              </TabsContent>
+
+              <TabsContent value="split" className="mt-4">
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-4 flex-wrap">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Badge className="bg-green-500/15 text-green-700 border border-green-500/30">
+                        Added ({changes.filter((c) => c.type === "added").length})
+                      </Badge>
+                      <Badge
+                        variant="destructive"
+                        className="bg-red-500/10 text-red-700 border border-red-500/30"
+                      >
+                        Removed ({changes.filter((c) => c.type === "removed").length})
+                      </Badge>
+                      <Badge className="bg-amber-500/15 text-amber-700 border border-amber-500/30">
+                        Changed ({changes.filter((c) => c.type === "changed").length})
+                      </Badge>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Split view renders Original vs Edited side-by-side with a legend.
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label className="text-xs text-muted-foreground">Original</Label>
+                      <pre className="rounded-lg border border-border/70 bg-[#0b1020] p-3 overflow-auto max-h-[420px] text-xs font-mono leading-5 whitespace-pre-wrap">
+                        <JsonHighlight text={normalizedResult || "{}"} />
+                      </pre>
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-xs text-muted-foreground">Edited</Label>
+                      <pre className="rounded-lg border border-border/70 bg-[#0b1020] p-3 overflow-auto max-h-[420px] text-xs font-mono leading-5 whitespace-pre-wrap">
+                        <JsonHighlight text={editText || "{}"} />
+                      </pre>
+                    </div>
+                  </div>
+
+                  <div className="pt-2 border-t border-border/50">
+                    {originalParsed && editedParsed ? (
+                      changes.length === 0 ? (
+                        <p className="text-sm text-muted-foreground">No changes detected.</p>
+                      ) : (
+                        <div className="space-y-3">
+                          <p className="text-xs text-muted-foreground">
+                            Showing up to {Math.min(changes.length, 120)} changed paths.
+                          </p>
+                          <div className="grid gap-2 max-h-[300px] overflow-auto pr-1">
+                            {changes.map((c) => (
+                              <div
+                                key={c.path + c.type}
+                                className="rounded-lg border border-border/60 bg-card/70 p-3"
+                              >
+                                <div className="flex items-center justify-between gap-3">
+                                  <span className="text-[11px] font-mono text-muted-foreground break-words">
+                                    {c.path}
+                                  </span>
+                                  {c.type === "added" && (
+                                    <Badge className="bg-green-500/15 text-green-700 border border-green-500/30">
+                                      Added
+                                    </Badge>
+                                  )}
+                                  {c.type === "removed" && (
+                                    <Badge
+                                      variant="destructive"
+                                      className="bg-red-500/10 text-red-700 border border-red-500/30"
+                                    >
+                                      Removed
+                                    </Badge>
+                                  )}
+                                  {c.type === "changed" && (
+                                    <Badge className="bg-amber-500/15 text-amber-700 border border-amber-500/30">
+                                      Changed
+                                    </Badge>
+                                  )}
+                                </div>
+                                {c.type === "added" && (
+                                  <div className="mt-2 text-[11px] font-mono whitespace-pre-wrap">
+                                    After: {c.after}
+                                  </div>
+                                )}
+                                {c.type === "removed" && (
+                                  <div className="mt-2 text-[11px] font-mono whitespace-pre-wrap">
+                                    Before: {c.before}
+                                  </div>
+                                )}
+                                {c.type === "changed" && (
+                                  <div className="mt-2 text-[11px] font-mono whitespace-pre-wrap">
+                                    Before: {c.before}
+                                    <br />
+                                    After: {c.after}
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        Enter valid JSON in Edit tab to see split-view changes.
+                      </p>
+                    )}
+                  </div>
+                </div>
               </TabsContent>
             </Tabs>
 

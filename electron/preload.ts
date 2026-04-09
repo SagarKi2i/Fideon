@@ -37,5 +37,12 @@ contextBridge.exposeInMainWorld("electron", {
   network: {
     checkStatus: () => ipcRenderer.invoke("network:checkStatus"),
   },
+
+  device: {
+    getDeviceId: () => ipcRenderer.invoke("device:getDeviceId"),
+    getAuth: () => ipcRenderer.invoke("device:getAuth"),
+    clearAuth: () => ipcRenderer.invoke("device:clearAuth"),
+    ensureAuth: () => ipcRenderer.invoke("device:ensureAuth"),
+  },
 });
 

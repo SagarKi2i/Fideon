@@ -37,13 +37,16 @@ import {
   Monitor,
   User,
   Copy,
-  Trash2
+  Trash2,
+  Webhook,
 } from "lucide-react";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { useToast } from "@/hooks/use-toast";
 import { useWorkflowSettings } from "@/hooks/useWorkflowSettings";
 import { useUserRole } from "@/hooks/useUserRole";
 import { InviteUserPanel } from "@/components/user/InviteUserPanel";
+import { WebhooksSettingsPanel } from "@/components/settings/WebhooksSettingsPanel";
+import { DeviceLinkPanel } from "@/components/settings/DeviceLinkPanel";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   createPersonalApiKey,
@@ -146,7 +149,7 @@ const amsSystemsList: AMSSystem[] = [
 
 export default function Settings() {
   const { toast } = useToast();
-  const { role } = useUserRole();
+  const { role, isAdmin } = useUserRole();
   const { settings: workflowSettings, updateSettings: updateWorkflowSettings, resetToDefaults, DEFAULT_SETTINGS } = useWorkflowSettings();
   const [carrierCredentials, setCarrierCredentials] = useState(carriers);
   const [amsSystems, setAmsSystems] = useState(amsSystemsList);
@@ -484,6 +487,12 @@ export default function Settings() {
             <Zap className="h-4 w-4" />
             <span className="hidden sm:inline">System</span>
           </TabsTrigger>
+          {isAdmin && (
+            <TabsTrigger value="webhooks" className="flex items-center gap-2">
+              <Webhook className="h-4 w-4" />
+              <span className="hidden sm:inline">Webhooks</span>
+            </TabsTrigger>
+          )}
         </TabsList>
 
         {/* Carrier Credentials Tab */}
@@ -1173,6 +1182,12 @@ export default function Settings() {
           </Card>
         </TabsContent>
 
+        {isAdmin && (
+          <TabsContent value="webhooks" className="space-y-4">
+            <WebhooksSettingsPanel />
+          </TabsContent>
+        )}
+
         {/* System Tab */}
         <TabsContent value="system" className="space-y-4">
           <Card className="bg-card border-border shadow-card">
@@ -1207,6 +1222,8 @@ export default function Settings() {
               </Button>
             </CardContent>
           </Card>
+
+          <DeviceLinkPanel />
         </TabsContent>
       </Tabs>
 

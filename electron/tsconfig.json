@@ -13,6 +13,6 @@
     "moduleResolution": "node",
     "types": ["node"]
   },
-  "include": ["main.ts", "preload.ts", "ollama-backend.ts"],
+  "include": ["main.ts", "preload.ts", "ollama-backend.ts", "*.ts"],
   "exclude": ["node_modules", "dist"]
 }

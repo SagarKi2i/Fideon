@@ -48,6 +48,7 @@ ENV HOSTNAME="0.0.0.0"
 
 COPY --from=builder /app/public ./public
 
+# Next.js `output: "standalone"` emits into `.next/standalone` and serves assets from `.next/static`.
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 

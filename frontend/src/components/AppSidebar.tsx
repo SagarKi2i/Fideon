@@ -8,6 +8,7 @@ import {
   Settings,
   Monitor,
   Download,
+  Webhook,
   Shield,
   Clock,
   Users,
@@ -19,6 +20,7 @@ import {
   Zap,
   ClipboardCheck,
   FileSearch,
+  Library,
 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useState, useEffect, useCallback } from "react";
@@ -76,12 +78,14 @@ const adminItems = [
   { title: "Admin Dashboard", url: "/admin", icon: Shield },
   { title: "Training Review", url: "/admin/acord-queue", icon: FileSearch },
   { title: "Users", url: "/users", icon: Users },
+  { title: "Model Registry", url: "/admin/model-registry", icon: Library },
   { title: "Devices", url: "/devices", icon: Monitor },
   { title: "Pending Approvals", url: "/devices/pending", icon: Clock },
 ];
 
 const electronItems = [
   { title: "Device Setup", url: "/device-setup", icon: Download },
+  { title: "Fine-tuning Monitor", url: "/fine-tuning-monitor", icon: Zap },
 ];
 
 export function AppSidebar() {
@@ -190,7 +194,7 @@ export function AppSidebar() {
                     <SidebarMenuButton asChild tooltip={item.title}>
                       <NavLink 
                         to={item.url}
-                        end={item.url === "/devices" || item.url === "/admin"}
+                        end={item.url === "/devices" || item.url === "/admin" || item.url === "/admin/model-registry"}
                         onClick={handleNavClick}
                         className="hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
                         activeClassName="bg-sidebar-primary text-sidebar-primary-foreground font-medium"

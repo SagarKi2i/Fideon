@@ -1,275 +1,154 @@
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import {
-  Users,
-  Plus,
-  Trash2,
-  Loader2,
-  Package,
-  UserCheck,
-  Mail,
-  ShieldCheck,
-  User,
-  X,
-  Search,
-} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
-import { apiUrl } from "@/lib/apiBaseUrl";
 import { formatDistanceToNow } from "date-fns";
-import { brokerModels, mgaModels, carrierModels } from "@/lib/insuranceMocks";
+import { Loader2, Monitor, Search, Circle, ExternalLink } from "lucide-react";
 
-interface UserAccount {
+type DeviceStatus = "online" | "offline" | "never_checked_in";
+
+type DeviceRow = {
   id: string;
-  email: string;
-  role: string;
-  created_at: string;
-  tenant_name?: string;
-}
-
-interface AllocatedModel {
-  id: string;
-  model_id: string;
-  model_name: string;
-  domain: string;
-  activated_at: string | null;
-}
-
-type AppRole = "global_admin" | "admin" | "user" | "viewer" | "guest";
-
-const roleDisplay: Record<AppRole, { label: string; badgeClass: string; privileged: boolean }> = {
-  global_admin: {
-    label: "Global Admin",
-    badgeClass: "bg-purple-600/15 text-purple-700 border-purple-600/30 dark:text-purple-300",
-    privileged: true,
-  },
-  admin: {
-    label: "Admin",
-    badgeClass: "bg-blue-600/15 text-blue-700 border-blue-600/30 dark:text-blue-300",
-    privileged: true,
-  },
-  user: {
-    label: "User",
-    badgeClass: "bg-emerald-600/15 text-emerald-700 border-emerald-600/30 dark:text-emerald-300",
-    privileged: false,
-  },
-  viewer: {
-    label: "Viewer",
-    badgeClass: "bg-amber-600/15 text-amber-700 border-amber-600/30 dark:text-amber-300",
-    privileged: false,
-  },
-  guest: {
-    label: "Guest",
-    badgeClass: "bg-slate-600/15 text-slate-700 border-slate-600/30 dark:text-slate-300",
-    privileged: false,
-  },
+  device_name: string | null;
+  status: DeviceStatus;
+  last_seen_at: string | null;
+  os_type: string | null;
+  app_version: string | null;
+  registered_by: string | null;
+  registered_by_email?: string | null;
+  registered_by_name?: string | null;
+  tenant_id: string | null;
+  created_at?: string | null;
 };
-
-function normalizeRole(role?: string): AppRole {
-  const value = (role || "").toLowerCase();
-  if (value === "global_admin" || value === "admin" || value === "user" || value === "viewer" || value === "guest") {
-    return value;
-  }
-  return "user";
-}
-
-const allMarketplaceModels = [
-  ...brokerModels.map(m => ({ id: m.id, name: m.name, domain: m.domain })),
-  ...mgaModels.map(m => ({ id: m.id, name: m.name, domain: m.domain })),
-  ...carrierModels.map(m => ({ id: m.id, name: m.name, domain: m.domain })),
-];
 
 export default function Devices() {
   const { toast } = useToast();
   const navigate = useNavigate();
-  const [users, setUsers] = useState<UserAccount[]>([]);
   const [loading, setLoading] = useState(true);
-  const [userModels, setUserModels] = useState<Record<string, AllocatedModel[]>>({});
-
-  // Inline allocation state per user
-  const [allocatingForUser, setAllocatingForUser] = useState<string | null>(null);
-  const [searchTerm, setSearchTerm] = useState("");
-  const [allocating, setAllocating] = useState(false);
-  const dropdownRef = useRef<HTMLDivElement>(null);
-  const refreshTimerRef = useRef<number | null>(null);
+  const [rows, setRows] = useState<DeviceRow[]>([]);
+  const [search, setSearch] = useState("");
+  const [tenantNameById, setTenantNameById] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    checkAccessAndLoad();
-
-    const channel = supabase
-      .channel("devices-page-live")
-      .on("postgres_changes", { event: "*", schema: "public", table: "activated_models" }, () => {
-        if (refreshTimerRef.current !== null) {
-          window.clearTimeout(refreshTimerRef.current);
-        }
-        refreshTimerRef.current = window.setTimeout(() => {
-          refreshTimerRef.current = null;
-          void loadUsers();
-        }, 400);
-      })
-      .subscribe();
-
-    return () => {
-      if (refreshTimerRef.current !== null) {
-        window.clearTimeout(refreshTimerRef.current);
-      }
-      supabase.removeChannel(channel);
-    };
-  }, []);
-
-  // Close dropdown on outside click
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-        setAllocatingForUser(null);
-        setSearchTerm("");
-      }
-    };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
+    void checkAccessAndLoad();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const checkAccessAndLoad = async () => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) { navigate("/auth"); return; }
+      if (!user) {
+        navigate("/auth");
+        return;
+      }
 
       const { data: roles } = await supabase
         .from("user_roles")
         .select("role")
         .eq("user_id", user.id);
 
-      if (!roles?.some(r => r.role === "admin" || r.role === "global_admin")) {
+      if (!roles?.some((r) => r.role === "admin" || r.role === "global_admin")) {
         toast({ title: "Access Denied", description: "Admin only", variant: "destructive" });
-        navigate("/"); return;
+        navigate("/");
+        return;
       }
 
-      await loadUsers();
+      await loadDevices();
     } catch {
       navigate("/auth");
     }
   };
 
-  const loadUsersFromSupabaseFallback = async () => {
-    const { data: appUsers, error: appUsersError } = await supabase
-      .from("app_users")
-      .select("user_id,email,created_at,tenants(name)");
-    if (appUsersError) throw appUsersError;
-
-    const { data: roleRows, error: rolesError } = await supabase
-      .from("user_roles")
-      .select("user_id,role");
-    if (rolesError) throw rolesError;
-
-    const roleMap = new Map((roleRows || []).map(r => [r.user_id, r.role]));
-    const fallbackUsers: UserAccount[] = (appUsers || []).map(u => ({
-      id: u.user_id,
-      email: u.email,
-      role: roleMap.get(u.user_id) ?? "user",
-      created_at: u.created_at,
-      tenant_name: (u as any)?.tenants?.name || "",
-    }));
-    setUsers(fallbackUsers);
-  };
-
-  const loadUsers = async () => {
+  const loadDevices = async () => {
+    setLoading(true);
     try {
       const { data: { session } } = await supabase.auth.getSession();
-      if (!session) return;
-      let userList: UserAccount[] = [];
-
-      try {
-        const response = await fetch(
-          apiUrl("/api/list-users"),
-          { headers: { Authorization: `Bearer ${session.access_token}` } }
-        );
-
-        if (response.ok) {
-          const data = await response.json();
-          userList = data.users || [];
-          setUsers(userList);
-        } else {
-          await loadUsersFromSupabaseFallback();
-          return;
-        }
-      } catch (backendError) {
-        console.warn("Primary /api/list-users failed, using fallback:", backendError);
-        await loadUsersFromSupabaseFallback();
+      if (!session?.access_token) {
+        navigate("/auth");
         return;
       }
 
-      const userIds = userList.map((u) => u.id).filter(Boolean);
-      if (!userIds.length) {
-        setUserModels({});
-        return;
+      const resp = await fetch(`${window.location.protocol}//${window.location.hostname}:8000/api/v1/admin/devices`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+        },
+      });
+      const payload = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        const msg = (payload as any)?.error || (payload as any)?.detail || `HTTP ${resp.status}`;
+        throw new Error(msg);
       }
+      const devices = ((payload as any)?.devices || []) as DeviceRow[];
+      setRows(devices);
 
-      const { data: allModels, error } = await supabase
-        .from("activated_models")
-        .select("id,user_id,model_id,model_name,domain,activated_at")
-        .in("user_id", userIds);
+      const tenantIds = Array.from(new Set((devices || []).map((d) => d.tenant_id).filter(Boolean))) as string[];
 
-      if (!error && allModels) {
-        const grouped: Record<string, AllocatedModel[]> = {};
-        for (const m of allModels) {
-          if (!grouped[m.user_id]) grouped[m.user_id] = [];
-          grouped[m.user_id].push(m);
-        }
-        setUserModels(grouped);
+      if (tenantIds.length) {
+        const { data: tenants } = await supabase
+          .from("tenants")
+          .select("id,name")
+          .in("id", tenantIds);
+        const map: Record<string, string> = {};
+        for (const t of (tenants || []) as any[]) map[t.id] = t.name;
+        setTenantNameById(map);
+      } else {
+        setTenantNameById({});
       }
-    } catch (error) {
-      console.error("Error loading users:", error);
-      toast({ title: "Error", description: "Failed to load user accounts", variant: "destructive" });
+    } catch (e) {
+      console.error("Failed to load devices:", e);
+      toast({ title: "Error", description: "Failed to load devices", variant: "destructive" });
     } finally {
       setLoading(false);
     }
   };
 
-  const handleAllocate = async (userId: string, userEmail: string, modelId: string) => {
-    const model = allMarketplaceModels.find(m => m.id === modelId);
-    if (!model) return;
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter((d) => {
+      const email = String(d.registered_by_email || "");
+      const fullName = String(d.registered_by_name || "");
+      const tenant = d.tenant_id ? (tenantNameById[d.tenant_id] || "") : "";
+      return (
+        d.id.toLowerCase().includes(q) ||
+        String(d.device_name || "").toLowerCase().includes(q) ||
+        String(d.status || "").toLowerCase().includes(q) ||
+        fullName.toLowerCase().includes(q) ||
+        email.toLowerCase().includes(q) ||
+        tenant.toLowerCase().includes(q)
+      );
+    });
+  }, [rows, search, tenantNameById]);
 
-    setAllocating(true);
-    try {
-      const { error } = await supabase.from("activated_models").insert({
-        user_id: userId,
-        model_id: model.id,
-        model_name: model.name,
-        domain: model.domain as any,
-      });
-
-      if (error) {
-        if (error.code === "23505") {
-          toast({ title: "Already Allocated", description: "Model already assigned to this user", variant: "destructive" });
-        } else throw error;
-        return;
-      }
-
-      toast({ title: "Model Allocated", description: `${model.name} allocated to ${userEmail}` });
-      setAllocatingForUser(null);
-      setSearchTerm("");
-      loadUsers();
-    } catch (error) {
-      console.error("Error allocating:", error);
-      toast({ title: "Error", description: "Failed to allocate model", variant: "destructive" });
-    } finally {
-      setAllocating(false);
+  const statusBadge = (status: DeviceStatus) => {
+    if (status === "online") {
+      return (
+        <Badge variant="outline" className="gap-1 bg-success/10 text-success border-success/20">
+          <Circle className="h-2 w-2 fill-success" />
+          Online
+        </Badge>
+      );
     }
-  };
-
-  const handleDeallocate = async (allocationId: string, modelName: string) => {
-    try {
-      const { error } = await supabase.from("activated_models").delete().eq("id", allocationId);
-      if (error) throw error;
-      toast({ title: "Model Removed", description: `${modelName} deallocated` });
-      loadUsers();
-    } catch (error) {
-      console.error("Error deallocating:", error);
-      toast({ title: "Error", description: "Failed to remove model", variant: "destructive" });
+    if (status === "offline") {
+      return (
+        <Badge variant="outline" className="gap-1 bg-muted text-muted-foreground">
+          <Circle className="h-2 w-2 fill-muted-foreground" />
+          Offline
+        </Badge>
+      );
     }
+    return (
+      <Badge variant="outline" className="gap-1">
+        <Circle className="h-2 w-2" />
+        Never Checked In
+      </Badge>
+    );
   };
 
   if (loading) {
@@ -281,190 +160,96 @@ export default function Devices() {
   }
 
   return (
-    <div className="min-h-screen relative">
-      {/* Animated Background */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-20 left-1/4 w-96 h-96 bg-primary/10 rounded-full blur-3xl animate-glow-pulse" />
-        <div className="absolute bottom-20 right-1/4 w-96 h-96 bg-accent/10 rounded-full blur-3xl animate-glow-pulse" style={{ animationDelay: '2s' }} />
-      </div>
-
-      <div className="relative z-10 space-y-8 animate-fade-in">
-        {/* Hero Header */}
-        <div className="relative rounded-2xl bg-gradient-hero p-8 border border-border/50 backdrop-blur-sm shadow-premium">
-          <div className="absolute inset-0 bg-gradient-subtle rounded-2xl opacity-50" />
-          <div className="relative">
-            <div className="flex items-center gap-3 mb-2">
-              <div className="p-3 rounded-xl bg-gradient-to-br from-primary/20 to-primary/10 shadow-card">
-                <Users className="h-7 w-7 text-primary animate-float" />
-              </div>
-              <h1 className="text-4xl font-display font-bold tracking-tight bg-gradient-to-r from-primary via-primary to-accent bg-clip-text text-transparent">
-                User Accounts
-              </h1>
-            </div>
-            <p className="text-muted-foreground text-lg">
-              Manage user accounts and allocate AI models
-            </p>
-          </div>
+    <div className="space-y-6 animate-in fade-in duration-500">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight text-foreground flex items-center gap-2">
+            <Monitor className="h-6 w-6 text-primary" />
+            Devices
+          </h1>
+          <p className="text-muted-foreground mt-1">All registered devices (admin view).</p>
         </div>
-
-        {/* User Cards */}
-        {users.length === 0 ? (
-          <Card className="bg-card/80 backdrop-blur-sm border-border/50 shadow-card">
-            <CardContent className="text-center py-20">
-              <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-gradient-hero mb-6">
-                <Users className="h-10 w-10 text-primary" />
-              </div>
-              <h3 className="text-2xl font-display font-bold mb-3">No Users Found</h3>
-              <p className="text-muted-foreground max-w-md mx-auto text-lg">
-                Create user accounts from the Admin Dashboard
-              </p>
-            </CardContent>
-          </Card>
-        ) : (
-          <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
-            {users.map((user, index) => {
-              const models = userModels[user.id] || [];
-              const normalizedRole = normalizeRole(user.role);
-              const roleMeta = roleDisplay[normalizedRole];
-              const isAdmin = roleMeta.privileged;
-              const isPickerOpen = allocatingForUser === user.id;
-              const availableModels = allMarketplaceModels.filter(
-                m => !models.some(um => um.model_id === m.id)
-              );
-              const filteredModels = availableModels.filter(m =>
-                m.name.toLowerCase().includes(searchTerm.toLowerCase())
-              );
-
-              return (
-                <Card
-                  key={user.id}
-                  className="group relative overflow-hidden bg-card/90 backdrop-blur-sm border-border/50 shadow-card hover:shadow-premium hover:border-primary/30 transition-all duration-300 animate-scale-in"
-                  style={{ animationDelay: `${index * 50}ms` }}
-                >
-                  <div className="absolute inset-0 pointer-events-none bg-gradient-primary opacity-0 group-hover:opacity-5 transition-opacity duration-300" />
-
-                  <CardHeader className="relative z-10 pb-4">
-                    <div className="flex items-start justify-between mb-3">
-                      <div className="p-3 rounded-xl bg-gradient-hero group-hover:scale-110 transition-transform duration-300">
-                        {isAdmin ? (
-                          <ShieldCheck className="h-6 w-6 text-primary" />
-                        ) : (
-                          <User className="h-6 w-6 text-primary" />
-                        )}
-                      </div>
-                      <Badge variant="outline" className={roleMeta.badgeClass}>
-                        {roleMeta.label}
-                      </Badge>
-                    </div>
-                    <CardTitle className="text-lg font-display font-bold group-hover:text-primary transition-colors truncate">
-                      {user.email}
-                    </CardTitle>
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <Mail className="h-3 w-3" />
-                      <span>Joined {formatDistanceToNow(new Date(user.created_at), { addSuffix: true })}</span>
-                    </div>
-                    <div className="text-xs text-muted-foreground">
-                      Tenant: {user.tenant_name || "Unknown tenant"}
-                    </div>
-                  </CardHeader>
-
-                  <CardContent className="relative z-10 space-y-4">
-                    {/* Allocated Models */}
-                    <div>
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-xs font-medium text-muted-foreground flex items-center gap-1">
-                          <Package className="h-3 w-3" />
-                          Allocated Models
-                        </span>
-                        <Badge variant="outline" className="text-[10px]">{models.length}</Badge>
-                      </div>
-
-                      {models.length > 0 ? (
-                        <div className="space-y-1.5 max-h-32 overflow-y-auto pr-1">
-                          {models.map(model => (
-                            <div key={model.id} className="flex items-center justify-between gap-2 p-2 rounded-lg bg-muted/50 text-xs">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <UserCheck className="h-3 w-3 text-primary shrink-0" />
-                                <span className="truncate font-medium">{model.model_name}</span>
-                              </div>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-6 w-6 shrink-0 text-destructive hover:text-destructive"
-                                onClick={() => handleDeallocate(model.id, model.model_name)}
-                              >
-                                <Trash2 className="h-3 w-3" />
-                              </Button>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <p className="text-xs text-muted-foreground italic py-2">No models allocated</p>
-                      )}
-                    </div>
-
-                    {/* Inline Model Picker */}
-                    <div className="relative" ref={isPickerOpen ? dropdownRef : undefined}>
-                      {isPickerOpen ? (
-                        <div className="border border-border rounded-lg bg-card shadow-lg">
-                          {/* Search input */}
-                          <div className="flex items-center gap-2 p-2 border-b border-border">
-                            <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                            <input
-                              type="text"
-                              className="flex-1 text-sm bg-transparent outline-none placeholder:text-muted-foreground"
-                              placeholder="Search models..."
-                              value={searchTerm}
-                              onChange={(e) => setSearchTerm(e.target.value)}
-                              autoFocus
-                            />
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-5 w-5 shrink-0"
-                              onClick={() => { setAllocatingForUser(null); setSearchTerm(""); }}
-                            >
-                              <X className="h-3 w-3" />
-                            </Button>
-                          </div>
-                          {/* Model list */}
-                          <div className="max-h-40 overflow-y-auto">
-                            {filteredModels.length > 0 ? (
-                              filteredModels.map(model => (
-                                <button
-                                  key={model.id}
-                                  className="w-full flex items-center justify-between gap-2 px-3 py-2 text-xs hover:bg-muted/80 transition-colors text-left disabled:opacity-50"
-                                  disabled={allocating}
-                                  onClick={() => handleAllocate(user.id, user.email, model.id)}
-                                >
-                                  <span className="font-medium truncate">{model.name}</span>
-                                  <Badge variant="secondary" className="text-[10px] shrink-0">{model.domain}</Badge>
-                                </button>
-                              ))
-                            ) : (
-                              <p className="text-xs text-muted-foreground text-center py-3">No models available</p>
-                            )}
-                          </div>
-                        </div>
-                      ) : (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="w-full gap-1.5 hover:bg-primary hover:text-primary-foreground transition-colors"
-                          onClick={() => { setAllocatingForUser(user.id); setSearchTerm(""); }}
-                        >
-                          <Plus className="h-3.5 w-3.5" />
-                          Allocate Model
-                        </Button>
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
-              );
-            })}
+        <div className="flex gap-2 items-center">
+          <div className="relative">
+            <Search className="h-4 w-4 text-muted-foreground absolute left-2 top-1/2 -translate-y-1/2" />
+            <Input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by device id, name, tenant, user..."
+              className="pl-8 w-[360px] max-w-[80vw]"
+            />
           </div>
-        )}
+          <Button variant="outline" onClick={() => void loadDevices()}>
+            Refresh
+          </Button>
+        </div>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Registered devices</CardTitle>
+          <CardDescription>
+            Click a device to open details (requires admin/global admin).
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {filtered.length === 0 ? (
+            <div className="text-sm text-muted-foreground">No devices found.</div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Device</TableHead>
+                  <TableHead>Tenant</TableHead>
+                  <TableHead>Linked user</TableHead>
+                  <TableHead>Last seen</TableHead>
+                  <TableHead>OS / Version</TableHead>
+                  <TableHead className="text-right">Open</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {filtered.map((d) => (
+                  <TableRow key={d.id} className="cursor-pointer" onClick={() => navigate(`/devices/${d.id}`)}>
+                    <TableCell>{statusBadge(d.status)}</TableCell>
+                    <TableCell className="min-w-[260px]">
+                      <div className="font-medium">{d.device_name || "Unnamed device"}</div>
+                      <div className="text-xs text-muted-foreground font-mono break-all">{d.id}</div>
+                    </TableCell>
+                    <TableCell className="text-sm">
+                      {d.tenant_id ? (tenantNameById[d.tenant_id] || d.tenant_id) : "—"}
+                    </TableCell>
+                    <TableCell className="text-sm">
+                      {d.registered_by
+                        ? (() => {
+                            const name = d.registered_by_name || undefined;
+                            const email = d.registered_by_email || undefined;
+                            if (name && email) return `${name} (${email})`;
+                            if (name) return name;
+                            if (email) return email;
+                            return d.registered_by;
+                          })()
+                        : "—"}
+                    </TableCell>
+                    <TableCell className="text-sm">
+                      {d.last_seen_at ? formatDistanceToNow(new Date(d.last_seen_at), { addSuffix: true }) : "Never"}
+                    </TableCell>
+                    <TableCell className="text-sm">
+                      {d.os_type || "—"} {d.app_version ? `• v${d.app_version}` : ""}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Button variant="outline" size="sm" onClick={(e) => { e.stopPropagation(); navigate(`/devices/${d.id}`); }}>
+                        <ExternalLink className="h-4 w-4 mr-2" />
+                        Details
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

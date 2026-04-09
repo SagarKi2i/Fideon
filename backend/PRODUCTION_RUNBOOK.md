@@ -5,6 +5,8 @@
 - Signup wizard metadata persistence and first-model activation
 - Tenant-scope access controls in shared-schema deployment
 
+CI trigger note: backend workflow rerun.
+
 ## Pre-Deploy Checklist
 - Apply all migrations, including:
   - `20260313002000_signup_device_profile_persistence.sql`

@@ -60,6 +60,9 @@ jobs:
 
       - name: Test
         working-directory: backend
+        env:
+          # Required at app import time (see app/factory.py). Not read from backend/.env in CI.
+          DEVICE_JWT_SECRET: ci-test-device-jwt-secret-must-be-non-empty-32chars
         run: |
           if find . -name "test_*.py" -o -name "*_test.py" | grep -q .; then
             pytest --cov=. --cov-report=xml \

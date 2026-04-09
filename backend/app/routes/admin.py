@@ -24,6 +24,7 @@ router = APIRouter()
 VALID_ROLES = {"global_admin", "admin", "user", "viewer", "guest"}
 ADMIN_ACCESS_REQUIRED = "Admin access required"
 PASSWORD_REQUIRED = "Password is required"
+SEAT_LIMIT_REACHED = "FIDEON_OS_LIMIT:SEATS"
 
 # ── Roles an admin can create INSTANTLY (no approval needed) ──────────────────
 ADMIN_INSTANT_ROLES = {"user", "viewer", "guest"}
@@ -187,7 +188,7 @@ async def _finalize_user_creation(
 
             tenants = await postgrest_get(
                 "tenants",
-                f"select=id,name,plan&is_active=eq.true&id=eq.{quote(tenant_id_str, safe='')}&limit=1",
+                f"select=id,name,plan,agent_packs,workflow_addon_slots&is_active=eq.true&id=eq.{quote(tenant_id_str, safe='')}&limit=1",
             )
             tenant_row = tenants[0] if tenants else {}
             tenant_name = tenant_row.get("name")
@@ -237,9 +238,13 @@ async def _finalize_user_creation(
             device_profile.setdefault("os_name", device_profile.get("os_name") or "")
             device_profile.setdefault("app_version", device_profile.get("app_version") or "")
 
+            tenant_agent_packs = tenant_row.get("agent_packs") or []
+            tenant_addon_slots = tenant_row.get("workflow_addon_slots") or 0
             onboarding_metadata = {
                 "tenant_name": tenant_name,
                 "plan": tenant_plan,
+                "agent_packs": tenant_agent_packs,
+                "workflow_addon_slots": tenant_addon_slots,
                 "device_name": device_name,
                 "device_profile": device_profile,
             }
@@ -273,6 +278,14 @@ async def _finalize_user_creation(
                     f"user_id=eq.{quote(user_data['id'], safe='')}",
                     {"tenant_id": tenant_id},
                 )
+            except HTTPException as exc:
+                if exc.status_code in {400, 409} and SEAT_LIMIT_REACHED.lower() in str(exc.detail or "").lower():
+                    raise HTTPException(
+                        status_code=409,
+                        detail="User created, but tenant is at its user limit. Upgrade the tenant plan to add more users.",
+                    ) from exc
+                # Best effort: don't block overall user creation for non-seat-limit failures.
+                pass
             except Exception:
                 pass
 
@@ -290,6 +303,26 @@ async def _finalize_user_creation(
         # We copy distinct model assignments that already exist within the tenant.
         if tenant_id:
             try:
+                # Only inherit models that are eligible for this tenant's packs.
+                # This keeps admin-created users consistent with Marketplace pack-gating.
+                tenant_row = await postgrest_get(
+                    "tenants",
+                    f"select=agent_packs&id=eq.{quote(str(tenant_id), safe='')}&limit=1",
+                )
+                tenant_packs = (tenant_row[0].get("agent_packs") if tenant_row else None) or []
+                allowed_model_ids: set[str] = set()
+                if tenant_packs:
+                    encoded_pack_ids = ",".join(quote(str(pid), safe="") for pid in tenant_packs)
+                    apm_rows = await postgrest_get(
+                        "agent_pack_models",
+                        f"select=model_id&pack_id=in.({encoded_pack_ids})",
+                    )
+                    allowed_model_ids = {
+                        str(r.get("model_id"))
+                        for r in (apm_rows or [])
+                        if r.get("model_id") is not None
+                    }
+
                 existing_models = await postgrest_get(
                     "activated_models",
                     f"select=model_id&user_id=eq.{quote(str(user_data['id']), safe='')}",
@@ -313,6 +346,9 @@ async def _finalize_user_creation(
                         model_name = str(row.get("model_name") or "").strip()
                         domain = str(row.get("domain") or "").strip()
                         if not model_id or not model_name or not domain:
+                            continue
+                        # Enforce insurance pack eligibility. Non-insurance domains are not pack-gated.
+                        if domain == "insurance" and allowed_model_ids and model_id not in allowed_model_ids:
                             continue
                         if model_id in seen_model_ids:
                             continue

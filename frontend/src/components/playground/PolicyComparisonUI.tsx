@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import PolicyClauseRedlineUI from "./PolicyClauseRedlineUI";
+import { parsePolicyClauseDiff } from "@/lib/policyClauseDiff";
 import { 
   Upload, 
   Loader2, 
@@ -34,78 +36,13 @@ interface PolicyComparisonUIProps {
   readonly result: string;
 }
 
-interface ComparisonResult {
-  policyA: {
-    name: string;
-    carrier: string;
-    premium: number;
-    generalLiability: string;
-    deductible: number;
-    cyberCoverage: boolean;
-    eplCoverage: boolean;
-    waterDamage: boolean;
-  };
-  policyB: {
-    name: string;
-    carrier: string;
-    premium: number;
-    generalLiability: string;
-    deductible: number;
-    cyberCoverage: boolean;
-    eplCoverage: boolean;
-    waterDamage: boolean;
-  };
-  recommendation: "A" | "B";
-  gaps: string[];
-  strengths: { policy: "A" | "B"; description: string }[];
-}
-
-// Parse mock result to structured data
-const parseComparisonResult = (result: string): ComparisonResult | null => {
-  if (!result?.includes("Policy Comparison Analysis")) return null;
-  
-  // Mock parsed comparison data
-  return {
-    policyA: {
-      name: "Commercial Package GL-2025-001",
-      carrier: "Travelers Insurance",
-      premium: 8450,
-      generalLiability: "$1M/$2M",
-      deductible: 5000,
-      cyberCoverage: false,
-      eplCoverage: false,
-      waterDamage: false,
-    },
-    policyB: {
-      name: "Business Protection Plus BP-2025-042",
-      carrier: "The Hartford",
-      premium: 10562,
-      generalLiability: "$2M/$4M",
-      deductible: 2500,
-      cyberCoverage: true,
-      eplCoverage: false,
-      waterDamage: true,
-    },
-    recommendation: "B",
-    gaps: [
-      "Neither policy includes Employment Practices Liability (EPL)",
-      "Policy A missing Cyber Liability coverage",
-      "Policy A has water damage exclusion"
-    ],
-    strengths: [
-      { policy: "B", description: "Higher liability limits ($2M/$4M vs $1M/$2M)" },
-      { policy: "B", description: "Lower deductible ($2,500 vs $5,000)" },
-      { policy: "B", description: "Includes Cyber Liability coverage" },
-      { policy: "B", description: "Water damage coverage included" },
-      { policy: "A", description: "Lower premium ($8,450 vs $10,562)" }
-    ]
-  };
-};
+import { tryParsePolicyComparisonStructured } from "@/lib/policyComparisonPrompt";
 
 export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }: PolicyComparisonUIProps) {
   const [policyA, setPolicyA] = useState<File | null>(null);
   const [policyB, setPolicyB] = useState<File | null>(null);
   const [lastPrompt, setLastPrompt] = useState("");
+  const [viewMode, setViewMode] = useState<"coverage" | "clause">("coverage");
   const navigate = useNavigate();
   const { settings: workflowSettings } = useWorkflowSettings();
 
@@ -114,21 +51,37 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
     setLastPrompt(`Compare policies: ${policyA.name} vs ${policyB.name}`);
     onRun({
       type: "policy-comparison",
-      policyA: policyA.name,
-      policyB: policyB.name
+      policyAFile: policyA,
+      policyBFile: policyB,
+      policyAName: policyA.name,
+      policyBName: policyB.name,
     });
   };
 
-  const parsedResult = parseComparisonResult(result);
-  const showQuoteRecommendation = workflowSettings.enableSmartRecommendations && parsedResult &&
-    (parsedResult.policyA.premium > workflowSettings.policyComparisonPremiumThreshold ||
-      parsedResult.policyB.premium > workflowSettings.policyComparisonPremiumThreshold);
+  const structured = useMemo(() => tryParsePolicyComparisonStructured(result), [result]);
+  const clauseDiff = useMemo(() => parsePolicyClauseDiff(result), [result]);
+
+  // Auto-select clause redline when structured diff is available.
+  useEffect(() => {
+    setViewMode(clauseDiff ? "clause" : "coverage");
+  }, [result, clauseDiff]); // result changes imply clauseDiff potentially changed
+  const showQuoteRecommendation =
+    workflowSettings.enableSmartRecommendations &&
+    structured &&
+    typeof (structured.extracted_fields?.policyA as any)?.premium === "number" &&
+    typeof (structured.extracted_fields?.policyB as any)?.premium === "number" &&
+    (
+      ((structured.extracted_fields?.policyA as any).premium as number) > workflowSettings.policyComparisonPremiumThreshold ||
+      ((structured.extracted_fields?.policyB as any).premium as number) > workflowSettings.policyComparisonPremiumThreshold
+    );
 
   const getPremiumTrend = () => {
-    if (!parsedResult) return { isHigher: false, diff: 0, pct: 0 };
-    const diff = Math.abs(parsedResult.policyB.premium - parsedResult.policyA.premium);
-    const isHigher = parsedResult.policyB.premium > parsedResult.policyA.premium;
-    const pct = Math.round((diff / parsedResult.policyA.premium) * 100);
+    const a = structured ? (structured.extracted_fields?.policyA as any)?.premium : undefined;
+    const b = structured ? (structured.extracted_fields?.policyB as any)?.premium : undefined;
+    if (typeof a !== "number" || typeof b !== "number" || a <= 0) return { isHigher: false, diff: 0, pct: 0 };
+    const diff = Math.abs(b - a);
+    const isHigher = b > a;
+    const pct = Math.round((diff / a) * 100);
     return { isHigher, diff, pct };
   };
 
@@ -141,8 +94,10 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
   const openFilePicker = (inputId: string) => document.getElementById(inputId)?.click();
 
   const calculateSavingsPotential = () => {
-    if (!parsedResult) return 0;
-    const higherPremium = Math.max(parsedResult.policyA.premium, parsedResult.policyB.premium);
+    const a = structured ? (structured.extracted_fields?.policyA as any)?.premium : undefined;
+    const b = structured ? (structured.extracted_fields?.policyB as any)?.premium : undefined;
+    if (typeof a !== "number" || typeof b !== "number") return 0;
+    const higherPremium = Math.max(a, b);
     // Estimated savings potential of 15-25%
     return Math.round(higherPremium * 0.20);
   };
@@ -285,12 +240,59 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
       </Card>
 
       {/* Results Section */}
-      {result && parsedResult && (
+      {result && (structured || clauseDiff) && (
         <OutputCorrection modelId={modelId ?? "policy-comparison"} prompt={lastPrompt} output={result}>
         {(() => {
           const trend = getPremiumTrend();
+          const toggleBar = clauseDiff ? (
+            <div className="flex items-center gap-2 flex-wrap">
+              <Button
+                type="button"
+                variant={viewMode === "coverage" ? "default" : "outline"}
+                size="sm"
+                onClick={() => setViewMode("coverage")}
+              >
+                Coverage View
+              </Button>
+              <Button
+                type="button"
+                variant={viewMode === "clause" ? "default" : "outline"}
+                size="sm"
+                onClick={() => setViewMode("clause")}
+              >
+                Clause Redline
+              </Button>
+            </div>
+          ) : null;
+
+          if (viewMode === "clause" && clauseDiff) {
+            return (
+              <div className="space-y-6 animate-fade-in">
+                {toggleBar}
+                <PolicyClauseRedlineUI result={result} />
+              </div>
+            );
+          }
+
+          // If coverage parsing fails, prefer the clause redline view (when available).
+          // This also ensures TypeScript narrows `parsedResult` for the Coverage JSX below.
+          if (!structured) {
+            return (
+              <div className="space-y-6 animate-fade-in">
+                {toggleBar}
+                {clauseDiff ? <PolicyClauseRedlineUI result={result} /> : null}
+              </div>
+            );
+          }
+
+          const policyA: any = structured.extracted_fields?.policyA ?? {};
+          const policyB: any = structured.extracted_fields?.policyB ?? {};
+          const recommendation = structured.recommendation?.recommended_policy ?? "NEITHER";
+          const gaps = (structured.recommendation?.rationale ?? structured.warnings ?? []).slice(0, 6);
+
           return (
         <div className="space-y-6 animate-fade-in">
+          {toggleBar}
           {/* Summary Cards */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <Card className="bg-card border-border">
@@ -325,7 +327,7 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-xs text-muted-foreground">Coverage Gaps Found</p>
-                    <p className="text-2xl font-bold text-foreground">{parsedResult.gaps.length}</p>
+                    <p className="text-2xl font-bold text-foreground">{Math.max(0, gaps.length)}</p>
                   </div>
                   <div className="h-10 w-10 rounded-full bg-destructive/10 flex items-center justify-center">
                     <AlertTriangle className="h-5 w-5 text-destructive" />
@@ -342,7 +344,9 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-xs text-muted-foreground">Recommendation</p>
-                    <p className="text-2xl font-bold text-foreground">Policy {parsedResult.recommendation}</p>
+                    <p className="text-2xl font-bold text-foreground">
+                      {recommendation === "NEITHER" ? "Review" : `Policy ${recommendation}`}
+                    </p>
                   </div>
                   <div className="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center">
                     <Shield className="h-5 w-5 text-primary" />
@@ -371,11 +375,11 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
                 </div>
                 <div className="p-4 bg-blue-500/5 text-center">
                   <Badge variant="outline" className="mb-2 text-blue-600 border-blue-600">Policy A</Badge>
-                  <p className="text-sm font-medium text-foreground">{parsedResult.policyA.carrier}</p>
+                  <p className="text-sm font-medium text-foreground">{String(policyA.carrier ?? policyA.insurer ?? "—")}</p>
                 </div>
                 <div className="p-4 bg-green-500/5 text-center">
                   <Badge variant="outline" className="mb-2 text-green-600 border-green-600">Policy B</Badge>
-                  <p className="text-sm font-medium text-foreground">{parsedResult.policyB.carrier}</p>
+                  <p className="text-sm font-medium text-foreground">{String(policyB.carrier ?? policyB.insurer ?? "—")}</p>
                 </div>
 
                 {/* Premium Row */}
@@ -384,13 +388,22 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
                   Annual Premium
                 </div>
                 <div className="p-4 border-t border-border text-center">
-                  <span className="text-lg font-bold text-foreground">${parsedResult.policyA.premium.toLocaleString()}</span>
+                  <span className="text-lg font-bold text-foreground">
+                    {typeof policyA.premium === "number" ? `$${policyA.premium.toLocaleString()}` : "—"}
+                  </span>
                 </div>
                 <div className="p-4 border-t border-border text-center">
-                  <span className="text-lg font-bold text-foreground">${parsedResult.policyB.premium.toLocaleString()}</span>
-                  {parsedResult.policyB.premium > parsedResult.policyA.premium && (
-                    <Badge variant="secondary" className="ml-2 text-xs">+{Math.round((parsedResult.policyB.premium - parsedResult.policyA.premium) / parsedResult.policyA.premium * 100)}%</Badge>
-                  )}
+                  <span className="text-lg font-bold text-foreground">
+                    {typeof policyB.premium === "number" ? `$${policyB.premium.toLocaleString()}` : "—"}
+                  </span>
+                  {typeof policyA.premium === "number" &&
+                    typeof policyB.premium === "number" &&
+                    policyA.premium > 0 &&
+                    policyB.premium > policyA.premium && (
+                      <Badge variant="secondary" className="ml-2 text-xs">
+                        +{Math.round(((policyB.premium - policyA.premium) / policyA.premium) * 100)}%
+                      </Badge>
+                    )}
                 </div>
 
                 {/* General Liability Row */}
@@ -398,45 +411,51 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
                   <Shield className="h-4 w-4 text-muted-foreground" />
                   General Liability
                 </div>
-                <div className="p-4 border-t border-border text-center text-foreground">{parsedResult.policyA.generalLiability}</div>
+                <div className="p-4 border-t border-border text-center text-foreground">
+                  {String(policyA.general_liability ?? policyA.generalLiability ?? policyA.gl_limits ?? "—")}
+                </div>
                 <div className="p-4 border-t border-border text-center">
-                  <span className="text-foreground">{parsedResult.policyB.generalLiability}</span>
-                  <Badge className="ml-2 bg-green-500/20 text-green-600 hover:bg-green-500/30">Better</Badge>
+                  <span className="text-foreground">
+                    {String(policyB.general_liability ?? policyB.generalLiability ?? policyB.gl_limits ?? "—")}
+                  </span>
                 </div>
 
                 {/* Deductible Row */}
                 <div className="p-4 border-t border-border font-medium">Deductible</div>
-                <div className="p-4 border-t border-border text-center text-foreground">${parsedResult.policyA.deductible.toLocaleString()}</div>
+                <div className="p-4 border-t border-border text-center text-foreground">
+                  {typeof policyA.deductible === "number" ? `$${policyA.deductible.toLocaleString()}` : "—"}
+                </div>
                 <div className="p-4 border-t border-border text-center">
-                  <span className="text-foreground">${parsedResult.policyB.deductible.toLocaleString()}</span>
-                  <Badge className="ml-2 bg-green-500/20 text-green-600 hover:bg-green-500/30">Lower</Badge>
+                  <span className="text-foreground">
+                    {typeof policyB.deductible === "number" ? `$${policyB.deductible.toLocaleString()}` : "—"}
+                  </span>
                 </div>
 
                 {/* Cyber Coverage Row */}
                 <div className="p-4 border-t border-border font-medium">Cyber Liability</div>
                 <div className="p-4 border-t border-border text-center">
-                  {renderCoverageIcon(parsedResult.policyA.cyberCoverage)}
+                  {renderCoverageIcon(Boolean(policyA.cyber_coverage ?? policyA.cyberCoverage))}
                 </div>
                 <div className="p-4 border-t border-border text-center">
-                  {renderCoverageIcon(parsedResult.policyB.cyberCoverage)}
+                  {renderCoverageIcon(Boolean(policyB.cyber_coverage ?? policyB.cyberCoverage))}
                 </div>
 
                 {/* EPL Coverage Row */}
                 <div className="p-4 border-t border-border font-medium">Employment Practices</div>
                 <div className="p-4 border-t border-border text-center">
-                  {renderCoverageIcon(parsedResult.policyA.eplCoverage)}
+                  {renderCoverageIcon(Boolean(policyA.epl_coverage ?? policyA.eplCoverage))}
                 </div>
                 <div className="p-4 border-t border-border text-center">
-                  {renderCoverageIcon(parsedResult.policyB.eplCoverage)}
+                  {renderCoverageIcon(Boolean(policyB.epl_coverage ?? policyB.eplCoverage))}
                 </div>
 
                 {/* Water Damage Row */}
                 <div className="p-4 border-t border-border font-medium">Water Damage</div>
                 <div className="p-4 border-t border-border text-center">
-                  {renderCoverageIcon(parsedResult.policyA.waterDamage)}
+                  {renderCoverageIcon(Boolean(policyA.water_damage ?? policyA.waterDamage))}
                 </div>
                 <div className="p-4 border-t border-border text-center">
-                  {renderCoverageIcon(parsedResult.policyB.waterDamage)}
+                  {renderCoverageIcon(Boolean(policyB.water_damage ?? policyB.waterDamage))}
                 </div>
               </div>
             </CardContent>
@@ -451,7 +470,7 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {parsedResult.gaps.map((gap) => (
+              {gaps.map((gap) => (
                 <div key={gap} className="flex items-start gap-3 p-3 rounded-lg bg-amber-500/5 border border-amber-500/20">
                   <AlertTriangle className="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" />
                   <div>
@@ -475,22 +494,18 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
             </CardHeader>
             <CardContent>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {parsedResult.strengths.map((strength) => (
+                {(structured.recommendation?.rationale ?? []).map((rationale) => (
                   <div 
-                    key={`${strength.policy}-${strength.description}`} 
-                    className={`flex items-start gap-3 p-3 rounded-lg border ${
-                      strength.policy === "A" 
-                        ? "bg-blue-500/5 border-blue-500/20" 
-                        : "bg-green-500/5 border-green-500/20"
-                    }`}
+                    key={rationale} 
+                    className="flex items-start gap-3 p-3 rounded-lg border bg-green-500/5 border-green-500/20"
                   >
                     <Badge 
                       variant="outline" 
-                      className={strength.policy === "A" ? "text-blue-600 border-blue-600" : "text-green-600 border-green-600"}
+                      className="text-green-600 border-green-600"
                     >
-                      {strength.policy}
+                      Tip
                     </Badge>
-                    <p className="text-sm text-foreground">{strength.description}</p>
+                    <p className="text-sm text-foreground">{rationale}</p>
                   </div>
                 ))}
               </div>
@@ -507,17 +522,18 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
                 <div className="flex-1">
                   <h3 className="text-lg font-semibold text-foreground mb-2">AI Recommendation</h3>
                   <p className="text-muted-foreground">
-                    Based on the analysis, <strong className="text-foreground">Policy B</strong> offers superior protection 
-                    with higher liability limits, lower deductibles, and comprehensive cyber coverage. 
-                    While the premium is 25% higher, the significantly better coverage breadth and 
-                    reduced out-of-pocket exposure make it the recommended choice.
+                    {structured.recommendation?.rationale?.length
+                      ? structured.recommendation.rationale.join(" ")
+                      : "Recommendation not available; review the clause diff and extracted fields."}
                   </p>
                   <div className="flex items-center gap-2 mt-4">
                     <Badge variant="secondary" className="text-primary">
                       <CheckCircle2 className="h-3 w-3 mr-1" />
-                      Recommended: Policy B
+                      Recommended: {recommendation === "NEITHER" ? "Review" : `Policy ${recommendation}`}
                     </Badge>
-                    <Badge variant="outline">Coverage Score: 92/100</Badge>
+                    <Badge variant="outline">
+                      Deviation: {typeof structured.deviation_percent === "number" ? `${structured.deviation_percent.toFixed(1)}%` : "—"}
+                    </Badge>
                   </div>
                 </div>
               </div>

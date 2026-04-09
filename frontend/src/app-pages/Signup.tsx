@@ -18,6 +18,8 @@ type DeviceType = "desktop" | "laptop" | "mobile" | "tablet" | "other";
 type NavigatorWithUserAgentData = Navigator & { userAgentData?: { platform?: string } };
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PASSWORD_STRENGTH_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d]).+$/;
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL as string | undefined;
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY as string | undefined;
 const LIMITS = {
   tenantName: { min: 2, max: 100 },
   fullName: { min: 2, max: 80 },
@@ -37,62 +39,103 @@ const PLANS = [
   {
     id: "starter",
     name: "Starter",
-    description: "Perfect for POCs and small teams getting started.",
-    features: ["Up to 5 users", "1 environment", "Shared Groq API key"],
+    price: "$60,000 / year",
+    description: "For independent agencies beginning their AI automation journey.",
+    features: [
+      "Up to 5 users",
+      "1 agent pack",
+      "Only 3 active AI models",
+      "3 workflow slots included",
+      "Community support",
+    ],
+    includedSlots: 3,
+    maxAddonSlots: 5,
+    maxPacks: 1,
+    maxModels: 3,
   },
   {
-    id: "growth",
-    name: "Growth",
-    description: "For teams moving workloads into production.",
-    features: ["Up to 25 users", "2 environments", "Observability and alerts"],
+    id: "professional",
+    name: "Professional",
+    price: "$180,000 / year",
+    description: "For mid-size brokerages scaling AI across production workflows.",
+    features: [
+      "Up to 25 users",
+      "3 agent packs",
+      "Only 8 active AI models",
+      "15 workflow slots included",
+      "Agent pipeline scheduling",
+      "Priority support",
+    ],
+    includedSlots: 15,
+    maxAddonSlots: 5,
+    maxPacks: 3,
+    maxModels: 8,
   },
   {
     id: "enterprise",
     name: "Enterprise",
-    description: "For regulated, multi-tenant deployments at scale.",
-    features: ["Unlimited users", "Multi-region", "Advanced governance"],
+    price: "$480,000 / year",
+    description: "For large brokerage groups and regulated carriers — unlimited scale and unlimited models.",
+    features: [
+      "Unlimited users",
+      "Unlimited agent packs",
+      "Unlimited active AI models",
+      "Unlimited scale",
+      "Unlimited workflow slots",
+      "Full agent pipeline suite",
+      "Dedicated SLA support (24/7)",
+    ],
+    includedSlots: null,
+    maxAddonSlots: 0,
+    maxPacks: null,
+    maxModels: null,
   },
 ] as const;
 
 const STEP_META = [
   { index: 0, label: "Account" },
   { index: 1, label: "Plan" },
-  { index: 2, label: "Model" },
+  { index: 2, label: "Agent Packs" },
   { index: 3, label: "Device" },
 ] as const;
 
-const ALL_MODELS = [
+const AGENT_PACKS = [
   {
-    id: "quote-generation",
-    name: "Quote Generation Agent",
-    domain: "insurance",
-    description: "End-to-end commercial lines quote assistance.",
+    id: "underwriting",
+    name: "Underwriting Pack",
+    description: "Quote generation, coverage validation, ACORD parsing, submission intake.",
   },
   {
-    id: "policy-comparison",
-    name: "Policy Comparison Engine",
-    domain: "insurance",
-    description: "Side-by-side policy comparison with gap detection.",
+    id: "claims",
+    name: "Claims Pack",
+    description: "FNOL intelligence, claims adjudication, fraud flag review.",
   },
   {
-    id: "document-retrieval",
-    name: "Document Retrieval",
-    domain: "insurance",
-    description: "Fetch renewals, endorsements, invoices from carriers.",
+    id: "distribution",
+    name: "Distribution Pack",
+    description: "Policy comparison, document retrieval, renewal packets.",
   },
   {
-    id: "claims-fnol",
-    name: "Claims and FNOL Intelligence",
-    domain: "insurance",
-    description: "Analyze FNOL documents and detect claim red flags.",
+    id: "compliance",
+    name: "Compliance Pack",
+    description: "Compliance checks, COI issuance, regulatory validation.",
   },
   {
-    id: "coverage-validation",
-    name: "Coverage Validation and Eligibility",
-    domain: "insurance",
-    description: "Validate eligibility, business class, and binding authority.",
+    id: "agentic-rag",
+    name: "Agentic RAG Add-On",
+    description: "Retrieval-augmented generation over carrier and policy docs.",
   },
 ] as const;
+
+type TenantSignupConfig = {
+  tenant: { id: string; slug: string; name: string };
+  plan: (typeof PLANS)[number]["id"] | string;
+  agent_packs: string[];
+  max_agent_packs: number | null;
+  remaining_pack_slots: number | null;
+  workflow_addon_slots: number;
+  workflow_slots_total: number | null;
+};
 
 export default function Signup() {
   const navigate = useNavigate();
@@ -110,7 +153,8 @@ export default function Signup() {
   const [selectedRole, setSelectedRole] = useState<AppRole>("global_admin");
 
   const [selectedPlan, setSelectedPlan] = useState<(typeof PLANS)[number]["id"]>("starter");
-  const [selectedModelId, setSelectedModelId] = useState<(typeof ALL_MODELS)[number]["id"]>("quote-generation");
+  const [workflowAddonSlots, setWorkflowAddonSlots] = useState(0);
+  const [selectedPacks, setSelectedPacks] = useState<string[]>([]);
   const [deviceName, setDeviceName] = useState("My First Edge Device");
   const [deviceType, setDeviceType] = useState<DeviceType>("desktop");
   const [osName, setOsName] = useState("");
@@ -122,7 +166,6 @@ export default function Signup() {
   const [timezone, setTimezone] = useState("");
   const [platform, setPlatform] = useState("");
   const [hardwareFingerprint, setHardwareFingerprint] = useState("");
-  const [showAllModels, setShowAllModels] = useState(false);
   const [step0Errors, setStep0Errors] = useState<{
     tenantName?: string;
     fullName?: string;
@@ -131,10 +174,16 @@ export default function Signup() {
     confirmPassword?: string;
   }>({});
   const [checkingEmail, setCheckingEmail] = useState(false);
+  const [emailCheckError, setEmailCheckError] = useState<string | null>(null);
   const [lastCheckedEmail, setLastCheckedEmail] = useState("");
   const [lastCheckedEmailExists, setLastCheckedEmailExists] = useState<boolean | null>(null);
   const emailAvailabilityCacheRef = useRef<Map<string, boolean>>(new Map());
   const emailCheckControllerRef = useRef<AbortController | null>(null);
+
+  const [tenantConfig, setTenantConfig] = useState<TenantSignupConfig | null>(null);
+  const [checkingTenant, setCheckingTenant] = useState(false);
+  const [tenantCheckError, setTenantCheckError] = useState<string | null>(null);
+  const tenantCheckControllerRef = useRef<AbortController | null>(null);
 
   const buildStep0Errors = () => {
     const nextErrors: typeof step0Errors = {};
@@ -243,15 +292,85 @@ export default function Signup() {
     toSha256(fingerprintSeed).then(setHardwareFingerprint).catch(() => setHardwareFingerprint(""));
   }, []);
 
+  useEffect(() => {
+    const normalizedTenant = tenantName.trim();
+    if (normalizedTenant.length < LIMITS.tenantName.min) {
+      setTenantConfig(null);
+      setTenantCheckError(null);
+      setCheckingTenant(false);
+      return;
+    }
+
+    const debounceId = window.setTimeout(() => {
+      if (tenantCheckControllerRef.current) {
+        tenantCheckControllerRef.current.abort();
+      }
+      const controller = new AbortController();
+      tenantCheckControllerRef.current = controller;
+
+      setCheckingTenant(true);
+      setTenantCheckError(null);
+
+      const timeout = window.setTimeout(() => controller.abort(), 4000);
+      fetch(
+        apiUrl(`/api/v1/tenants/signup-config?tenant_name=${encodeURIComponent(normalizedTenant)}`),
+        { method: "GET", signal: controller.signal },
+      )
+        .then(async (res) => {
+          window.clearTimeout(timeout);
+          if (res.status === 404) {
+            setTenantConfig(null);
+            return;
+          }
+          if (!res.ok) {
+            const msg = await res.text().catch(() => "");
+            throw new Error(msg || "Unable to check tenant configuration.");
+          }
+          const cfg = (await res.json()) as TenantSignupConfig;
+          setTenantConfig(cfg);
+
+          // Existing tenant: lock plan to tenant selection and preselect existing packs.
+          const planId = String(cfg.plan || "starter") as (typeof PLANS)[number]["id"];
+          setSelectedPlan(planId);
+          setWorkflowAddonSlots(Number(cfg.workflow_addon_slots || 0));
+          setSelectedPacks((prev) => {
+            const required = new Set((cfg.agent_packs || []).filter(Boolean));
+            const merged = new Set([...(prev || []), ...required]);
+            return Array.from(merged);
+          });
+        })
+        .catch((err: any) => {
+          if (err?.name === "AbortError") return;
+          // Do not block signup if backend is unreachable; just show a hint.
+          setTenantCheckError("Unable to verify tenant configuration right now.");
+          setTenantConfig(null);
+        })
+        .finally(() => {
+          if (tenantCheckControllerRef.current === controller) {
+            tenantCheckControllerRef.current = null;
+          }
+          setCheckingTenant(false);
+        });
+    }, 350);
+
+    return () => window.clearTimeout(debounceId);
+  }, [tenantName]);
+
   const canGoNext = () => {
     if (step === 0) {
       return !!tenantName && !!fullName && !!email && !!password && !!confirmPassword;
     }
     if (step === 1) {
+      if (checkingTenant) return false;
       return !!selectedPlan;
     }
     if (step === 2) {
-      return !!selectedModelId;
+      if (checkingTenant) return false;
+      if (selectedPacks.length === 0) return false;
+      const activePlan = PLANS.find((p) => p.id === selectedPlan);
+      const maxPacks = tenantConfig ? (tenantConfig.max_agent_packs ?? null) : (activePlan?.maxPacks ?? null);
+      if (maxPacks !== null && selectedPacks.length > maxPacks) return false;
+      return true;
     }
     if (step === 3) {
       return !!deviceName.trim();
@@ -287,6 +406,7 @@ export default function Signup() {
     emailCheckControllerRef.current = controller;
 
     setCheckingEmail(true);
+    setEmailCheckError(null);
     try {
       const timeout = window.setTimeout(() => controller.abort(), 4000);
       const res = await fetch(
@@ -296,8 +416,8 @@ export default function Signup() {
       window.clearTimeout(timeout);
       if (!res.ok) {
         setLastCheckedEmail(normalizedEmail);
-        setLastCheckedEmailExists(false);
-        emailAvailabilityCacheRef.current.set(normalizedEmail, false);
+        setLastCheckedEmailExists(null);
+        setEmailCheckError("Unable to verify email availability right now.");
         return false;
       }
       const payload = await res.json().catch(() => null);
@@ -311,7 +431,8 @@ export default function Signup() {
         return false;
       }
       setLastCheckedEmail(normalizedEmail);
-      setLastCheckedEmailExists(false);
+      setLastCheckedEmailExists(null);
+      setEmailCheckError("Unable to verify email availability right now.");
       return false;
     } finally {
       if (emailCheckControllerRef.current === controller) {
@@ -399,46 +520,89 @@ export default function Signup() {
     setLoading(true);
     try {
       const nowIso = new Date().toISOString();
-      const { data, error } = await supabase.auth.signUp({
-        email: normalizedEmail,
-        password,
-        options: {
-          data: {
-            tenant_name: tenantName.trim(),
-            full_name: fullName.trim(),
-            requested_role: selectedRole,
-            plan: selectedPlan,
-            default_model_id: selectedModelId,
-            device_name: deviceName.trim(),
-            signup_started_at: nowIso,
-            signup_wizard_version: "v1",
-            device_profile: {
-              device_name: deviceName.trim(),
-              device_type: deviceType,
-              os_name: osName,
-              os_version: osVersion,
-              app_version: appVersion,
-              browser_name: browserName,
-              browser_version: browserVersion,
-              locale,
-              timezone,
-              platform,
-              user_agent: navigator.userAgent,
-              hardware_fingerprint_sha256: hardwareFingerprint,
-              captured_at: nowIso,
-              source: "signup_wizard",
-            },
-          },
+      const requiredTenantPacks = new Set((tenantConfig?.agent_packs || []).filter(Boolean));
+      const mergedPacks = Array.from(new Set([...(selectedPacks || []), ...requiredTenantPacks]));
+      const activePlan = PLANS.find((p) => p.id === selectedPlan);
+      const isExistingTenant = Boolean(tenantConfig);
+      const userMetadata: Record<string, any> = {
+        tenant_name: tenantName.trim(),
+        full_name: fullName.trim(),
+        requested_role: selectedRole,
+        agent_packs: mergedPacks,
+        device_name: deviceName.trim(),
+        signup_started_at: nowIso,
+        signup_wizard_version: "v1",
+        device_profile: {
+          device_name: deviceName.trim(),
+          device_type: deviceType,
+          os_name: osName,
+          os_version: osVersion,
+          app_version: appVersion,
+          browser_name: browserName,
+          browser_version: browserVersion,
+          locale,
+          timezone,
+          platform,
+          user_agent: navigator.userAgent,
+          hardware_fingerprint_sha256: hardwareFingerprint,
+          captured_at: nowIso,
+          source: "signup_wizard",
         },
+      };
+
+      // Only the global-admin "create tenant" flow should send plan/limits fields.
+      if (!isExistingTenant) {
+        userMetadata.plan = selectedPlan;
+        userMetadata.workflow_addon_slots = workflowAddonSlots;
+        userMetadata.max_agent_packs = activePlan?.maxPacks ?? null;
+        userMetadata.max_active_models = activePlan?.maxModels ?? null;
+        userMetadata.default_model_id = null;
+      }
+
+      if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+        throw new Error("Supabase environment variables are not configured.");
+      }
+
+      // Use GoTrue signup directly so we can access DB-trigger error codes
+      // (e.g. pack-limit concurrency failures with code `P0001`).
+      const signupRes = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
+        method: "POST",
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: normalizedEmail,
+          password,
+          data: {
+            ...userMetadata,
+          },
+        }),
       });
 
-      if (error) throw error;
+      const signupJson = await signupRes.json().catch(() => null);
+      if (!signupRes.ok) {
+        throw {
+          code: signupJson?.code,
+          message: signupJson?.message,
+          status: signupRes.status,
+        };
+      }
 
-      if (data.user) {
+      const signedUpUserId = signupJson?.user?.id as string | undefined;
+      const accessToken = signupJson?.access_token as string | undefined;
+      const refreshToken = signupJson?.refresh_token as string | undefined;
+
+      if (accessToken && refreshToken) {
+        await supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
+      }
+
+      if (signedUpUserId) {
         const { error: profileError } = await supabase
           .from("app_users")
           .update({ full_name: fullName })
-          .eq("user_id", data.user.id);
+          .eq("user_id", signedUpUserId);
         if (profileError) {
           console.warn("Unable to update app_users full_name:", profileError.message);
         }
@@ -451,14 +615,32 @@ export default function Signup() {
       });
     } catch (error: any) {
       console.error("Onboarding error:", error);
+      const errCode = String(error?.code || "").toLowerCase();
       const rawMessage = String(error?.message || "").toLowerCase();
-      const friendlyMessage = rawMessage.includes("already registered")
+
+      let friendlyMessage =
+        rawMessage.includes("already registered")
         || rawMessage.includes("already been registered")
         || rawMessage.includes("already exists")
-        ? "This email is already registered. Try signing in or using password reset."
-        : rawMessage.includes("password")
-        ? `Password does not meet security requirements. Use ${LIMITS.password.min}-${LIMITS.password.max} characters with uppercase, lowercase, number, and special character.`
-        : error?.message ?? "Something went wrong while creating your tenant.";
+          ? "This email is already registered. Try signing in or using password reset."
+          : rawMessage.includes("password")
+          ? `Password does not meet security requirements. Use ${LIMITS.password.min}-${LIMITS.password.max} characters with uppercase, lowercase, number, and special character.`
+          : error?.message ?? "Something went wrong while creating your tenant.";
+
+      // GoTrue / DB trigger failures propagate as code `P0001` with messages like:
+      //   FIDEON_OS_LIMIT:PACKS Agent pack limit reached (2/1). Upgrade plan to add more packs.
+      if (
+        errCode === "p0001"
+        && (rawMessage.includes("pack limit reached") || rawMessage.includes("fideon_os_limit:packs"))
+      ) {
+        if (tenantConfig?.max_agent_packs === null || tenantConfig?.max_agent_packs === undefined) {
+          friendlyMessage = "Pack limit reached for this tenant. Please select fewer packs and try again.";
+        } else if (tenantConfig?.remaining_pack_slots === 0) {
+          friendlyMessage = "This tenant has no remaining pack slots. Please select fewer packs or upgrade the plan.";
+        } else {
+          friendlyMessage = `Pack limit reached for this tenant. Please select up to ${tenantConfig?.remaining_pack_slots} more pack(s).`;
+        }
+      }
       toast({
         title: "Onboarding failed",
         description: friendlyMessage,
@@ -522,6 +704,17 @@ export default function Signup() {
                 {step0Errors.tenantName && (
                   <p className="text-xs text-destructive">{step0Errors.tenantName}</p>
                 )}
+                {!step0Errors.tenantName && checkingTenant && (
+                  <p className="text-xs text-muted-foreground">Checking tenant configuration...</p>
+                )}
+                {!step0Errors.tenantName && !checkingTenant && tenantConfig && (
+                  <p className="text-xs text-primary">
+                    Existing tenant detected. Plan and enabled packs will be applied automatically.
+                  </p>
+                )}
+                {!step0Errors.tenantName && !checkingTenant && tenantCheckError && (
+                  <p className="text-xs text-amber-600">{tenantCheckError}</p>
+                )}
               </div>
               <div className="space-y-2">
                 <Label htmlFor="full-name">Your Name</Label>
@@ -576,6 +769,7 @@ export default function Signup() {
                     setEmail(e.target.value);
                     setLastCheckedEmail("");
                     setLastCheckedEmailExists(null);
+                    setEmailCheckError(null);
                     if (step0Errors.email) {
                       setStep0Errors((prev) => ({ ...prev, email: undefined }));
                     }
@@ -626,6 +820,9 @@ export default function Signup() {
                 )}
                 {!step0Errors.email && checkingEmail && (
                   <p className="text-xs text-muted-foreground">Checking email availability...</p>
+                )}
+                {!step0Errors.email && !checkingEmail && emailCheckError && (
+                  <p className="text-xs text-amber-600">{emailCheckError}</p>
                 )}
               </div>
               <div className="space-y-2">
@@ -750,7 +947,9 @@ export default function Signup() {
                 Choose a Plan
               </h2>
               <p className="text-sm text-muted-foreground">
-                You can change plans later as you scale.
+                {tenantConfig
+                  ? "This tenant already exists. Plan is locked to the global admin selection."
+                  : "You can change plans later as you scale."}
               </p>
             </div>
             <div className="grid gap-4 md:grid-cols-3">
@@ -758,19 +957,28 @@ export default function Signup() {
                 <button
                   key={plan.id}
                   type="button"
-                  onClick={() => setSelectedPlan(plan.id)}
+                  onClick={() => {
+                    if (tenantConfig) return;
+                    setSelectedPlan(plan.id);
+                    setWorkflowAddonSlots(0);
+                    setSelectedPacks([]);
+                  }}
+                  disabled={Boolean(tenantConfig)}
                   className={`rounded-xl border p-4 text-left transition h-full ${
                     selectedPlan === plan.id
                       ? "border-primary bg-primary/5 shadow-sm"
+                      : tenantConfig
+                      ? "border-border opacity-50 cursor-not-allowed"
                       : "border-border hover:border-primary/40"
                   }`}
                 >
-                  <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center justify-between mb-1">
                     <h3 className="font-semibold">{plan.name}</h3>
                     {selectedPlan === plan.id && (
                       <Badge className="text-[10px]">Selected</Badge>
                     )}
                   </div>
+                  <p className="text-xs font-medium text-primary mb-1">{plan.price}</p>
                   <p className="text-xs text-muted-foreground mb-3">
                     {plan.description}
                   </p>
@@ -785,58 +993,141 @@ export default function Signup() {
                 </button>
               ))}
             </div>
+
+            {/* Workflow Slots Configuration */}
+            {(() => {
+              const activePlan = PLANS.find((p) => p.id === selectedPlan);
+              if (!activePlan) return null;
+              return (
+                <div className="rounded-xl border p-4 space-y-3">
+                  <div>
+                    <h3 className="font-semibold text-sm">Workflow Slots</h3>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      {activePlan.includedSlots === null
+                        ? "Unlimited workflow slots included with Enterprise."
+                        : `${activePlan.includedSlots} slots included with ${activePlan.name}.`}
+                      {activePlan.maxAddonSlots > 0 && " Add up to 5 extra slots at $5,000–$6,000 each."}
+                    </p>
+                  </div>
+                  {activePlan.maxAddonSlots > 0 ? (
+                    <div className="flex items-center gap-3">
+                      <label htmlFor="addon-slots" className="text-xs font-medium whitespace-nowrap">
+                        Additional slots (0–{activePlan.maxAddonSlots}):
+                      </label>
+                      <input
+                        id="addon-slots"
+                        type="number"
+                        min={0}
+                        max={activePlan.maxAddonSlots}
+                        value={workflowAddonSlots}
+                        onChange={(e) =>
+                          setWorkflowAddonSlots(
+                            Math.min(activePlan.maxAddonSlots, Math.max(0, Number(e.target.value)))
+                          )
+                        }
+                        className="w-20 rounded-md border border-input bg-background px-3 py-1.5 text-sm"
+                      />
+                      <span className="text-xs text-muted-foreground">
+                        Total: {activePlan.includedSlots! + workflowAddonSlots} slots
+                      </span>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-primary font-medium">No additional slots needed — unlimited included.</p>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         );
-      case 2:
+      case 2: {
+        const activePlan = PLANS.find((p) => p.id === selectedPlan);
+        const maxPacks   = tenantConfig ? (tenantConfig.max_agent_packs ?? null) : (activePlan?.maxPacks ?? null);
+        const maxModels  = activePlan?.maxModels ?? null;
+        const atPackLimit = maxPacks !== null && selectedPacks.length >= maxPacks;
+        const requiredTenantPacks = new Set((tenantConfig?.agent_packs || []).filter(Boolean));
+        const remainingSlots =
+          maxPacks === null ? null : Math.max(0, maxPacks - requiredTenantPacks.size);
         return (
           <div className="space-y-6">
             <div>
               <h2 className="text-2xl font-semibold flex items-center gap-2">
                 <Sparkles className="h-5 w-5 text-primary" />
-                Pick Your First Model
+                Select Agent Packs
               </h2>
               <p className="text-sm text-muted-foreground">
-                We keep this choice in onboarding metadata for initial setup.
+                {maxPacks === null
+                  ? "Choose any agent packs to activate — unlimited on Enterprise."
+                  : tenantConfig
+                  ? `This tenant can have up to ${maxPacks} agent pack${maxPacks > 1 ? "s" : ""}. ${requiredTenantPacks.size} already selected by the global admin.${remainingSlots !== null ? ` You can add ${remainingSlots} more.` : ""}`
+                  : `Your ${activePlan?.name} plan includes up to ${maxPacks} agent pack${maxPacks > 1 ? "s" : ""} and ${maxModels} active AI models.`}
               </p>
             </div>
-            <div className="grid gap-4 md:grid-cols-3">
-              {(showAllModels ? ALL_MODELS : ALL_MODELS.slice(0, 3)).map((model) => (
-                <button
-                  key={model.id}
-                  type="button"
-                  onClick={() => setSelectedModelId(model.id)}
-                  className={`rounded-xl border p-4 text-left transition h-full ${
-                    selectedModelId === model.id
-                      ? "border-primary bg-primary/5 shadow-sm"
-                      : "border-border hover:border-primary/40"
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <h3 className="font-semibold text-sm">{model.name}</h3>
-                    <Badge variant="outline" className="text-[10px] capitalize">
-                      {model.domain}
-                    </Badge>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    {model.description}
-                  </p>
-                </button>
-              ))}
+
+            {/* Pack counter */}
+            <div className="flex items-center justify-between rounded-lg border bg-muted/30 px-4 py-2">
+              <span className="text-xs text-muted-foreground">Packs selected</span>
+              <span className={`text-sm font-semibold ${atPackLimit ? "text-amber-500" : "text-primary"}`}>
+                {selectedPacks.length}
+                {maxPacks !== null && ` / ${maxPacks}`}
+              </span>
             </div>
-            {!showAllModels && ALL_MODELS.length > 3 && (
-              <div className="flex justify-center">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setShowAllModels(true)}
-                >
-                  Show More Models
-                </Button>
-              </div>
+
+            <div className="grid gap-4 md:grid-cols-3">
+              {AGENT_PACKS.map((pack) => {
+                const selected  = selectedPacks.includes(pack.id);
+                const required  = requiredTenantPacks.has(pack.id);
+                const tenantLockedOut = Boolean(tenantConfig) && maxPacks !== null && remainingSlots === 0 && !required;
+                const disabled  = required || tenantLockedOut || (!selected && atPackLimit);
+                return (
+                  <button
+                    key={pack.id}
+                    type="button"
+                    disabled={disabled}
+                    onClick={() =>
+                      setSelectedPacks((prev) =>
+                        required ? prev : selected ? prev.filter((id) => id !== pack.id) : [...prev, pack.id]
+                      )
+                    }
+                    className={`rounded-xl border p-4 text-left transition h-full ${
+                      selected
+                        ? "border-primary bg-primary/5 shadow-sm"
+                        : disabled
+                        ? "border-border opacity-40 grayscale cursor-not-allowed"
+                        : "border-border hover:border-primary/40"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <h3 className="font-semibold text-sm">{pack.name}</h3>
+                      {selected && <CheckCircle2 className="h-4 w-4 text-primary shrink-0" />}
+                    </div>
+                    <p className="text-xs text-muted-foreground">{pack.description}</p>
+                    {tenantConfig && required && (
+                      <p className="text-[10px] text-primary mt-2 pt-2 border-t border-border/50">
+                        Enabled for this tenant (chosen by global admin)
+                      </p>
+                    )}
+                    {maxModels !== null && (
+                      <p className="text-[10px] text-muted-foreground mt-2 pt-2 border-t border-border/50">
+                        Up to {maxModels} active models with this plan
+                      </p>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            {selectedPacks.length === 0 && (
+              <p className="text-xs text-destructive">Select at least one agent pack to continue.</p>
+            )}
+            {atPackLimit && (
+              <p className="text-xs text-amber-500">
+                Pack limit reached for {activePlan?.name} ({maxPacks} pack{maxPacks !== 1 ? "s" : ""}).
+                Upgrade to Professional or Enterprise to add more.
+              </p>
             )}
           </div>
         );
+      }
       case 3:
         return (
           <div className="space-y-6">
@@ -935,7 +1226,7 @@ export default function Signup() {
                 <p className="font-medium text-foreground mb-1">What happens on complete setup</p>
                 <ol className="list-decimal list-inside space-y-1">
                   <li>We create your user in Supabase Auth.</li>
-                  <li>We store role, tenant name, plan, model, and device metadata.</li>
+                  <li>We store role, tenant name, plan, agent packs, and device metadata.</li>
                   <li>Your role is assigned via your existing Supabase signup trigger.</li>
                 </ol>
               </div>

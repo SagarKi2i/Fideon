@@ -8,6 +8,11 @@ from urllib.parse import quote
 from fastapi import APIRouter, BackgroundTasks, File, Header, HTTPException, Query, UploadFile
 
 from app.core.supabase import postgrest_get, postgrest_insert, postgrest_patch, verify_user
+from app.services.webhook_engine import (
+    WEBHOOK_EVENT_INFERENCE_COMPLETE,
+    resolve_tenant_id_for_user,
+    try_emit_webhook_event,
+)
 from app.schemas.pod_workflow import (
     PodAdminReviewRequest,
     PodBatchReviewRequest,
@@ -336,6 +341,18 @@ async def extract_pod(
             "status": "draft",
         },
     ))[0]
+
+    tenant_id = await resolve_tenant_id_for_user(str(user_id))
+    await try_emit_webhook_event(
+        tenant_id,
+        WEBHOOK_EVENT_INFERENCE_COMPLETE,
+        {
+            "run_id": str(row["id"]),
+            "workflow": "pod",
+            "pod_id": pod_id,
+            "overall_confidence": overall_confidence,
+        },
+    )
 
     return PodExtractResponse(
         run_id=str(row["id"]),
