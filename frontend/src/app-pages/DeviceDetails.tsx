@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useLocation } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -48,6 +48,9 @@ interface Device {
   last_seen_at: string | null;
   registered_at: string;
   is_active: boolean;
+  registered_by?: string | null;
+  registered_by_email?: string | null;
+  registered_by_name?: string | null;
 }
 
 interface DeviceModel {
@@ -85,9 +88,25 @@ interface AvailableModel {
   domain: string;
 }
 
+/** Same display rules as the Devices list "Linked user" column. */
+function formatLinkedUserLabel(d: {
+  registered_by?: string | null;
+  registered_by_name?: string | null;
+  registered_by_email?: string | null;
+}): string | null {
+  const name = d.registered_by_name || undefined;
+  const email = d.registered_by_email || undefined;
+  if (name && email) return `${name} (${email})`;
+  if (name) return name;
+  if (email) return email;
+  if (d.registered_by) return null;
+  return null;
+}
+
 export default function DeviceDetails() {
   const { toast } = useToast();
   const navigate = useNavigate();
+  const location = useLocation();
   const { id } = useParams();
   const [device, setDevice] = useState<Device | null>(null);
   const [allocatedModels, setAllocatedModels] = useState<DeviceModel[]>([]);
@@ -198,11 +217,18 @@ export default function DeviceDetails() {
         throw new Error(msg);
       }
 
-      setDevice(((payload as any)?.device || null) as Device | null);
+      const dev = ((payload as any)?.device || null) as Device | null;
+      setDevice(dev);
       setAllocatedModels((((payload as any)?.device_models || []) as DeviceModel[]) || []);
       setSyncLogs((((payload as any)?.sync_logs || []) as SyncLog[]) || []);
       setUsageLogs((((payload as any)?.usage_logs || []) as UsageLog[]) || []);
       setAvailableModels((((payload as any)?.available_models || []) as AvailableModel[]) || []);
+
+      const linkedLabel = dev ? formatLinkedUserLabel(dev) : null;
+      const nextState = { ...(location.state as Record<string, unknown> | null) };
+      if (linkedLabel) nextState.linkedUserLabel = linkedLabel;
+      else delete nextState.linkedUserLabel;
+      navigate(".", { replace: true, state: nextState });
     } catch (error: any) {
       console.error("Error loading device data:", error);
       toast({
@@ -398,6 +424,8 @@ export default function DeviceDetails() {
     (m) => !alreadyAllocated.includes(m.model_id)
   );
 
+  const linkedUserLine = formatLinkedUserLabel(device);
+
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
       <div className="flex items-center gap-4">
@@ -414,7 +442,17 @@ export default function DeviceDetails() {
           <h1 className="text-3xl font-bold tracking-tight text-foreground">
             {device.device_name}
           </h1>
-          <p className="text-muted-foreground mt-1">Device ID: {device.id}</p>
+          <div className="mt-1 space-y-1">
+            {linkedUserLine ? (
+              <p className="text-muted-foreground">
+                <span className="font-medium text-foreground/90">Linked user: </span>
+                {linkedUserLine}
+              </p>
+            ) : (
+              <p className="text-muted-foreground">No linked user</p>
+            )}
+            <p className="text-xs text-muted-foreground font-mono break-all">Device ID: {device.id}</p>
+          </div>
         </div>
         <div>{getStatusBadge(device.status)}</div>
       </div>

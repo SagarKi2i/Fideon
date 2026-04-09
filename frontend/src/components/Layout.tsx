@@ -198,6 +198,12 @@ export function Layout({ children }: LayoutProps) {
   }
 
   const pathSegments = location.pathname.split("/").filter(Boolean);
+  const deviceDetailLinkedUser =
+    pathSegments.length === 2 &&
+    pathSegments[0] === "devices" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(pathSegments[1])
+      ? (location.state as { linkedUserLabel?: string } | null)?.linkedUserLabel
+      : undefined;
   const routeLabelMap: Record<string, string> = {
     admin: "Admin Dashboard",
     "acord-queue": "Training Review",
@@ -249,15 +255,34 @@ export function Layout({ children }: LayoutProps) {
                   {pathSegments.map((segment, index) => {
                     const to = `/${pathSegments.slice(0, index + 1).join("/")}`;
                     const isLast = index === pathSegments.length - 1;
-                    const label = routeLabelMap[segment] || segment.replace(/-/g, " ");
+                    const isDeviceDetailCrumb =
+                      index === 1 &&
+                      pathSegments[0] === "devices" &&
+                      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(segment);
+                    const label =
+                      isDeviceDetailCrumb && deviceDetailLinkedUser
+                        ? deviceDetailLinkedUser
+                        : routeLabelMap[segment] || segment.replace(/-/g, " ");
+                    const crumbNaturalCase = Boolean(isDeviceDetailCrumb && deviceDetailLinkedUser);
                     return [
                       <BreadcrumbSeparator key={`${to}-sep`} />,
                       <BreadcrumbItem key={to}>
                         {isLast ? (
-                          <BreadcrumbPage className="capitalize">{label}</BreadcrumbPage>
+                          <BreadcrumbPage
+                            className={
+                              crumbNaturalCase
+                                ? "truncate max-w-[min(100vw-8rem,28rem)]"
+                                : "capitalize"
+                            }
+                          >
+                            {label}
+                          </BreadcrumbPage>
                         ) : (
                           <BreadcrumbLink asChild>
-                            <Link to={to} className="capitalize">
+                            <Link
+                              to={to}
+                              className={crumbNaturalCase ? "truncate max-w-[min(100vw-8rem,28rem)]" : "capitalize"}
+                            >
                               {label}
                             </Link>
                           </BreadcrumbLink>

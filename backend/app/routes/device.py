@@ -708,6 +708,17 @@ async def get_device_admin(device_id: str = Path(...), authorization: Optional[s
         raise HTTPException(status_code=404, detail="Device not found")
     device = device_rows[0]
 
+    uid = device.get("registered_by")
+    if uid:
+        users = await postgrest_get(
+            "app_users",
+            f"select=user_id,email,full_name&user_id=eq.{quote(str(uid), safe='')}&limit=1",
+        )
+        if users:
+            u = users[0]
+            device["registered_by_email"] = u.get("email")
+            device["registered_by_name"] = u.get("full_name")
+
     if requester_role != "global_admin" and requester_tenant_id:
         if str(device.get("tenant_id") or "") != str(requester_tenant_id):
             raise HTTPException(status_code=403, detail="Cross-tenant device access denied")

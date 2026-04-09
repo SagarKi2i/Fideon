@@ -47,6 +47,12 @@ export default function DeviceSetup() {
   const [deviceJwt, setDeviceJwt] = useState("");
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const [manualDisconnected, setManualDisconnected] = useState(false);
+  /** From Electron main: os.hostname + node-machine-id (registration fingerprint). */
+  const [localMachine, setLocalMachine] = useState<{
+    machineName: string;
+    machineId: string;
+    platform: string;
+  } | null>(null);
 
   useEffect(() => {
     void checkElectron();
@@ -58,6 +64,19 @@ export default function DeviceSetup() {
     }
     void checkOllama();
   }, []);
+
+  useEffect(() => {
+    if (!isElectronApp || !window.electron?.device?.getDeviceInfo) return;
+    void window.electron.device.getDeviceInfo().then((res) => {
+      if (res?.success && "machineName" in res && "machineId" in res) {
+        setLocalMachine({
+          machineName: res.machineName,
+          machineId: res.machineId,
+          platform: res.platform ?? "",
+        });
+      }
+    });
+  }, [isElectronApp]);
 
   // Background heartbeat: every 60s, report device + local model status to cloud.
   useEffect(() => {
@@ -308,8 +327,34 @@ export default function DeviceSetup() {
             Link this device to your tenant using your current login session.
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-2">
-          <Label>Device ID</Label>
+        <CardContent className="space-y-4">
+          {localMachine ? (
+            <div className="rounded-lg border border-border/60 bg-muted/30 p-3 space-y-2">
+              <p className="text-xs font-medium text-muted-foreground">This computer</p>
+              <div className="grid gap-2 text-sm">
+                <div className="grid grid-cols-1 sm:grid-cols-[8rem_1fr] gap-1 sm:gap-3">
+                  <span className="text-muted-foreground">Hostname</span>
+                  <span className="font-mono text-foreground break-all">{localMachine.machineName}</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-[8rem_1fr] gap-1 sm:gap-3">
+                  <span className="text-muted-foreground">Machine ID</span>
+                  <span className="font-mono text-xs break-all">{localMachine.machineId}</span>
+                </div>
+                {localMachine.platform ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-[8rem_1fr] gap-1 sm:gap-3">
+                    <span className="text-muted-foreground">Platform</span>
+                    <span className="font-mono">{localMachine.platform}</span>
+                  </div>
+                ) : null}
+              </div>
+              <p className="text-[11px] text-muted-foreground pt-1 border-t border-border/50">
+                Stable hardware-derived ID used for registration. This is not the same as the cloud device ID below.
+              </p>
+            </div>
+          ) : null}
+
+          <div className="space-y-2">
+          <Label>Cloud device ID</Label>
           <div className="flex flex-col sm:flex-row gap-2">
             <Input value={deviceId ?? "Not registered yet"} readOnly className="font-mono text-xs" />
             <Button
@@ -320,7 +365,7 @@ export default function DeviceSetup() {
                 if (!deviceId) return;
                 try {
                   await navigator.clipboard.writeText(deviceId);
-                  toast({ title: "Copied", description: "Device ID copied to clipboard." });
+                  toast({ title: "Copied", description: "Cloud device ID copied to clipboard." });
                 } catch {
                   toast({ title: "Copy failed", description: "Please copy manually.", variant: "destructive" });
                 }
@@ -356,6 +401,7 @@ export default function DeviceSetup() {
           <p className="text-xs text-muted-foreground">
             If this shows “Not registered yet”, click Refresh below to register/reconnect, then link.
           </p>
+          </div>
         </CardContent>
       </Card>
 
