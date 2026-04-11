@@ -9,6 +9,7 @@ import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { formatDistanceToNow } from "date-fns";
 import { Loader2, Monitor, Search, Circle, ExternalLink } from "lucide-react";
+import { apiUrl } from "@/lib/apiBaseUrl";
 
 type DeviceStatus = "online" | "offline" | "never_checked_in";
 
@@ -73,7 +74,7 @@ export default function Devices() {
         return;
       }
 
-      const resp = await fetch(`${window.location.protocol}//${window.location.hostname}:8000/api/v1/admin/devices`, {
+      const resp = await fetch(apiUrl("/api/v1/admin/devices"), {
         method: "GET",
         headers: {
           Authorization: `Bearer ${session.access_token}`,
