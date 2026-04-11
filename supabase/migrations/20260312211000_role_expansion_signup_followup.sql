@@ -1,7 +1,9 @@
 -- Follow-up migration after enum expansion.
--- Safe to use new enum values here because prior migration commits them first.
+-- When run via Supabase CLI, the prior file commits before this file runs.
+-- When run from a single concatenated script, the bundle inserts COMMIT after the ADD VALUE migration.
 
 -- Allow global_admin to pass admin checks used across RLS and backend access checks.
+-- Compare global_admin via role::text so we never rely on a not-yet-committed enum label in one xact.
 CREATE OR REPLACE FUNCTION public.has_role(_user_id UUID, _role app_role)
 RETURNS BOOLEAN
 LANGUAGE SQL
@@ -15,7 +17,7 @@ AS $$
     WHERE user_id = _user_id
       AND (
         role = _role
-        OR (_role = 'admin'::app_role AND role = 'global_admin'::app_role)
+        OR (_role = 'admin'::app_role AND role::text = 'global_admin')
       )
   )
 $$;

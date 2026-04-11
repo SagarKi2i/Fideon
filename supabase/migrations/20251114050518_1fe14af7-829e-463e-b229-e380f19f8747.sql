@@ -174,7 +174,11 @@ INSERT INTO storage.buckets (id, name)
 VALUES ('documents', 'documents')
 ON CONFLICT (id) DO NOTHING;
 
--- Storage policies for documents bucket
+-- Storage policies for documents bucket (idempotent if policies already exist)
+DROP POLICY IF EXISTS "Users can upload their own documents" ON storage.objects;
+DROP POLICY IF EXISTS "Users can view their own documents" ON storage.objects;
+DROP POLICY IF EXISTS "Users can delete their own documents" ON storage.objects;
+
 CREATE POLICY "Users can upload their own documents"
   ON storage.objects FOR INSERT
   WITH CHECK (
