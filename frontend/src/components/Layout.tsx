@@ -80,7 +80,7 @@ export function Layout({ children }: LayoutProps) {
       if (!user) return;
       setHeaderReady(false);
       try {
-        const { data: profile } = await supabase
+        const { data: profile } = await (supabase as any)
           .from("app_users")
           .select("full_name,tenant_id")
           .eq("user_id", user.id)
@@ -90,7 +90,7 @@ export function Layout({ children }: LayoutProps) {
         setDisplayName(resolvedName);
 
         if (profile?.tenant_id) {
-          const { data: tenant } = await supabase
+          const { data: tenant } = await (supabase as any)
             .from("tenants")
             .select("name")
             .eq("id", profile.tenant_id)
@@ -225,7 +225,7 @@ export function Layout({ children }: LayoutProps) {
   const initialsSource = displayName || user.email || "U";
   const initials = initialsSource
     .split(" ")
-    .map((p) => p[0]?.toUpperCase())
+    .map((p: any) => p[0]?.toUpperCase())
     .filter(Boolean)
     .slice(0, 2)
     .join("");
@@ -246,7 +246,7 @@ export function Layout({ children }: LayoutProps) {
                       <Link to="/">Home</Link>
                     </BreadcrumbLink>
                   </BreadcrumbItem>
-                  {pathSegments.map((segment, index) => {
+                  {pathSegments.map((segment: any, index: any) => {
                     const to = `/${pathSegments.slice(0, index + 1).join("/")}`;
                     const isLast = index === pathSegments.length - 1;
                     const label = routeLabelMap[segment] || segment.replace(/-/g, " ");

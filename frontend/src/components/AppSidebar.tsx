@@ -91,7 +91,7 @@ const electronItems = [
 export function AppSidebar() {
   const { isMobile, setOpenMobile } = useSidebar();
   const { isAdmin, role } = useUserRole();
-  const visibleItems = items.filter((item) => {
+  const visibleItems = items.filter((item: any) => {
     if (!role) return false;
     return item.allowedRoles.includes(role);
   });
@@ -106,7 +106,7 @@ export function AppSidebar() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
-      const { data, error } = await supabase
+      const { data, error } = await (supabase as any)
         .from("activated_models")
         .select("*")
         .eq("user_id", user.id);
@@ -189,7 +189,7 @@ export function AppSidebar() {
             <SidebarGroupLabel className="text-sidebar-foreground/70">Admin</SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
-                {adminItems.map((item) => (
+                {adminItems.map((item: any) => (
                   <SidebarMenuItem key={item.title}>
                     <SidebarMenuButton asChild tooltip={item.title}>
                       <NavLink 
@@ -214,7 +214,7 @@ export function AppSidebar() {
           <SidebarGroupLabel className="text-sidebar-foreground/70">Navigation</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {visibleItems.map((item) => (
+              {visibleItems.map((item: any) => (
                 <SidebarMenuItem key={item.title}>
                   <SidebarMenuButton asChild tooltip={item.title}>
                     <NavLink 
@@ -255,7 +255,7 @@ export function AppSidebar() {
               <CollapsibleContent>
                 <SidebarGroupContent>
                   <SidebarMenu>
-                    {activatedPods.map((pod) => (
+                    {activatedPods.map((pod: any) => (
                       <SidebarMenuItem key={pod.id}>
                         <SidebarMenuButton asChild tooltip={pod.model_name}>
                           <NavLink 
@@ -282,7 +282,7 @@ export function AppSidebar() {
             <SidebarGroupLabel className="text-sidebar-foreground/70">Device</SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
-                {electronItems.map((item) => (
+                {electronItems.map((item: any) => (
                   <SidebarMenuItem key={item.title}>
                     <SidebarMenuButton asChild tooltip={item.title}>
                       <NavLink 

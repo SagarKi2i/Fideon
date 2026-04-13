@@ -106,7 +106,7 @@ export default function LocalModelManager({ activatedModels }: LocalModelManager
 
   const isModelInstalled = (modelId: string): boolean => {
     const ollamaModelName = getOllamaModelName(modelId);
-    return localModels.some(m => m.name.startsWith(ollamaModelName.split(':')[0]));
+    return localModels.some((m: any) => m.name.startsWith(ollamaModelName.split(':')[0]));
   };
 
   const formatBytes = (bytes: number): string => {
@@ -191,11 +191,11 @@ export default function LocalModelManager({ activatedModels }: LocalModelManager
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="space-y-3">
-          {activatedModels.map((model) => {
+          {activatedModels.map((model: any) => {
             const ollamaModelName = getOllamaModelName(model.model_id);
             const installed = isModelInstalled(model.model_id);
             const isDownloading = downloading[model.model_id];
-            const localModel = localModels.find(m => 
+            const localModel = localModels.find((m: any) => 
               m.name.startsWith(ollamaModelName.split(':')[0])
             );
 

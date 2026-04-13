@@ -52,12 +52,5 @@ export const supabase = createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABL
 
   },
 
-  // Route Realtime WebSocket directly (bypasses APIM which doesn't support WS upgrades).
-  // Set NEXT_PUBLIC_SUPABASE_REALTIME_URL to wss://<supabase-host>/realtime/v1 in staging/prod.
-  // Falls back to the default derived from SUPABASE_URL when the env var is absent.
-  ...(process.env.NEXT_PUBLIC_SUPABASE_REALTIME_URL
-    ? { realtime: { url: process.env.NEXT_PUBLIC_SUPABASE_REALTIME_URL } }
-    : {}),
-
 });
  

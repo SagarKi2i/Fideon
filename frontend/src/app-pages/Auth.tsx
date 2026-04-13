@@ -80,7 +80,7 @@ function isRecoveryRoute(pathname: string, search: string, hash: string): boolea
 }
 
 async function resolveEffectiveRole(userId: string): Promise<AppRole> {
-  const { data: roleData, error: roleError } = await supabase
+  const { data: roleData, error: roleError } = await (supabase as any)
     .from("user_roles")
     .select("role")
     .eq("user_id", userId)
@@ -228,7 +228,7 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
     () =>
       ssoProviderCsv
         .split(",")
-        .map((s) => s.trim().toLowerCase())
+        .map((s: any) => s.trim().toLowerCase())
         .filter((s): s is Provider => ["google", "github", "azure"].includes(s)),
     [ssoProviderCsv]
   );
@@ -913,7 +913,7 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
                     Single sign-on
                   </div>
                   <div className="grid grid-cols-1 gap-2">
-                    {allowedProviders.map((provider) => (
+                    {allowedProviders.map((provider: any) => (
                       <Button
                         key={provider}
                         type="button"
@@ -955,7 +955,7 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
                             onChange={(e) => setFactorId(e.target.value)}
                             className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                           >
-                            {factors.map((f) => (
+                            {factors.map((f: any) => (
                               <option key={f.id} value={f.id}>{f.label}</option>
                             ))}
                           </select>

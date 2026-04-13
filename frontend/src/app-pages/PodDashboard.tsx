@@ -212,7 +212,7 @@ function PodSpecificTable({ modelId }: Readonly<{ modelId: string }>) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {documentRetrievalLogs.map((log) => (
+            {documentRetrievalLogs.map((log: any) => (
               <TableRow key={`${log.date}-${log.carrier}-${log.documents}`}>
                 <TableCell className="font-medium">{log.date}</TableCell>
                 <TableCell>
@@ -256,7 +256,7 @@ function PodSpecificTable({ modelId }: Readonly<{ modelId: string }>) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {quoteGenerationLogs.map((log) => (
+            {quoteGenerationLogs.map((log: any) => (
               <TableRow key={`${log.date}-${log.type}-${log.carrier}`}>
                 <TableCell className="font-medium">{log.date}</TableCell>
                 <TableCell>{log.type}</TableCell>
@@ -293,7 +293,7 @@ function PodSpecificTable({ modelId }: Readonly<{ modelId: string }>) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {policyComparisonLogs.map((log) => (
+            {policyComparisonLogs.map((log: any) => (
               <TableRow key={`${log.date}-${log.policies}`}>
                 <TableCell className="font-medium">{log.date}</TableCell>
                 <TableCell>
@@ -326,7 +326,7 @@ function PodSpecificTable({ modelId }: Readonly<{ modelId: string }>) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {claimsFnolLogs.map((log) => (
+            {claimsFnolLogs.map((log: any) => (
               <TableRow key={`${log.date}-${log.claimId}`}>
                 <TableCell className="font-medium">{log.date}</TableCell>
                 <TableCell>
@@ -363,7 +363,7 @@ function PodSpecificTable({ modelId }: Readonly<{ modelId: string }>) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {multiDocumentLogs.map((log) => (
+            {multiDocumentLogs.map((log: any) => (
               <TableRow key={`${log.date}-${log.analysis}`}>
                 <TableCell className="font-medium">{log.date}</TableCell>
                 <TableCell>
@@ -403,7 +403,7 @@ function PodSpecificTable({ modelId }: Readonly<{ modelId: string }>) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {submissionIntakeLogs.map((log) => (
+            {submissionIntakeLogs.map((log: any) => (
               <TableRow key={`${log.date}-${log.submissionId}`}>
                 <TableCell className="font-medium">{log.date}</TableCell>
                 <TableCell>
@@ -460,7 +460,7 @@ function PodSpecificTable({ modelId }: Readonly<{ modelId: string }>) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {claimsAdjudicationLogs.map((log) => (
+            {claimsAdjudicationLogs.map((log: any) => (
               <TableRow key={`${log.date}-${log.claimId}`}>
                 <TableCell className="font-medium">{log.date}</TableCell>
                 <TableCell>
@@ -532,7 +532,7 @@ export default function PodDashboard() {
         return;
       }
 
-      const { data, error } = await supabase
+      const { data, error } = await (supabase as any)
         .from("activated_models")
         .select("*")
         .eq("user_id", user.id)
@@ -562,7 +562,7 @@ export default function PodDashboard() {
     
     setDeactivating(true);
     try {
-      const { error } = await supabase
+      const { error } = await (supabase as any)
         .from("activated_models")
         .delete()
         .eq("id", pod.id);

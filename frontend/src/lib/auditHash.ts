@@ -22,7 +22,7 @@ async function sha256Hex(data: string): Promise<string> {
   const bytes = encoder.encode(data);
   const digest = await window.crypto.subtle.digest("SHA-256", bytes);
   const hashArray = Array.from(new Uint8Array(digest));
-  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+  return hashArray.map((b: any) => b.toString(16).padStart(2, "0")).join("");
 }
 
 export async function computeAuditIntegrityHash(input: AuditHashInput): Promise<string> {

@@ -75,7 +75,7 @@ export default function MyModels() {
       }
       setCurrentUserId(user.id);
 
-      const { data, error } = await supabase
+      const { data, error } = await (supabase as any)
         .from("activated_models")
         .select("*")
         .eq("user_id", user.id)
@@ -84,7 +84,7 @@ export default function MyModels() {
       if (error) throw error;
       const nextModels = data || [];
       setModels(nextModels);
-      void loadModelTelemetry(user.id, nextModels.map((m) => m.model_id));
+      void loadModelTelemetry(user.id, nextModels.map((m: any) => m.model_id));
     } catch (error) {
       console.error("Error loading models:", error);
       toast({
@@ -103,7 +103,7 @@ export default function MyModels() {
       return;
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await (supabase as any)
       .from("chat_conversations")
       .select("model_id,updated_at")
       .eq("user_id", userId)
@@ -129,7 +129,7 @@ export default function MyModels() {
 
     const maxCount = Math.max(
       1,
-      ...Object.values(modelStats).map((s) => s.count),
+      ...Object.values(modelStats).map((s: any) => s.count),
     );
 
     const nextTelemetry: Record<string, ModelTelemetry> = {};
@@ -180,7 +180,7 @@ export default function MyModels() {
 
   const handleDeactivate = async (modelId: string) => {
     try {
-      const modelToDelete = models.find((m) => m.id === modelId);
+      const modelToDelete = models.find((m: any) => m.id === modelId);
       if (!modelToDelete) {
         throw new Error("Selected model not found.");
       }
@@ -283,7 +283,7 @@ export default function MyModels() {
             </div>
           ) : (
             <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-3">
-              {models.map((model, index) => (
+              {models.map((model: any, index: any) => (
                 (() => {
                   const telemetry = telemetryByModelId[model.model_id] || DEFAULT_TELEMETRY;
                   return (

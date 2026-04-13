@@ -133,23 +133,23 @@ export default function ReviewQueue() {
     }
   };
 
-  const filteredReviews = reviews.filter((r) => {
+  const filteredReviews = reviews.filter((r: any) => {
     if (domainFilter !== "all" && r.domain !== domainFilter) return false;
     if (typeFilter !== "all" && r.decision_type !== typeFilter) return false;
     return true;
   });
 
-  const pendingReviews = filteredReviews.filter((r) => r.status === "pending");
-  const completedReviews = filteredReviews.filter((r) => r.status !== "pending");
-  const reviewIds = useMemo(() => new Set(reviews.map((r) => r.id)), [reviews]);
+  const pendingReviews = filteredReviews.filter((r: any) => r.status === "pending");
+  const completedReviews = filteredReviews.filter((r: any) => r.status !== "pending");
+  const reviewIds = useMemo(() => new Set(reviews.map((r: any) => r.id)), [reviews]);
 
   useEffect(() => {
     if (!requestedReviewId) return;
     if (!reviewIds.has(requestedReviewId)) return;
     setExpandedId(requestedReviewId);
   }, [requestedReviewId, reviewIds]);
-  const domains = [...new Set(reviews.map((r) => r.domain))];
-  const types = [...new Set(reviews.map((r) => r.decision_type))];
+  const domains = [...new Set(reviews.map((r: any) => r.domain))];
+  const types = [...new Set(reviews.map((r: any) => r.decision_type))];
 
   const renderConfidenceBar = (score: number | null) => {
     if (score === null) return null;
@@ -317,7 +317,7 @@ export default function ReviewQueue() {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All Domains</SelectItem>
-            {domains.map((d) => (
+            {domains.map((d: any) => (
               <SelectItem key={d} value={d} className="capitalize">{d}</SelectItem>
             ))}
           </SelectContent>
@@ -328,7 +328,7 @@ export default function ReviewQueue() {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All Types</SelectItem>
-            {types.map((t) => (
+            {types.map((t: any) => (
               <SelectItem key={t} value={t}>{DECISION_TYPE_LABELS[t] ?? t}</SelectItem>
             ))}
           </SelectContent>
@@ -363,7 +363,7 @@ export default function ReviewQueue() {
             </Card>
           ) : (
             <div className="space-y-3">
-              {pendingReviews.map((review) => renderReviewCard(review, isAdmin))}
+              {pendingReviews.map((review: any) => renderReviewCard(review, isAdmin))}
             </div>
           )}
         </TabsContent>
@@ -378,7 +378,7 @@ export default function ReviewQueue() {
             </Card>
           ) : (
             <div className="space-y-3">
-              {completedReviews.map((review) => renderReviewCard(review, false))}
+              {completedReviews.map((review: any) => renderReviewCard(review, false))}
             </div>
           )}
         </TabsContent>

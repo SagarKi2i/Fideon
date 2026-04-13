@@ -39,7 +39,7 @@ export default function PendingDevices() {
   async function fetchPendingDevices() {
     try {
       setLoading(true);
-      const { data, error } = await supabase
+      const { data, error } = await (supabase as any)
         .from('devices')
         .select('id,device_name,device_token,os_type,registered_at,metadata')
         .eq('status', 'never_checked_in')
@@ -61,7 +61,7 @@ export default function PendingDevices() {
 
   async function handleApprove(deviceId: string) {
     try {
-      const { error: deviceError } = await supabase
+      const { error: deviceError } = await (supabase as any)
         .from('devices')
         .update({ status: 'offline', is_active: true })
         .eq('id', deviceId);
@@ -69,7 +69,7 @@ export default function PendingDevices() {
       if (deviceError) throw deviceError;
 
       // Create default license
-      const { error: licenseError } = await supabase
+      const { error: licenseError } = await (supabase as any)
         .from('device_licenses')
         .insert([
           {
@@ -99,7 +99,7 @@ export default function PendingDevices() {
 
   async function handleReject(deviceId: string) {
     try {
-      const { error } = await supabase
+      const { error } = await (supabase as any)
         .from('devices')
         .update({ is_active: false })
         .eq('id', deviceId);
@@ -170,7 +170,7 @@ export default function PendingDevices() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {devices.map((device) => (
+                {devices.map((device: any) => (
                   <TableRow key={device.id}>
                     <TableCell className="font-medium">{device.device_name}</TableCell>
                     <TableCell>

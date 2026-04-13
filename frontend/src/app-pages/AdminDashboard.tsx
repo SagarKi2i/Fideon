@@ -208,7 +208,7 @@ export default function AdminDashboard() {
 
   const fetchPairingInsights = useCallback(async () => {
     try {
-      const { data: pairingRows, error: pairingError } = await supabase
+      const { data: pairingRows, error: pairingError } = await (supabase as any)
         .from('device_pairings')
         .select('id,status,created_at,expires_at,consumed_at,linked_device_id,primary_device_label')
         .order('created_at', { ascending: false })
@@ -226,7 +226,7 @@ export default function AdminDashboard() {
       setPairingDbReady(true);
       setPairings((pairingRows ?? []) as unknown as PairingSession[]);
 
-      const { data: allRecentDevices, error: devicesError } = await supabase
+      const { data: allRecentDevices, error: devicesError } = await (supabase as any)
         .from('devices')
         .select('id,device_name,registered_at,status,os_type,app_version,metadata')
         .order('registered_at', { ascending: false })
@@ -338,7 +338,7 @@ export default function AdminDashboard() {
         <Skeleton className="h-10 w-72" />
         <Skeleton className="h-5 w-96" />
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          {LOADING_SKELETON_IDS.map((id) => (
+          {LOADING_SKELETON_IDS.map((id: any) => (
             <Skeleton key={id} className="h-36 w-full" />
           ))}
         </div>
@@ -369,7 +369,7 @@ export default function AdminDashboard() {
 
       {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-        {statCards.map((stat, index) => (
+        {statCards.map((stat: any, index: any) => (
           <Card
             key={stat.title}
             className="border-border/50 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 shadow-premium hover:shadow-glow transition-all duration-300 animate-scale-in hover:-translate-y-1"
@@ -504,7 +504,7 @@ export default function AdminDashboard() {
               {pairingDbReady && pairings.length === 0 && (
                 <div className="text-sm text-muted-foreground">No pairing sessions yet.</div>
               )}
-              {pairingDbReady && pairings.length > 0 && pairings.map((p) => (
+              {pairingDbReady && pairings.length > 0 && pairings.map((p: any) => (
                 <div key={p.id} className="rounded-lg border border-border/60 p-3 flex items-center justify-between gap-3">
                   <div className="min-w-0">
                     <p className="text-sm font-medium truncate">{p.primary_device_label ?? 'Primary session'}</p>
@@ -530,7 +530,7 @@ export default function AdminDashboard() {
               {linkedDevices.length === 0 ? (
                 <div className="text-sm text-muted-foreground">No QR-linked devices found yet.</div>
               ) : (
-                linkedDevices.map((d) => (
+                linkedDevices.map((d: any) => (
                   <div key={d.id} className="rounded-lg border border-border/60 p-3">
                     <div className="flex items-center justify-between gap-3">
                       <p className="text-sm font-medium truncate">{d.device_name}</p>

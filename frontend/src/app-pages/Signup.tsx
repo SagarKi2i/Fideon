@@ -266,7 +266,7 @@ export default function Signup() {
       const bytes = new TextEncoder().encode(value);
       const hash = await window.crypto.subtle.digest("SHA-256", bytes);
       return Array.from(new Uint8Array(hash))
-        .map((b) => b.toString(16).padStart(2, "0"))
+        .map((b: any) => b.toString(16).padStart(2, "0"))
         .join("");
     };
 
@@ -367,7 +367,7 @@ export default function Signup() {
     if (step === 2) {
       if (checkingTenant) return false;
       if (selectedPacks.length === 0) return false;
-      const activePlan = PLANS.find((p) => p.id === selectedPlan);
+      const activePlan = PLANS.find((p: any) => p.id === selectedPlan);
       const maxPacks = tenantConfig ? (tenantConfig.max_agent_packs ?? null) : (activePlan?.maxPacks ?? null);
       if (maxPacks !== null && selectedPacks.length > maxPacks) return false;
       return true;
@@ -522,7 +522,7 @@ export default function Signup() {
       const nowIso = new Date().toISOString();
       const requiredTenantPacks = new Set((tenantConfig?.agent_packs || []).filter(Boolean));
       const mergedPacks = Array.from(new Set([...(selectedPacks || []), ...requiredTenantPacks]));
-      const activePlan = PLANS.find((p) => p.id === selectedPlan);
+      const activePlan = PLANS.find((p: any) => p.id === selectedPlan);
       const isExistingTenant = Boolean(tenantConfig);
       const userMetadata: Record<string, any> = {
         tenant_name: tenantName.trim(),
@@ -599,7 +599,7 @@ export default function Signup() {
       }
 
       if (signedUpUserId) {
-        const { error: profileError } = await supabase
+        const { error: profileError } = await (supabase as any)
           .from("app_users")
           .update({ full_name: fullName })
           .eq("user_id", signedUpUserId);
@@ -915,7 +915,7 @@ export default function Signup() {
             <div className="space-y-3">
               <Label>Role in this tenant</Label>
               <div className="grid gap-2 md:grid-cols-3">
-                {APP_ROLES.map((role) => (
+                {APP_ROLES.map((role: any) => (
                   <button
                     key={role.value}
                     type="button"
@@ -953,7 +953,7 @@ export default function Signup() {
               </p>
             </div>
             <div className="grid gap-4 md:grid-cols-3">
-              {PLANS.map((plan) => (
+              {PLANS.map((plan: any) => (
                 <button
                   key={plan.id}
                   type="button"
@@ -983,7 +983,7 @@ export default function Signup() {
                     {plan.description}
                   </p>
                   <ul className="space-y-1 text-xs text-muted-foreground">
-                    {plan.features.map((f) => (
+                    {plan.features.map((f: any) => (
                       <li key={f} className="flex items-center gap-1.5">
                         <CheckCircle2 className="h-3 w-3 text-primary" />
                         <span>{f}</span>
@@ -996,7 +996,7 @@ export default function Signup() {
 
             {/* Workflow Slots Configuration */}
             {(() => {
-              const activePlan = PLANS.find((p) => p.id === selectedPlan);
+              const activePlan = PLANS.find((p: any) => p.id === selectedPlan);
               if (!activePlan) return null;
               return (
                 <div className="rounded-xl border p-4 space-y-3">
@@ -1040,7 +1040,7 @@ export default function Signup() {
           </div>
         );
       case 2: {
-        const activePlan = PLANS.find((p) => p.id === selectedPlan);
+        const activePlan = PLANS.find((p: any) => p.id === selectedPlan);
         const maxPacks   = tenantConfig ? (tenantConfig.max_agent_packs ?? null) : (activePlan?.maxPacks ?? null);
         const maxModels  = activePlan?.maxModels ?? null;
         const atPackLimit = maxPacks !== null && selectedPacks.length >= maxPacks;
@@ -1073,7 +1073,7 @@ export default function Signup() {
             </div>
 
             <div className="grid gap-4 md:grid-cols-3">
-              {AGENT_PACKS.map((pack) => {
+              {AGENT_PACKS.map((pack: any) => {
                 const selected  = selectedPacks.includes(pack.id);
                 const required  = requiredTenantPacks.has(pack.id);
                 const tenantLockedOut = Boolean(tenantConfig) && maxPacks !== null && remainingSlots === 0 && !required;
@@ -1085,7 +1085,7 @@ export default function Signup() {
                     disabled={disabled}
                     onClick={() =>
                       setSelectedPacks((prev) =>
-                        required ? prev : selected ? prev.filter((id) => id !== pack.id) : [...prev, pack.id]
+                        required ? prev : selected ? prev.filter((id: any) => id !== pack.id) : [...prev, pack.id]
                       )
                     }
                     className={`rounded-xl border p-4 text-left transition h-full ${
@@ -1257,7 +1257,7 @@ export default function Signup() {
             </Badge>
           </div>
           <div className="flex items-center gap-2 mt-2">
-            {STEP_META.map((stepItem) => {
+            {STEP_META.map((stepItem: any) => {
               const i = stepItem.index;
               const active = step === i;
               const isCompleted = step > i || completed;

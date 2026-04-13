@@ -62,7 +62,7 @@ function exportCsv(filename: string, rows: Record<string, unknown>[]) {
   if (!rows.length) return;
   const headers = Object.keys(rows[0]);
   const escape = (v: unknown) => JSON.stringify(v ?? "");
-  const csv = [headers.join(","), ...rows.map((r) => headers.map((h) => escape(r[h])).join(","))].join("\n");
+  const csv = [headers.join(","), ...rows.map((r: any) => headers.map((h: any) => escape(r[h])).join(","))].join("\n");
   const blob = new Blob([csv], { type: "text/csv" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -309,7 +309,7 @@ function AuthEventsTab() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {rows.map((row) => (
+                {rows.map((row: any) => (
                   <TableRow key={row.id}>
                     <TableCell className="whitespace-nowrap text-xs">
                       {new Date(row.created_at).toLocaleString()}
@@ -515,7 +515,7 @@ function SystemEventsTab() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {rows.map((row) => (
+                {rows.map((row: any) => (
                   <TableRow key={row.id}>
                     <TableCell className="whitespace-nowrap text-xs">
                       {new Date(row.created_at).toLocaleString()}

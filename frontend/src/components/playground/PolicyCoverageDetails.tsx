@@ -68,7 +68,7 @@ export default function PolicyCoverageDetails({
               </tr>
             </thead>
             <tbody>
-              {section.items.map((item) => (
+              {section.items.map((item: any) => (
                 <tr key={item.name} className="border-t border-border/50 hover:bg-muted/30 transition-colors">
                   <td className="py-2.5 px-3">
                     <div>
@@ -107,7 +107,7 @@ export default function PolicyCoverageDetails({
 
       {/* Coverage Sections */}
       <div className="grid gap-4">
-        {coverageData.sections.map((section) => renderSection(section))}
+        {coverageData.sections.map((section: any) => renderSection(section))}
       </div>
 
       <Separator />
@@ -125,7 +125,7 @@ export default function PolicyCoverageDetails({
             The following are NOT covered under this policy:
           </p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            {coverageData.exclusions.map((exclusion) => (
+            {coverageData.exclusions.map((exclusion: any) => (
               <div key={exclusion} className="flex items-start gap-2 text-sm">
                 <XCircle className="h-3.5 w-3.5 text-destructive flex-shrink-0 mt-0.5" />
                 <span className="text-foreground/80">{exclusion}</span>
@@ -145,7 +145,7 @@ export default function PolicyCoverageDetails({
         </div>
         <div className="bg-amber-500/5 rounded-lg p-4 border border-amber-500/20">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            {coverageData.conditions.map((condition) => (
+            {coverageData.conditions.map((condition: any) => (
               <div key={condition} className="flex items-start gap-2 text-sm">
                 <CheckCircle2 className="h-3.5 w-3.5 text-amber-600 flex-shrink-0 mt-0.5" />
                 <span className="text-foreground/80">{condition}</span>

@@ -203,8 +203,8 @@ export function InviteUserPanel() {
             <p className="text-sm text-muted-foreground py-2">No requests submitted yet.</p>
           ) : (
             <div className="space-y-2">
-              {requests.map((r) => {
-                const cfg = STATUS_CONFIG[r.status] ?? STATUS_CONFIG.pending;
+              {requests.map((r: any) => {
+                const cfg = STATUS_CONFIG[r.status as keyof typeof STATUS_CONFIG] ?? STATUS_CONFIG.pending;
                 const Icon = cfg.icon;
                 return (
                   <div

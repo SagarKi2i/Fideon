@@ -56,7 +56,7 @@ export function pushRealtimeNotification(
   const fingerprint = buildFingerprint(detail);
   const now = Date.now();
 
-  const isDuplicate = current.some((item) => {
+  const isDuplicate = current.some((item: any) => {
     if (item.fingerprint !== fingerprint) return false;
     const itemTs = new Date(item.createdAt).getTime();
     return Number.isFinite(itemTs) && now - itemTs < DEDUPE_WINDOW_MS;
@@ -81,12 +81,12 @@ export function pushRealtimeNotification(
 
 export function markRealtimeNotificationsRead() {
   const current = readStore();
-  writeStore(current.map((item) => ({ ...item, read: true })));
+  writeStore(current.map((item: any) => ({ ...item, read: true })));
 }
 
 export function markRealtimeNotificationRead(id: string) {
   const current = readStore();
-  writeStore(current.map((item) => (item.id === id ? { ...item, read: true } : item)));
+  writeStore(current.map((item: any) => (item.id === id ? { ...item, read: true } : item)));
 }
 
 export function clearRealtimeNotifications() {

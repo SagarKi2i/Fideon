@@ -48,12 +48,12 @@ export default function Devices() {
         return;
       }
 
-      const { data: roles } = await supabase
+      const { data: roles } = await (supabase as any)
         .from("user_roles")
         .select("role")
         .eq("user_id", user.id);
 
-      if (!roles?.some((r) => r.role === "admin" || r.role === "global_admin")) {
+      if (!roles?.some((r: any) => r.role === "admin" || r.role === "global_admin")) {
         toast({ title: "Access Denied", description: "Admin only", variant: "destructive" });
         navigate("/");
         return;
@@ -88,10 +88,10 @@ export default function Devices() {
       const devices = ((payload as any)?.devices || []) as DeviceRow[];
       setRows(devices);
 
-      const tenantIds = Array.from(new Set((devices || []).map((d) => d.tenant_id).filter(Boolean))) as string[];
+      const tenantIds = Array.from(new Set((devices || []).map((d: any) => d.tenant_id).filter(Boolean))) as string[];
 
       if (tenantIds.length) {
-        const { data: tenants } = await supabase
+        const { data: tenants } = await (supabase as any)
           .from("tenants")
           .select("id,name")
           .in("id", tenantIds);
@@ -112,7 +112,7 @@ export default function Devices() {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return rows;
-    return rows.filter((d) => {
+    return rows.filter((d: any) => {
       const email = String(d.registered_by_email || "");
       const fullName = String(d.registered_by_name || "");
       const tenant = d.tenant_id ? (tenantNameById[d.tenant_id] || "") : "";
@@ -210,7 +210,7 @@ export default function Devices() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filtered.map((d) => (
+                {filtered.map((d: any) => (
                   <TableRow key={d.id} className="cursor-pointer" onClick={() => navigate(`/devices/${d.id}`)}>
                     <TableCell>{statusBadge(d.status)}</TableCell>
                     <TableCell className="min-w-[260px]">

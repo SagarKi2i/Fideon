@@ -256,7 +256,7 @@ export function PodActivationRequests() {
         return;
       }
 
-      const { data: appUser, error } = await supabase
+      const { data: appUser, error } = await (supabase as any)
         .from("app_users")
         .select("full_name,email,tenant_id")
         .eq("user_id", request.user_id)
@@ -266,7 +266,7 @@ export function PodActivationRequests() {
 
       let tenantName: string | null = null;
       if (appUser?.tenant_id) {
-        const { data: tenant, error: tenantError } = await supabase
+        const { data: tenant, error: tenantError } = await (supabase as any)
           .from("tenants")
           .select("name")
           .eq("id", appUser.tenant_id)
@@ -289,8 +289,8 @@ export function PodActivationRequests() {
     }
   };
 
-  const pendingRequests = requests.filter(r => r.status === "pending");
-  const processedRequests = requests.filter(r => r.status !== "pending");
+  const pendingRequests = requests.filter((r: any) => r.status === "pending");
+  const processedRequests = requests.filter((r: any) => r.status !== "pending");
 
   if (loading) {
     return (
@@ -328,7 +328,7 @@ export function PodActivationRequests() {
             </div>
           ) : (
             <div className="space-y-4">
-              {pendingRequests.map((request) => (
+              {pendingRequests.map((request: any) => (
                 <div
                   key={request.id}
                   className="flex flex-col gap-3 p-4 rounded-lg border border-border/50 bg-card/50 hover:bg-card/80 transition-colors"
@@ -371,7 +371,7 @@ export function PodActivationRequests() {
           </CardHeader>
           <CardContent>
             <div className="space-y-2">
-              {processedRequests.slice(0, 10).map((request) => (
+              {processedRequests.slice(0, 10).map((request: any) => (
                 <div
                   key={request.id}
                   className="flex items-center justify-between p-3 rounded-lg bg-muted/30"

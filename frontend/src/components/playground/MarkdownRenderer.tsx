@@ -79,7 +79,7 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
       if (currentList.length > 0 && listType) {
         elements.push(
           <div key={`list-${elements.length}`} className="space-y-2 my-4">
-            {currentList.map((item, idx) => (
+            {currentList.map((item: any, idx: any) => (
               <div key={`${item}-${idx}`} className="flex items-start gap-3 pl-2">
                 {listType === 'numbered' ? (
                   <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary/10 text-primary text-xs flex items-center justify-center font-semibold">
@@ -144,7 +144,7 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
         }
       }
 
-      return <>{parts.map((part, idx) =>
+      return <>{parts.map((part: any, idx: any) =>
         typeof part === 'string' ? <span key={`text-${idx}`}>{part}</span> : part
       )}</>;
     };
@@ -159,7 +159,7 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
       return Info;
     };
 
-    lines.forEach((line, lineIdx) => {
+    lines.forEach((line: any, lineIdx: any) => {
       const trimmedLine = line.trim();
 
       // Skip empty lines

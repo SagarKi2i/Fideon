@@ -76,8 +76,8 @@ export default function AgentSchedules() {
       if (!uid) return;
 
       const [modelsRes, schedulesRes] = await Promise.all([
-        supabase.from("activated_models").select("*").eq("user_id", uid),
-        supabase.from("agent_schedules").select("*").eq("user_id", uid).order("created_at", { ascending: false }),
+        (supabase as any).from("activated_models").select("*").eq("user_id", uid),
+        (supabase as any).from("agent_schedules").select("*").eq("user_id", uid).order("created_at", { ascending: false }),
       ]);
 
       if (modelsRes.data) {
@@ -98,7 +98,7 @@ export default function AgentSchedules() {
       return;
     }
 
-    const model = models.find(m => m.model_id === selectedModel);
+    const model = models.find((m: any) => m.model_id === selectedModel);
     if (!model) return;
 
     setSaving(true);
@@ -115,7 +115,7 @@ export default function AgentSchedules() {
         nextRunAt = scheduledAt;
       }
 
-      const { error } = await supabase.from("agent_schedules").insert({
+      const { error } = await (supabase as any).from("agent_schedules").insert({
         user_id: user.id,
         model_id: model.model_id,
         model_name: model.model_name,
@@ -140,24 +140,24 @@ export default function AgentSchedules() {
   };
 
   const toggleSchedule = async (id: string, currentState: boolean) => {
-    const { error } = await supabase
+    const { error } = await (supabase as any)
       .from("agent_schedules")
-      .update({ is_active: !currentState } as any)
+      .update({ is_active: !currentState })
       .eq("id", id)
       .eq("user_id", currentUserId ?? "");
     if (!error) {
-      setSchedules(prev => prev.map(s => s.id === id ? { ...s, is_active: !currentState } : s));
+      setSchedules(prev => prev.map((s: any) => s.id === id ? { ...s, is_active: !currentState } : s));
     }
   };
 
   const deleteSchedule = async (id: string) => {
-    const { error } = await supabase
+    const { error } = await (supabase as any)
       .from("agent_schedules")
       .delete()
       .eq("id", id)
       .eq("user_id", currentUserId ?? "");
     if (!error) {
-      setSchedules(prev => prev.filter(s => s.id !== id));
+      setSchedules(prev => prev.filter((s: any) => s.id !== id));
       toast({ title: "Deleted", description: "Schedule removed" });
     }
   };
@@ -173,7 +173,7 @@ export default function AgentSchedules() {
 
   const getCronLabel = (cron: string | null) => {
     if (!cron) return "—";
-    const preset = CRON_PRESETS.find(p => p.value === cron);
+    const preset = CRON_PRESETS.find((p: any) => p.value === cron);
     return preset ? preset.label : cron;
   };
 
@@ -224,7 +224,7 @@ export default function AgentSchedules() {
                     <Select value={selectedModel} onValueChange={setSelectedModel}>
                       <SelectTrigger><SelectValue placeholder="Select agent" /></SelectTrigger>
                       <SelectContent>
-                        {models.map(m => (
+                        {models.map((m: any) => (
                           <SelectItem key={m.id} value={m.model_id}>{m.model_name}</SelectItem>
                         ))}
                       </SelectContent>
@@ -261,7 +261,7 @@ export default function AgentSchedules() {
                       <Select value={cronPreset} onValueChange={setCronPreset}>
                         <SelectTrigger><SelectValue /></SelectTrigger>
                         <SelectContent>
-                          {CRON_PRESETS.map(p => (
+                          {CRON_PRESETS.map((p: any) => (
                             <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>
                           ))}
                         </SelectContent>
@@ -346,7 +346,7 @@ export default function AgentSchedules() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {schedules.map(schedule => (
+                  {schedules.map((schedule: any) => (
                     <TableRow key={schedule.id}>
                       <TableCell className="font-medium">{schedule.model_name}</TableCell>
                       <TableCell>

@@ -81,8 +81,8 @@ export default function FineTuningMonitor() {
   }, [electron]);
 
   const selectedJob = useMemo(() => {
-    if (activeTab === "acord") return acordJobs.find((j) => j.id === selectedAcordJobId);
-    return podJobs.find((j) => j.id === selectedPodJobId);
+    if (activeTab === "acord") return acordJobs.find((j: any) => j.id === selectedAcordJobId);
+    return podJobs.find((j: any) => j.id === selectedPodJobId);
   }, [acordJobs, podJobs, selectedAcordJobId, selectedPodJobId, activeTab]);
 
   const refreshLog = async () => {
@@ -179,7 +179,7 @@ export default function FineTuningMonitor() {
                 <p className="text-sm text-muted-foreground">No ACORD training jobs found yet.</p>
               ) : (
                 <div className="grid gap-2">
-                  {acordJobs.map((j) => (
+                  {acordJobs.map((j: any) => (
                     <button
                       key={j.id}
                       className={`w-full text-left rounded-lg border p-3 hover:bg-muted/40 transition ${
@@ -226,7 +226,7 @@ export default function FineTuningMonitor() {
                 <p className="text-sm text-muted-foreground">No pod training jobs found for this pod id.</p>
               ) : null}
               <div className="grid gap-2">
-                {podJobs.map((j) => (
+                {podJobs.map((j: any) => (
                   <button
                     key={j.id}
                     className={`w-full text-left rounded-lg border p-3 hover:bg-muted/40 transition ${

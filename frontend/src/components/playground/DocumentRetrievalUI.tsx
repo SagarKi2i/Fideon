@@ -146,12 +146,12 @@ const parseRetrievalResult = (result: string): ParsedRetrievalResult | null => {
     },
   ];
 
-  const hasRenewalDocs = documents.some(d => d.type === "Policy Renewal");
-  const hasInvoiceDocs = documents.some(d => d.type === "Invoice");
-  const totalPremium = documents.reduce((sum, d) => sum + (d.premium ?? 0), 0) / (documents.filter(d => d.premium).length || 1);
+  const hasRenewalDocs = documents.some((d: any) => d.type === "Policy Renewal");
+  const hasInvoiceDocs = documents.some((d: any) => d.type === "Invoice");
+  const totalPremium = documents.reduce((sum: any, d: any) => sum + (d.premium ?? 0), 0) / (documents.filter((d: any) => d.premium).length || 1);
   
   // Calculate days until expiration from renewal doc
-  const renewalDoc = documents.find(d => d.expirationDate);
+  const renewalDoc = documents.find((d: any) => d.expirationDate);
   const daysUntilExpiration = renewalDoc 
     ? Math.ceil((new Date(renewalDoc.expirationDate!).getTime() - new Date().getTime()) / (1000 * 60 * 60 * 24))
     : 0;
@@ -184,7 +184,7 @@ export default function DocumentRetrievalUI({ onRun, isRunning, result }: Docume
   const handleCarrierToggle = (carrierId: string) => {
     setSelectedCarriers(prev =>
       prev.includes(carrierId)
-        ? prev.filter(id => id !== carrierId)
+        ? prev.filter((id: any) => id !== carrierId)
         : [...prev, carrierId]
     );
   };
@@ -192,7 +192,7 @@ export default function DocumentRetrievalUI({ onRun, isRunning, result }: Docume
   const handleDocTypeToggle = (docTypeId: string) => {
     setSelectedDocTypes(prev =>
       prev.includes(docTypeId)
-        ? prev.filter(id => id !== docTypeId)
+        ? prev.filter((id: any) => id !== docTypeId)
         : [...prev, docTypeId]
     );
   };
@@ -211,7 +211,7 @@ export default function DocumentRetrievalUI({ onRun, isRunning, result }: Docume
 
   const isFormValid = selectedCarriers.length > 0 && selectedAMS && selectedDocTypes.length > 0;
   const parsedResult = parseRetrievalResult(result);
-  const selectedAMSData = amsOptions.find(a => a.id === selectedAMS);
+  const selectedAMSData = amsOptions.find((a: any) => a.id === selectedAMS);
 
   return (
     <div className="space-y-6">
@@ -239,7 +239,7 @@ export default function DocumentRetrievalUI({ onRun, isRunning, result }: Docume
                 )}
               </Label>
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
-                {carriers.map((carrier) => (
+                {carriers.map((carrier: any) => (
                   <button
                     key={carrier.id}
                     type="button"
@@ -268,7 +268,7 @@ export default function DocumentRetrievalUI({ onRun, isRunning, result }: Docume
                 Target AMS
               </Label>
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
-                {amsOptions.map((ams) => (
+                {amsOptions.map((ams: any) => (
                   <button
                     key={ams.id}
                     type="button"
@@ -313,7 +313,7 @@ export default function DocumentRetrievalUI({ onRun, isRunning, result }: Docume
           <div className="space-y-3">
             <Label>Document Types to Retrieve</Label>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              {documentTypes.map((docType) => {
+              {documentTypes.map((docType: any) => {
                 const IconComponent = docType.icon;
                 return (
                   <button
@@ -412,7 +412,7 @@ export default function DocumentRetrievalUI({ onRun, isRunning, result }: Docume
             </CardHeader>
             <CardContent className="pt-4">
               <div className="space-y-3">
-                {parsedResult.documents.map((doc) => (
+                {parsedResult.documents.map((doc: any) => (
                   <div 
                     key={doc.name}
                     className="flex items-center gap-4 p-4 rounded-lg border border-border bg-muted/30 hover:bg-muted/50 transition-colors"

@@ -14,7 +14,7 @@ function isAppRole(value: unknown): value is AppRole {
 }
 
 async function resolveUserRole(userId: string): Promise<AppRole> {
-  const { data, error } = await supabase
+  const { data, error } = await (supabase as any)
     .from('user_roles')
     .select('role')
     .eq('user_id', userId)

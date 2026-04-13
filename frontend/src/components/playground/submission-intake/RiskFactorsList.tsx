@@ -45,7 +45,7 @@ export default function RiskFactorsList({ factors }: RiskFactorsListProps) {
 
   return (
     <div className="space-y-2">
-      {factors.map((factor) => {
+      {factors.map((factor: any) => {
         const config = getStatusConfig(factor.status);
         const Icon = config.icon;
 

@@ -115,7 +115,7 @@ export function UserCreationRequests({ viewerRole }: Props) {
     }
   };
 
-  const pendingRequests = requests.filter((r) => r.status === "pending");
+  const pendingRequests = requests.filter((r: any) => r.status === "pending");
 
   return (
     <Card className="border-border/50 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 shadow-premium">
@@ -145,7 +145,7 @@ export function UserCreationRequests({ viewerRole }: Props) {
           </div>
         ) : (
           <div className="space-y-3">
-            {pendingRequests.map((r) => (
+            {pendingRequests.map((r: any) => (
               <div
                 key={r.id}
                 className="rounded-md border border-border/60 p-4 bg-muted/20 space-y-3"
