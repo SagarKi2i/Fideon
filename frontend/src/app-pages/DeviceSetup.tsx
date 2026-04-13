@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -22,8 +22,10 @@ import {
   getStoredDeviceJwt,
   setStoredDeviceJwt,
   clearStoredDeviceJwt,
+  sendDeviceHeartbeat,
   type DeviceModel,
 } from "@/lib/deviceApi";
+import { ApiRequestError } from "@/lib/httpErrors";
 import {
   checkOllamaStatus,
   listOllamaModels,
@@ -53,16 +55,64 @@ export default function DeviceSetup() {
     machineId: string;
     platform: string;
   } | null>(null);
+  const authLossToastShown = useRef(false);
+
+  const handleInvalidDeviceAuth = useCallback(
+    (message?: string) => {
+      clearStoredDeviceJwt();
+      setDeviceJwt("");
+      setIsConnected(false);
+      setAllocatedModels([]);
+      if (window.electron?.device?.clearAuth) {
+        void window.electron.device.clearAuth();
+      }
+      if (!authLossToastShown.current) {
+        authLossToastShown.current = true;
+        toast({
+          title: "Device no longer connected",
+          description:
+            message ||
+            "This device was disabled or its token was revoked. Ask an admin to re-enable it if needed, then use Refresh to register again.",
+          variant: "destructive",
+        });
+      }
+    },
+    [toast],
+  );
+
+  const verifyCloudSession = useCallback(
+    async (jwt: string): Promise<boolean> => {
+      try {
+        await sendDeviceHeartbeat(jwt);
+        authLossToastShown.current = false;
+        return true;
+      } catch (e) {
+        if (e instanceof ApiRequestError && e.isAuthError) {
+          handleInvalidDeviceAuth(e.message);
+          return false;
+        }
+        throw e;
+      }
+    },
+    [handleInvalidDeviceAuth],
+  );
 
   useEffect(() => {
     void checkElectron();
     const storedJwt = getStoredDeviceJwt();
     if (storedJwt) {
-      setDeviceJwt(storedJwt);
-      setIsConnected(true);
-      void loadDeviceModels(storedJwt);
+      void (async () => {
+        const ok = await verifyCloudSession(storedJwt);
+        if (ok) {
+          setDeviceJwt(storedJwt);
+          setIsConnected(true);
+          void loadDeviceModels(storedJwt);
+        }
+      })();
     }
     void checkOllama();
+    // Intentionally mount-only: avoid re-running Electron bootstrap when callbacks change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -91,13 +141,17 @@ export default function DeviceSetup() {
           is_downloaded: isModelInstalled(model.ollama_model_name),
         }));
         await performDeviceCheckin(deviceJwt, localModelStatuses);
-      } catch {
-        // Best-effort heartbeat; errors are intentionally swallowed to avoid UI noise.
+      } catch (e) {
+        if (e instanceof ApiRequestError && e.isAuthError) {
+          handleInvalidDeviceAuth(e.message);
+          return;
+        }
+        // Transient errors: keep UI connected; next Refresh/Sync will surface if persistent.
       }
     }, 60000); // 60s
 
     return () => window.clearInterval(intervalId);
-  }, [isElectronApp, deviceJwt, isConnected, allocatedModels, localModels]);
+  }, [isElectronApp, deviceJwt, isConnected, allocatedModels, localModels, handleInvalidDeviceAuth]);
 
   const checkElectron = async () => {
     const result = await isElectron();
@@ -109,6 +163,8 @@ export default function DeviceSetup() {
         if (res?.success) {
           setDeviceId(res.device_id ?? null);
           if (res.device_jwt) {
+            const ok = await verifyCloudSession(res.device_jwt);
+            if (!ok) return;
             setStoredDeviceJwt(res.device_jwt);
             setDeviceJwt(res.device_jwt);
             setIsConnected(true);
@@ -166,6 +222,8 @@ export default function DeviceSetup() {
           setLoading(true);
           const res = await window.electron.device.ensureAuth();
           if (res?.success && res.device_jwt) {
+            const ok = await verifyCloudSession(res.device_jwt);
+            if (!ok) return;
             setStoredDeviceJwt(res.device_jwt);
             setDeviceJwt(res.device_jwt);
             setIsConnected(true);
@@ -190,6 +248,8 @@ export default function DeviceSetup() {
     }
     setLoading(true);
     try {
+      const ok = await verifyCloudSession(deviceJwt);
+      if (!ok) return;
       await loadDeviceModels(deviceJwt);
       await checkOllama();
       toast({
@@ -197,11 +257,15 @@ export default function DeviceSetup() {
         description: "Models list updated",
       });
     } catch (error: any) {
-      toast({
-        title: "Error",
-        description: error.message,
-        variant: "destructive",
-      });
+      if (error instanceof ApiRequestError && error.isAuthError) {
+        handleInvalidDeviceAuth(error.message);
+      } else {
+        toast({
+          title: "Error",
+          description: error.message,
+          variant: "destructive",
+        });
+      }
     } finally {
       setLoading(false);
     }
@@ -224,11 +288,15 @@ export default function DeviceSetup() {
         description: "Device status synchronized with cloud",
       });
     } catch (error: any) {
-      toast({
-        title: "Sync Failed",
-        description: error.message,
-        variant: "destructive",
-      });
+      if (error instanceof ApiRequestError && error.isAuthError) {
+        handleInvalidDeviceAuth(error.message);
+      } else {
+        toast({
+          title: "Sync Failed",
+          description: error.message,
+          variant: "destructive",
+        });
+      }
     } finally {
       setLoading(false);
     }
@@ -442,7 +510,12 @@ export default function DeviceSetup() {
                 <Button variant="outline" size="sm" onClick={handleSync} disabled={loading || !deviceJwt}>
                   Sync Status
                 </Button>
-                <Button variant="destructive" size="sm" onClick={handleDisconnect}>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={handleDisconnect}
+                  disabled={!deviceJwt}
+                >
                   Disconnect
                 </Button>
               </div>

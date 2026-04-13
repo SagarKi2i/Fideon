@@ -12,6 +12,15 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Label } from "@/components/ui/label";
 import {
   Table,
@@ -32,6 +41,8 @@ import {
   Activity,
   History,
   Package,
+  PowerOff,
+  Power,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
@@ -118,6 +129,9 @@ export default function DeviceDetails() {
   const [isAllocateOpen, setIsAllocateOpen] = useState(false);
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [allocating, setAllocating] = useState(false);
+  const [disableDeviceOpen, setDisableDeviceOpen] = useState(false);
+  const [disablingDevice, setDisablingDevice] = useState(false);
+  const [enablingDevice, setEnablingDevice] = useState(false);
 
   useEffect(() => {
     checkAccess();
@@ -324,6 +338,65 @@ export default function DeviceDetails() {
     }
   };
 
+  const callDeviceAdminMutation = async (path: "revoke" | "enable") => {
+    if (!id) throw new Error("Device ID is missing");
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) throw new Error("Not authenticated");
+    const resp = await fetch(
+      apiUrl(`/api/v1/devices/${encodeURIComponent(id)}/${path}`),
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      },
+    );
+    const payload = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const msg = (payload as any)?.detail || (payload as any)?.error || `HTTP ${resp.status}`;
+      throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+    }
+  };
+
+  const handleDisableDevice = async () => {
+    setDisablingDevice(true);
+    try {
+      await callDeviceAdminMutation("revoke");
+      toast({
+        title: "Device disabled",
+        description: "Device JWTs are revoked and the device is inactive until re-enabled and re-registered.",
+      });
+      setDisableDeviceOpen(false);
+      loadDeviceData();
+    } catch (error: any) {
+      toast({
+        title: "Could not disable device",
+        description: error?.message || "Request failed",
+        variant: "destructive",
+      });
+    } finally {
+      setDisablingDevice(false);
+    }
+  };
+
+  const handleEnableDevice = async () => {
+    setEnablingDevice(true);
+    try {
+      await callDeviceAdminMutation("enable");
+      toast({
+        title: "Device re-enabled",
+        description: "The device must call register again (Electron: reconnect) to obtain a new JWT.",
+      });
+      loadDeviceData();
+    } catch (error: any) {
+      toast({
+        title: "Could not enable device",
+        description: error?.message || "Request failed",
+        variant: "destructive",
+      });
+    } finally {
+      setEnablingDevice(false);
+    }
+  };
+
   const handleResetToken = async () => {
     if (!id) {
       toast({
@@ -454,7 +527,38 @@ export default function DeviceDetails() {
             <p className="text-xs text-muted-foreground font-mono break-all">Device ID: {device.id}</p>
           </div>
         </div>
-        <div>{getStatusBadge(device.status)}</div>
+        <div className="flex flex-col items-end gap-2 sm:flex-row sm:items-center">
+          {device.is_active ? (
+            <Badge variant="outline" className="bg-success/10 text-success border-success/20">
+              Active
+            </Badge>
+          ) : (
+            <Badge variant="destructive">Disabled</Badge>
+          )}
+          {getStatusBadge(device.is_active ? device.status : "offline")}
+          {device.is_active ? (
+            <Button
+              variant="destructive"
+              size="sm"
+              className="gap-2"
+              onClick={() => setDisableDeviceOpen(true)}
+            >
+              <PowerOff className="h-4 w-4" />
+              Disable device
+            </Button>
+          ) : (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-2"
+              onClick={() => void handleEnableDevice()}
+              disabled={enablingDevice}
+            >
+              <Power className="h-4 w-4" />
+              {enablingDevice ? "Enabling…" : "Re-enable device"}
+            </Button>
+          )}
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -837,6 +941,28 @@ export default function DeviceDetails() {
           </Card>
         </TabsContent>
       </Tabs>
+
+      <AlertDialog open={disableDeviceOpen} onOpenChange={setDisableDeviceOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Disable this device?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This revokes all device JWTs and sets the device inactive. The user&apos;s Electron app will fail
+              heartbeats until you re-enable the device and they register again.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={disablingDevice}>Cancel</AlertDialogCancel>
+            <Button
+              variant="destructive"
+              disabled={disablingDevice}
+              onClick={() => void handleDisableDevice()}
+            >
+              {disablingDevice ? "Disabling…" : "Disable device"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
