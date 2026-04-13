@@ -73,6 +73,10 @@ huggingface-hub
 # Keep commented for cross-platform installs (notably Windows).
 # flash-attn
 
+# --- SeaweedFS / S3-compatible object store (GGUF artifact delivery) ---
+boto3>=1.34.0
+botocore>=1.34.0
+
 # --- Tests ---
 pytest>=8.0.0
 

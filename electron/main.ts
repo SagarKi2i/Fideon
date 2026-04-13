@@ -23,6 +23,7 @@ import {
   getMachineName,
   clearStoredDeviceJwtAsync,
 } from "./device-client";
+import { checkForModelUpdate, downloadAndInstall } from "./model-updater";
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -494,13 +495,49 @@ ipcMain.handle("settings:setAutoLaunch", async (_event, enabled: boolean) => {
   }
 });
 
-// IPC: update-check placeholder
-ipcMain.handle("app:checkForUpdates", async () => {
-  // Placeholder: wire electron-updater or custom logic here later.
-  return {
-    success: true,
-    status: "not_implemented",
-    message: "Update checks are not configured yet.",
-  };
+// IPC: model update check (canary-gated via backend)
+ipcMain.handle("model:checkUpdate", async (_event, domain: string) => {
+  try {
+    const [deviceId, deviceJwt] = await Promise.all([
+      getStoredDeviceIdAsync(),
+      getStoredDeviceJwtAsync(),
+    ]);
+    if (!deviceId || !deviceJwt) {
+      return { success: false, error: "Device not registered" };
+    }
+    const apiBase = process.env.ELECTRON_API_BASE_URL?.replace(/\/+$/, "") ?? "http://localhost:8000";
+    const result = await checkForModelUpdate({ domain, deviceId, deviceJwt, apiBase });
+    return { success: true, ...result };
+  } catch (err) {
+    log(`[model] checkUpdate error: ${formatUnknownError(err)}`);
+    return { success: false, error: String(err) };
+  }
 });
+
+// IPC: download + SHA-256 verify + GPG verify + ollama create
+ipcMain.handle(
+  "model:downloadAndInstall",
+  async (
+    event,
+    opts: { domain: string; version: string; quant: string; sha256Expected: string; sizeBytes: number },
+  ) => {
+    try {
+      const deviceJwt = await getStoredDeviceJwtAsync();
+      if (!deviceJwt) {
+        return { success: false, error: "Device not registered" };
+      }
+      const apiBase = process.env.ELECTRON_API_BASE_URL?.replace(/\/+$/, "") ?? "http://localhost:8000";
+      const result = await downloadAndInstall({
+        ...opts,
+        deviceJwt,
+        apiBase,
+        onProgress: (p) => event.sender.send("model:installProgress", p),
+      });
+      return { success: true, modelName: result.modelName };
+    } catch (err) {
+      log(`[model] downloadAndInstall error: ${formatUnknownError(err)}`);
+      return { success: false, error: String(err) };
+    }
+  },
+);
 

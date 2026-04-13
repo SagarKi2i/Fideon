@@ -1,3 +1,4 @@
+import ModelUpdateBanner from "@/components/ModelUpdateBanner";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Brain, Clock3, PlayCircle, Signal, Trash2 } from "lucide-react";
@@ -239,6 +240,9 @@ export default function MyModels() {
       </div>
 
       <div className="relative z-10 space-y-8 animate-fade-in">
+        {/* Model update banner — only visible in Electron when an update is available */}
+        <ModelUpdateBanner domain="broker" />
+
         {/* Hero Header */}
         <div className="relative rounded-2xl bg-gradient-hero p-8 border border-border/50 backdrop-blur-sm shadow-premium">
           <div className="absolute inset-0 bg-gradient-subtle rounded-2xl opacity-50" />

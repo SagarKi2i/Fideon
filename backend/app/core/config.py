@@ -221,3 +221,9 @@ WEBHOOK_RETRY_MAX_SECONDS = _env_float("WEBHOOK_RETRY_MAX_SECONDS", 60.0)
 MLFLOW_TRACKING_URI = (os.getenv("MLFLOW_TRACKING_URI") or "").strip().rstrip("/")
 MLFLOW_API_TOKEN = (os.getenv("MLFLOW_API_TOKEN") or "").strip()
 
+# SeaweedFS (S3-compatible object store for GGUF model artifacts)
+SEAWEEDFS_ENDPOINT = (os.getenv("SEAWEEDFS_ENDPOINT") or "").strip()
+SEAWEEDFS_ACCESS_KEY = (os.getenv("SEAWEEDFS_ACCESS_KEY") or "").strip()
+SEAWEEDFS_SECRET_KEY = (os.getenv("SEAWEEDFS_SECRET_KEY") or "").strip()
+SEAWEEDFS_BUCKET = (os.getenv("SEAWEEDFS_BUCKET") or "").strip()
+

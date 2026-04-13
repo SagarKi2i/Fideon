@@ -40,13 +40,15 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { apiUrl } from "@/lib/apiBaseUrl";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { brokerModels, mgaModels, carrierModels, InsuranceModel } from "@/lib/insuranceMocks";
 import { useUserRole } from "@/hooks/useUserRole";
 import { buildApiRequestError, readJsonSafe } from "@/lib/httpErrors";
 import { authHeadersJson } from "@/lib/authHeader";
 import { Skeleton } from "@/components/ui/skeleton";
+import { cn } from "@/lib/utils";
+import { modelIdsForAgentPacks } from "@/lib/agentPackModels";
 
 interface ModelCard {
   id: string;
@@ -214,63 +216,164 @@ const domainLabels: Record<string, string> = {
   travel: "Travel & Tourism",
 };
 
+const LOCKED_MODEL_MESSAGE =
+  "Upgrade your plan and agent pack to activate this model.";
+
+const ACTIVE_MODEL_LIMIT_MESSAGE =
+  "Please upgrade your plan to add more active models.";
+
 export default function Marketplace() {
   const { toast } = useToast();
   const navigate = useNavigate();
-  const { role, isViewer, isGuest } = useUserRole();
+  const { role, isViewer, isGuest, loading: roleLoading } = useUserRole();
   const [activatedModelIds, setActivatedModelIds] = useState<Set<string>>(new Set());
   const [pendingRequestIds, setPendingRequestIds] = useState<Set<string>>(new Set());
-  const [loading, setLoading] = useState(true);
+  const [tenantAgentPacks, setTenantAgentPacks] = useState<string[]>([]);
+  const [tenantMaxActiveModels, setTenantMaxActiveModels] = useState<number | null>(null);
+  const [tenantDistinctModelIds, setTenantDistinctModelIds] = useState<string[]>([]);
+  const [marketplaceDataLoading, setMarketplaceDataLoading] = useState(true);
   const [selectedDomain, setSelectedDomain] = useState<string>("all");
   const [selectedInsuranceSegment, setSelectedInsuranceSegment] = useState<string>("all");
 
-  useEffect(() => {
-    loadActivatedModels();
-    loadPendingRequests();
-  }, []);
+  const loading = marketplaceDataLoading || roleLoading;
 
-  const loadActivatedModels = async () => {
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        setLoading(false);
-        return;
-      }
+  const allowedInsuranceModelIds = useMemo(
+    () => modelIdsForAgentPacks(tenantAgentPacks),
+    [tenantAgentPacks],
+  );
 
-      const response = await fetch(apiUrl("/api/pod-activation/my-activations"), {
-        headers: {
-          ...(await authHeadersJson()),
-        },
-      });
-      const payload = await readJsonSafe(response);
-      if (!response.ok) throw buildApiRequestError(response, payload, "Failed to load activated models");
-      setActivatedModelIds(new Set(payload.model_ids ?? []));
-    } catch (error) {
-      console.error("Error loading activated models:", error);
-    } finally {
-      setLoading(false);
-    }
+  const tenantDistinctModelIdSet = useMemo(
+    () => new Set(tenantDistinctModelIds),
+    [tenantDistinctModelIds],
+  );
+
+  const isPackGatingActive = role === "global_admin" ? false : tenantAgentPacks.length > 0;
+
+  const isBlockedByActiveModelPlanLimit = (model: ModelCard) => {
+    if (tenantMaxActiveModels === null || tenantMaxActiveModels === undefined) return false;
+    if (activatedModelIds.has(model.id)) return false;
+    if (tenantDistinctModelIdSet.has(model.id)) return false;
+    return tenantDistinctModelIdSet.size >= tenantMaxActiveModels;
   };
 
-  const loadPendingRequests = async () => {
+  const isMarketplaceModelUnlocked = (model: ModelCard) => {
+    if (!isPackGatingActive) return true;
+    if (activatedModelIds.has(model.id)) return true;
+    if (model.domain === "insurance") return allowedInsuranceModelIds.has(model.id);
+    return false;
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setMarketplaceDataLoading(true);
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session) {
+          setActivatedModelIds(new Set());
+          setPendingRequestIds(new Set());
+          setTenantAgentPacks([]);
+          setTenantMaxActiveModels(null);
+          setTenantDistinctModelIds([]);
+          return;
+        }
+
+        const headers = await authHeadersJson();
+        const [actRes, profRes, pendRes] = await Promise.all([
+          fetch(apiUrl("/api/pod-activation/my-activations"), { headers }),
+          fetch(apiUrl("/api/settings/profile"), { headers }),
+          fetch(apiUrl("/api/pod-activation/my-requests?status=pending"), { headers }),
+        ]);
+
+        const actPayload = await readJsonSafe(actRes);
+        const profPayload = await readJsonSafe(profRes);
+        const pendPayload = await readJsonSafe(pendRes);
+
+        if (cancelled) return;
+
+        if (actRes.ok) {
+          setActivatedModelIds(new Set(actPayload.model_ids ?? []));
+        } else {
+          console.error("Failed to load activated models:", buildApiRequestError(actRes, actPayload, "Failed to load activated models"));
+        }
+
+        if (pendRes.ok) {
+          setPendingRequestIds(new Set((pendPayload.requests ?? []).map((r: { model_id?: string }) => r.model_id).filter(Boolean)));
+        } else {
+          console.error("Failed to load pending requests:", buildApiRequestError(pendRes, pendPayload, "Failed to load pending requests"));
+        }
+
+        if (profRes.ok) {
+          const packs = profPayload?.profile?.tenant_agent_packs;
+          setTenantAgentPacks(Array.isArray(packs) ? packs : []);
+          const maxM = profPayload?.profile?.tenant_max_active_models;
+          setTenantMaxActiveModels(typeof maxM === "number" && Number.isFinite(maxM) ? maxM : null);
+          const distinct = profPayload?.profile?.tenant_distinct_activated_model_ids;
+          setTenantDistinctModelIds(Array.isArray(distinct) ? distinct.filter((x): x is string => typeof x === "string") : []);
+        } else {
+          setTenantAgentPacks([]);
+          setTenantMaxActiveModels(null);
+          setTenantDistinctModelIds([]);
+        }
+      } catch (error) {
+        console.error("Error loading marketplace context:", error);
+        if (!cancelled) {
+          setTenantAgentPacks([]);
+          setTenantMaxActiveModels(null);
+          setTenantDistinctModelIds([]);
+        }
+      } finally {
+        if (!cancelled) setMarketplaceDataLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const refreshPendingRequests = async () => {
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) return;
-
-      const response = await fetch(apiUrl("/api/pod-activation/my-requests?status=pending"), {
-        headers: {
-          ...(await authHeadersJson()),
-        },
-      });
-      const payload = await readJsonSafe(response);
-      if (!response.ok) throw buildApiRequestError(response, payload, "Failed to load pending requests");
-      setPendingRequestIds(new Set((payload.requests ?? []).map((r: any) => r.model_id)));
-    } catch (error) {
-      console.error("Error loading pending requests:", error);
+      const headers = await authHeadersJson();
+      const pendRes = await fetch(apiUrl("/api/pod-activation/my-requests?status=pending"), { headers });
+      const pendPayload = await readJsonSafe(pendRes);
+      if (!pendRes.ok) {
+        console.error(
+          "Failed to refresh pending requests:",
+          buildApiRequestError(pendRes, pendPayload, "Failed to load pending requests"),
+        );
+        return;
+      }
+      setPendingRequestIds(
+        new Set(
+          (pendPayload.requests ?? [])
+            .map((r: { model_id?: string }) => r.model_id)
+            .filter(Boolean),
+        ),
+      );
+    } catch (err) {
+      console.error("Error refreshing pending requests:", err);
     }
   };
 
   const handleRequestActivation = async (model: ModelCard) => {
+    if (!isMarketplaceModelUnlocked(model)) {
+      toast({
+        title: "Not included in your agent packs",
+        description: LOCKED_MODEL_MESSAGE,
+        variant: "destructive",
+      });
+      return;
+    }
+    if (isBlockedByActiveModelPlanLimit(model)) {
+      toast({
+        title: "Active model limit reached",
+        description: ACTIVE_MODEL_LIMIT_MESSAGE,
+        variant: "destructive",
+      });
+      return;
+    }
     if (isViewer) {
       toast({
         title: "Viewer mode",
@@ -312,6 +415,19 @@ export default function Marketplace() {
           navigate("/auth");
           return;
         }
+        if (response.status === 403) {
+          const detail = payload?.detail;
+          const msg =
+            typeof detail === "string" && detail.trim()
+              ? detail.trim()
+              : ACTIVE_MODEL_LIMIT_MESSAGE;
+          toast({
+            title: "Active model limit reached",
+            description: msg,
+            variant: "destructive",
+          });
+          return;
+        }
         if (response.status === 409) {
           toast({
             title: "Already Requested",
@@ -334,7 +450,7 @@ export default function Marketplace() {
         description: `Activation request for ${model.name} has been sent to your admin for approval`,
       });
 
-      loadPendingRequests();
+      await refreshPendingRequests();
     } catch (error) {
       console.error("Error requesting activation:", error);
       toast({
@@ -407,7 +523,8 @@ export default function Marketplace() {
     return domainIcons[key] ?? Shield;
   };
 
-  const getModelCardClassName = (isActivated: boolean, isPending: boolean): string => {
+  const getModelCardClassName = (isActivated: boolean, isPending: boolean, isLocked: boolean): string => {
+    if (isLocked) return "border-border/60 bg-card/80 border-border/50";
     if (isActivated) return "ring-2 ring-primary/50 shadow-elevated bg-card/90 border-primary/30";
     if (isPending) return "ring-2 ring-amber-500/30 shadow-elevated bg-card/90 border-amber-500/20";
     return "hover:border-primary/50 bg-card/80 border-border/50";
@@ -447,79 +564,107 @@ export default function Marketplace() {
     const Icon = model.icon;
     const isActivated = activatedModelIds.has(model.id);
     const isPending = pendingRequestIds.has(model.id);
+    const unlocked = isMarketplaceModelUnlocked(model);
+    const isLocked = !unlocked;
+    const isPlanLimitBlocked = isBlockedByActiveModelPlanLimit(model);
     const actionButtonContent = getActionButtonContent(isActivated, isPending, actionBlockedByRole);
+    const showPlanLimitHint = !isLocked && isPlanLimitBlocked && !isActivated && !isPending;
+    const buttonLabel =
+      showPlanLimitHint && !actionBlockedByRole ? "Plan limit reached" : actionButtonContent.label;
 
     return (
       <Card 
         key={model.id} 
         style={{ animationDelay: `${index * 50}ms` }}
-        className={`group relative overflow-hidden flex flex-col h-full min-h-[280px] md:min-h-[340px] transition-all duration-500 hover:shadow-premium hover:-translate-y-1 md:hover:-translate-y-2 animate-scale-in border backdrop-blur-sm touch-manipulation ${getModelCardClassName(isActivated, isPending)}`}
+        className={cn(
+          "group relative overflow-hidden flex flex-col h-full min-h-[280px] md:min-h-[340px] transition-all duration-500 border backdrop-blur-sm touch-manipulation animate-scale-in",
+          !isLocked && "hover:shadow-premium hover:-translate-y-1 md:hover:-translate-y-2",
+          getModelCardClassName(isActivated, isPending, isLocked),
+        )}
       >
         {/* Enhanced Background Gradient Effect */}
         <div className="absolute inset-0 bg-gradient-primary opacity-0 group-hover:opacity-5 transition-opacity duration-300 pointer-events-none" />
         
-        {isActivated && (
-          <div className="absolute top-2 md:top-3 right-2 md:right-3 z-10">
-            <Badge className="bg-primary text-primary-foreground shadow-lg animate-in zoom-in duration-300 text-[10px] md:text-xs">
-              <CheckCircle2 className="h-2.5 w-2.5 md:h-3 md:w-3 mr-1" />
-              Active
-            </Badge>
-          </div>
-        )}
+        <div
+          className={cn(
+            "relative flex flex-col flex-1 min-h-0",
+            isLocked && "blur-[3px] opacity-60 pointer-events-none select-none",
+          )}
+        >
+          {isActivated && (
+            <div className="absolute top-2 md:top-3 right-2 md:right-3 z-10">
+              <Badge className="bg-primary text-primary-foreground shadow-lg animate-in zoom-in duration-300 text-[10px] md:text-xs">
+                <CheckCircle2 className="h-2.5 w-2.5 md:h-3 md:w-3 mr-1" />
+                Active
+              </Badge>
+            </div>
+          )}
 
-        {isPending && !isActivated && (
-          <div className="absolute top-2 md:top-3 right-2 md:right-3 z-10">
-            <Badge className="bg-amber-500/90 text-white shadow-lg animate-in zoom-in duration-300 text-[10px] md:text-xs">
-              <ClockIcon className="h-2.5 w-2.5 md:h-3 md:w-3 mr-1" />
-              Pending
-            </Badge>
+          {isPending && !isActivated && (
+            <div className="absolute top-2 md:top-3 right-2 md:right-3 z-10">
+              <Badge className="bg-amber-500/90 text-white shadow-lg animate-in zoom-in duration-300 text-[10px] md:text-xs">
+                <ClockIcon className="h-2.5 w-2.5 md:h-3 md:w-3 mr-1" />
+                Pending
+              </Badge>
+            </div>
+          )}
+          
+          <div className="relative flex items-center justify-center pt-5 md:pt-8 pb-3 md:pb-5 bg-gradient-subtle">
+            <div className="p-3 md:p-4 rounded-lg md:rounded-xl bg-gradient-to-br from-primary/15 to-primary/5 group-hover:from-primary/20 group-hover:to-primary/10 group-hover:scale-110 transition-all duration-500 shadow-card">
+              <Icon className="h-8 w-8 md:h-11 md:w-11 text-primary group-hover:animate-float" />
+            </div>
           </div>
-        )}
-        
-        {/* Enhanced Icon Header */}
-        <div className="relative flex items-center justify-center pt-5 md:pt-8 pb-3 md:pb-5 bg-gradient-subtle">
-          <div className="p-3 md:p-4 rounded-lg md:rounded-xl bg-gradient-to-br from-primary/15 to-primary/5 group-hover:from-primary/20 group-hover:to-primary/10 group-hover:scale-110 transition-all duration-500 shadow-card">
-            <Icon className="h-8 w-8 md:h-11 md:w-11 text-primary group-hover:animate-float" />
+
+          <CardHeader className="flex-1 pb-2 px-4 md:px-6">
+            <CardTitle className="text-sm md:text-base font-semibold line-clamp-2 text-center leading-snug mb-1.5 md:mb-2 tracking-tight">
+              {model.name}
+            </CardTitle>
+            <div className="flex justify-center mb-1.5">
+              <Badge variant="outline" className="text-[10px] md:text-xs">
+                {model.version}
+              </Badge>
+            </div>
+            <CardDescription className="text-xs md:text-sm line-clamp-3 text-center leading-relaxed font-normal">
+              {model.description}
+            </CardDescription>
+          </CardHeader>
+
+          <div className="px-4 md:px-5 pb-2 md:pb-3">
+            <div className="flex justify-center">
+              <Badge variant="secondary" className="text-[10px] md:text-xs font-medium">
+                {model.category ?? model.capabilities[0]}
+              </Badge>
+            </div>
           </div>
+
+          <CardContent className="pt-0 pb-4 md:pb-6 px-4 md:px-6 mt-auto">
+            {showPlanLimitHint && (
+              <p className="text-[11px] md:text-xs text-center text-amber-700 dark:text-amber-500 font-medium leading-snug mb-2">
+                {ACTIVE_MODEL_LIMIT_MESSAGE}
+              </p>
+            )}
+            <Button
+              onClick={() => handleRequestActivation(model)}
+              disabled={
+                isLocked || isPlanLimitBlocked || isActivated || isPending || loading || actionBlockedByRole
+              }
+              className="w-full font-semibold text-xs md:text-sm tracking-normal transition-all duration-500 h-10 md:h-11 group-hover:scale-105 touch-manipulation"
+              size="default"
+              variant={getActivationButtonVariant(isActivated, isPending)}
+            >
+              {actionButtonContent.icon}
+              {buttonLabel}
+            </Button>
+          </CardContent>
         </div>
 
-        {/* Content - Flexible */}
-        <CardHeader className="flex-1 pb-2 px-4 md:px-6">
-          <CardTitle className="text-sm md:text-base font-semibold line-clamp-2 text-center leading-snug mb-1.5 md:mb-2 tracking-tight">
-            {model.name}
-          </CardTitle>
-          <div className="flex justify-center mb-1.5">
-            <Badge variant="outline" className="text-[10px] md:text-xs">
-              {model.version}
-            </Badge>
+        {isLocked && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center p-4 bg-background/35 backdrop-blur-[2px]">
+            <p className="text-center text-xs md:text-sm font-medium text-foreground leading-snug max-w-[16rem] md:max-w-xs">
+              {LOCKED_MODEL_MESSAGE}
+            </p>
           </div>
-          <CardDescription className="text-xs md:text-sm line-clamp-3 text-center leading-relaxed font-normal">
-            {model.description}
-          </CardDescription>
-        </CardHeader>
-
-        {/* Category Badge - Fixed position */}
-        <div className="px-4 md:px-5 pb-2 md:pb-3">
-          <div className="flex justify-center">
-            <Badge variant="secondary" className="text-[10px] md:text-xs font-medium">
-              {model.category ?? model.capabilities[0]}
-            </Badge>
-          </div>
-        </div>
-
-        {/* Action Button - Enhanced */}
-        <CardContent className="pt-0 pb-4 md:pb-6 px-4 md:px-6 mt-auto">
-          <Button
-            onClick={() => handleRequestActivation(model)}
-            disabled={isActivated || isPending || loading || actionBlockedByRole}
-            className="w-full font-semibold text-xs md:text-sm tracking-normal transition-all duration-500 h-10 md:h-11 group-hover:scale-105 touch-manipulation"
-            size="default"
-            variant={getActivationButtonVariant(isActivated, isPending)}
-          >
-            {actionButtonContent.icon}
-            {actionButtonContent.label}
-          </Button>
-        </CardContent>
+        )}
       </Card>
     );
   };
@@ -548,6 +693,12 @@ export default function Marketplace() {
             <p className="text-muted-foreground text-sm md:text-lg">
               Discover and activate domain-specific AI models for your business
             </p>
+            {tenantMaxActiveModels !== null && (
+              <p className="mt-3 text-xs md:text-sm font-medium text-amber-700 dark:text-amber-500">
+                Active AI models for your organization: {tenantDistinctModelIds.length} of{" "}
+                {tenantMaxActiveModels} included on your plan.
+              </p>
+            )}
           </div>
         </div>
 

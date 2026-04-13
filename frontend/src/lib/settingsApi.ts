@@ -13,6 +13,15 @@ export interface SettingsProfile {
   full_name: string;
   role: string;
   preferences: SettingsPreferences;
+  tenant_id?: string | null;
+  tenant_name?: string | null;
+  tenant_plan?: string | null;
+  /** Tenant-selected signup packs; drives marketplace model visibility when non-empty. */
+  tenant_agent_packs?: string[];
+  /** null/undefined = unlimited active models (Enterprise). */
+  tenant_max_active_models?: number | null;
+  /** Distinct model ids activated for any user in the tenant (plan limit applies to this count). */
+  tenant_distinct_activated_model_ids?: string[];
 }
 
 export interface PersonalApiKeyRow {
