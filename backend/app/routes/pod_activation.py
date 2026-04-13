@@ -15,6 +15,7 @@ from app.core.supabase import (
     postgrest_patch,
     verify_user,
 )
+from app.services.tenant_activation_limits import assert_tenant_may_add_distinct_model
 from app.services.webhook_engine import WEBHOOK_EVENT_MODEL_DEPLOYED, try_emit_webhook_event
 
 router = APIRouter()
@@ -108,6 +109,8 @@ async def create_activation_request(request: Request, authorization: Optional[st
 
     if not model_id or not model_name or domain not in VALID_DOMAINS:
         raise HTTPException(status_code=400, detail="model_id, model_name and valid domain are required")
+
+    await assert_tenant_may_add_distinct_model(str(requester_tenant_id), model_id)
 
     try:
         created = await postgrest_insert(
@@ -310,6 +313,10 @@ async def approve_activation_request(
         ),
     )
     if not existing:
+        await assert_tenant_may_add_distinct_model(
+            str(target_tenant_id),
+            str(activation_request.get("model_id") or ""),
+        )
         await postgrest_insert(
             "activated_models",
             {
@@ -474,6 +481,8 @@ async def allocate_model_to_user(
     )
     if existing:
         raise HTTPException(status_code=409, detail="Model already allocated to user")
+
+    await assert_tenant_may_add_distinct_model(str(requester_tenant_id), model_id)
 
     created = await postgrest_insert(
         "activated_models",

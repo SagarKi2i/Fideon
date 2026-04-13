@@ -54,11 +54,16 @@ async def request_password_reset(request: Request):
         return _GENERIC_RESET_RESPONSE
 
     # Optional lookup for tenant-safe auditing without exposing existence to caller.
-    target_rows = await postgrest_get(
-        "app_users",
-        f"select=user_id&email=eq.{quote(email, safe='')}&limit=1",
-    )
-    target_user_id = target_rows[0].get("user_id") if target_rows else None
+    # Keep this best-effort: never let a lookup failure break the reset flow.
+    target_user_id = None
+    try:
+        target_rows = await postgrest_get(
+            "app_users",
+            f"select=user_id&email=eq.{quote(email, safe='')}&limit=1",
+        )
+        target_user_id = target_rows[0].get("user_id") if target_rows else None
+    except Exception:  # noqa: BLE001
+        target_user_id = None
 
     try:
         payload = {"email": email}

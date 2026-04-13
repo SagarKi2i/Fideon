@@ -113,6 +113,9 @@ INSERT INTO storage.buckets (id, name)
 VALUES ('model-updates', 'model-updates')
 ON CONFLICT (id) DO NOTHING;
 
+DROP POLICY IF EXISTS "Devices can upload gradients" ON storage.objects;
+DROP POLICY IF EXISTS "Admins can view gradients" ON storage.objects;
+
 CREATE POLICY "Devices can upload gradients"
   ON storage.objects FOR INSERT
   WITH CHECK (bucket_id = 'model-updates');

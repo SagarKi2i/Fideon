@@ -14,6 +14,7 @@ from app.core.supabase import (
     postgrest_patch,
     verify_user,
 )
+from app.services.tenant_activation_limits import distinct_tenant_activated_model_ids
 
 router = APIRouter()
 USER_PROFILE_NOT_FOUND = "User profile not found"
@@ -63,16 +64,32 @@ async def get_profile(authorization: Optional[str] = Header(default=None)):
     tenant_name = None
     tenant_plan = None
     tenant_id = profile.get("tenant_id")
+    tenant_agent_packs: Optional[list] = None
+    tenant_max_active_models: Optional[int] = None
+    tenant_distinct_activated_model_ids: list[str] = []
     if tenant_id:
         tenant_rows = await postgrest_get(
             "tenants",
-            f"select=id,name,metadata&id=eq.{quote(str(tenant_id), safe='')}&limit=1",
+            f"select=id,name,metadata,agent_packs,max_active_models&id=eq.{quote(str(tenant_id), safe='')}&limit=1",
         )
         if tenant_rows:
             tenant_row = tenant_rows[0]
             tenant_name = tenant_row.get("name")
             tenant_metadata = tenant_row.get("metadata") if isinstance(tenant_row.get("metadata"), dict) else {}
             tenant_plan = tenant_metadata.get("plan")
+            packs = tenant_row.get("agent_packs")
+            tenant_agent_packs = packs if isinstance(packs, list) else []
+            raw_max = tenant_row.get("max_active_models")
+            if raw_max is not None:
+                try:
+                    tenant_max_active_models = int(raw_max)
+                except (TypeError, ValueError):
+                    tenant_max_active_models = None
+            else:
+                tenant_max_active_models = None
+        tenant_distinct_activated_model_ids = sorted(
+            await distinct_tenant_activated_model_ids(str(tenant_id))
+        )
     return {
         "profile": {
             "user_id": profile.get("user_id"),
@@ -83,6 +100,9 @@ async def get_profile(authorization: Optional[str] = Header(default=None)):
             "tenant_id": tenant_id,
             "tenant_name": tenant_name,
             "tenant_plan": tenant_plan,
+            "tenant_agent_packs": tenant_agent_packs if tenant_agent_packs is not None else [],
+            "tenant_max_active_models": tenant_max_active_models,
+            "tenant_distinct_activated_model_ids": tenant_distinct_activated_model_ids,
         }
     }
 
