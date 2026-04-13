@@ -318,7 +318,7 @@ export default function ClaimsAdjudicationUI({ onRun, isRunning, result }: Claim
                   </CardHeader>
                   <CardContent>
                     <div className="space-y-3">
-                      {parsedResult.coverageAnalysis.map((cov) => (
+                      {parsedResult.coverageAnalysis.map((cov: any) => (
                         <div key={`${cov.coverage}-${cov.limit}`} className={`flex items-center justify-between p-3 rounded-lg ${cov.applicable ? 'bg-green-500/5 border border-green-500/20' : 'bg-muted/50'}`}>
                           <div className="flex items-center gap-3">
                             {cov.applicable ? (
@@ -352,7 +352,7 @@ export default function ClaimsAdjudicationUI({ onRun, isRunning, result }: Claim
                   </CardHeader>
                   <CardContent>
                     <div className="space-y-3">
-                      {parsedResult.reserveRecommendation.map((res) => (
+                      {parsedResult.reserveRecommendation.map((res: any) => (
                         <div key={`${res.category}-${res.amount}`} className="flex items-center justify-between p-3 rounded-lg bg-muted/30">
                           <div className="flex items-center gap-3">
                             <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
@@ -370,7 +370,7 @@ export default function ClaimsAdjudicationUI({ onRun, isRunning, result }: Claim
                       ))}
                       <div className="border-t pt-3 mt-3 flex justify-between font-semibold">
                         <span>Total Reserve</span>
-                        <span className="text-primary">{formatCurrency(parsedResult.reserveRecommendation.reduce((sum, r) => sum + r.amount, 0))}</span>
+                        <span className="text-primary">{formatCurrency(parsedResult.reserveRecommendation.reduce((sum: any, r: any) => sum + r.amount, 0))}</span>
                       </div>
                     </div>
                   </CardContent>
@@ -389,7 +389,7 @@ export default function ClaimsAdjudicationUI({ onRun, isRunning, result }: Claim
                   </CardHeader>
                   <CardContent>
                     <div className="space-y-2">
-                      {parsedResult.fraudIndicators.map((fraud) => (
+                      {parsedResult.fraudIndicators.map((fraud: any) => (
                         <div key={`${fraud.indicator}-${fraud.severity}`} className="flex items-center justify-between p-3 rounded-lg bg-muted/30">
                           <span className="text-sm">{fraud.indicator}</span>
                           <Badge className={getSeverityColor(fraud.severity)}>
@@ -412,7 +412,7 @@ export default function ClaimsAdjudicationUI({ onRun, isRunning, result }: Claim
                   <CardContent>
                     <div className="relative pl-6 space-y-4">
                       <div className="absolute left-2 top-2 bottom-2 w-0.5 bg-border" />
-                      {parsedResult.timeline.map((event) => (
+                      {parsedResult.timeline.map((event: any) => (
                         <div key={`${event.date}-${event.event}`} className="relative">
                           <div className="absolute -left-4 w-3 h-3 rounded-full bg-primary border-2 border-background" />
                           <div>
@@ -439,7 +439,7 @@ export default function ClaimsAdjudicationUI({ onRun, isRunning, result }: Claim
                 </CardHeader>
                 <CardContent className="pt-4">
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {parsedResult.nextSteps.map((step, idx) => (
+                    {parsedResult.nextSteps.map((step: any, idx: any) => (
                       <div key={`${idx + 1}-${step}`} className="flex items-start gap-3 p-3 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors">
                         <div className="w-6 h-6 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
                           <span className="text-xs font-bold text-primary">{idx + 1}</span>

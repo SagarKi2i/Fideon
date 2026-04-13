@@ -82,7 +82,7 @@ export default function AgentWorkflows() {
     try {
       const uid = userId ?? currentUserId;
       if (!uid) return;
-      const { data } = await supabase
+      const { data } = await (supabase as any)
         .from("agent_pipelines")
         .select("*")
         .eq("user_id", uid)
@@ -95,7 +95,7 @@ export default function AgentWorkflows() {
   };
 
   const addStep = (agentId: string) => {
-    const agent = AGENT_REGISTRY.find(a => a.id === agentId);
+    const agent = AGENT_REGISTRY.find((a: any) => a.id === agentId);
     if (!agent) return;
     const newStep: PipelineStep = {
       id: crypto.randomUUID(),
@@ -109,11 +109,11 @@ export default function AgentWorkflows() {
   };
 
   const updateStepConfig = (index: number, config: AgentConfig) => {
-    setSteps(prev => prev.map((s, i) => i === index ? { ...s, config } : s));
+    setSteps(prev => prev.map((s: any, i: any) => i === index ? { ...s, config } : s));
   };
 
   const removeStep = (index: number) => {
-    setSteps(prev => prev.filter((_, i) => i !== index));
+    setSteps(prev => prev.filter((_: any, i: any) => i !== index));
     if (expandedStep === index) setExpandedStep(null);
   };
 
@@ -143,7 +143,7 @@ export default function AgentWorkflows() {
 
   const savePipeline = async (schedConfig: ScheduleConfig | null, userId: string) => {
     if (editingPipeline) {
-      const { error } = await supabase.from("agent_pipelines")
+      const { error } = await (supabase as any).from("agent_pipelines")
         .update({
           name: pipelineName,
           description: pipelineDesc || null,
@@ -157,7 +157,7 @@ export default function AgentWorkflows() {
       return;
     }
 
-    const { error } = await supabase.from("agent_pipelines").insert({
+    const { error } = await (supabase as any).from("agent_pipelines").insert({
       user_id: userId,
       name: pipelineName,
       description: pipelineDesc || null,
@@ -169,7 +169,7 @@ export default function AgentWorkflows() {
   };
 
   const onStepPassOutputChange = (index: number, value: boolean) => {
-    setSteps(prev => prev.map((s, i) => (i === index ? { ...s, pass_output: value } : s)));
+    setSteps(prev => prev.map((s: any, i: any) => (i === index ? { ...s, pass_output: value } : s)));
   };
 
   const handleSave = async () => {
@@ -191,17 +191,17 @@ export default function AgentWorkflows() {
   };
 
   const deletePipeline = async (id: string) => {
-    await supabase.from("agent_pipelines").delete().eq("id", id).eq("user_id", currentUserId ?? "");
+    await (supabase as any).from("agent_pipelines").delete().eq("id", id).eq("user_id", currentUserId ?? "");
     await loadData();
   };
 
   const togglePipeline = async (id: string, current: boolean) => {
-    await supabase
+    await (supabase as any)
       .from("agent_pipelines")
-      .update({ is_active: !current } as any)
+      .update({ is_active: !current })
       .eq("id", id)
       .eq("user_id", currentUserId ?? "");
-    setPipelines(prev => prev.map(p => p.id === id ? { ...p, is_active: !current } : p));
+    setPipelines(prev => prev.map((p: any) => p.id === id ? { ...p, is_active: !current } : p));
   };
 
   const openEdit = (pipeline: Pipeline) => {
@@ -226,7 +226,7 @@ export default function AgentWorkflows() {
   }
 
   // Group agents by category
-  const agentsByCategory = AGENT_REGISTRY.reduce((acc, a) => {
+  const agentsByCategory = AGENT_REGISTRY.reduce((acc: any, a: any) => {
     if (!acc[a.category]) {
       acc[a.category] = [];
     }
@@ -300,8 +300,8 @@ export default function AgentWorkflows() {
                   </div>
                 )}
 
-                {steps.map((step, idx) => {
-                  const agent = AGENT_REGISTRY.find(a => a.id === step.agent_id);
+                {steps.map((step: any, idx: any) => {
+                  const agent = AGENT_REGISTRY.find((a: any) => a.id === step.agent_id);
                   return (
                     <div key={step.id}>
                       {idx > 0 && (
@@ -351,11 +351,11 @@ export default function AgentWorkflows() {
                 {/* Agent Selector */}
                 <div className="space-y-2 border border-dashed border-border rounded-xl p-3">
                   <Label className="text-xs text-muted-foreground">Add Agent to Pipeline</Label>
-                  {Object.entries(agentsByCategory).map(([category, agents]) => (
+                  {Object.entries(agentsByCategory).map(([category, agents]: [string, any]) => (
                     <div key={category} className="space-y-1">
                       <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">{category}</p>
                       <div className="flex flex-wrap gap-1.5">
-                        {agents.map(agent => (
+                        {agents.map((agent: any) => (
                           <Button key={agent.id} variant="outline" size="sm" className="h-7 text-xs" onClick={() => addStep(agent.id)}>
                             <Plus className="h-3 w-3 mr-1" /> {agent.name}
                           </Button>
@@ -389,7 +389,7 @@ export default function AgentWorkflows() {
                     {scheduleConfig.type === "recurring" ? (
                       <Select value={cronPreset} onValueChange={setCronPreset}>
                         <SelectTrigger><SelectValue /></SelectTrigger>
-                        <SelectContent>{CRON_PRESETS.map(p => <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>)}</SelectContent>
+                        <SelectContent>{CRON_PRESETS.map((p: any) => <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>)}</SelectContent>
                       </Select>
                     ) : (
                       <div className="grid grid-cols-2 gap-3">
@@ -427,7 +427,7 @@ export default function AgentWorkflows() {
           </Card>
         ) : (
           <div className="grid gap-4">
-            {pipelines.map(pipeline => (
+            {pipelines.map((pipeline: any) => (
               <Card key={pipeline.id} className="bg-card/80 backdrop-blur-sm border-border/50 hover:shadow-elevated transition-shadow">
                 <CardHeader className="pb-3">
                   <div className="flex items-center justify-between">
@@ -448,7 +448,7 @@ export default function AgentWorkflows() {
                 <CardContent>
                   {/* Step chain visualization */}
                   <div className="flex items-center gap-2 flex-wrap">
-                    {pipeline.steps.map((step, i) => (
+                    {pipeline.steps.map((step: any, i: any) => (
                       <div key={step.id} className="flex items-center gap-2">
                         <Badge variant="secondary" className="py-1.5 px-3">
                           <span className="text-xs text-muted-foreground mr-1.5">{i + 1}.</span>
@@ -468,7 +468,7 @@ export default function AgentWorkflows() {
                       <span className="flex items-center gap-1">
                         <Clock className="h-3 w-3" />
                         {pipeline.schedule_config.type === "recurring"
-                          ? (CRON_PRESETS.find(p => p.value === pipeline.schedule_config?.cron_expression)?.label ?? pipeline.schedule_config.cron_expression)
+                          ? (CRON_PRESETS.find((p: any) => p.value === pipeline.schedule_config?.cron_expression)?.label ?? pipeline.schedule_config.cron_expression)
                           : (pipeline.schedule_config.scheduled_at ? format(new Date(pipeline.schedule_config.scheduled_at), "MMM d, yyyy h:mm a") : "—")
                         }
                       </span>

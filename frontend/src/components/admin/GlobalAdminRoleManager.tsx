@@ -121,23 +121,23 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
     setNewUserRole(getRoleOptions(currentUserRole)[0].role);
   }, [currentUserRole]);
 
-  const selectedRoleOption = roleOptions.find((o) => o.role === newUserRole) ?? roleOptions[0];
+  const selectedRoleOption = roleOptions.find((o: any) => o.role === newUserRole) ?? roleOptions[0];
 
   const loadUsersFromSupabaseFallback = useCallback(async () => {
-    const { data: appUsers, error: appUsersError } = await supabase
+    const { data: appUsers, error: appUsersError } = await (supabase as any)
       .from("app_users")
       .select("user_id,email,tenants(name)")
       .order("email", { ascending: true });
     if (appUsersError) throw appUsersError;
 
-    const { data: roleRows, error: roleRowsError } = await supabase
+    const { data: roleRows, error: roleRowsError } = await (supabase as any)
       .from("user_roles")
       .select("user_id,role");
     if (roleRowsError) throw roleRowsError;
 
-    const roleMap = new Map((roleRows || []).map((r) => [r.user_id, r.role as AppRole]));
+    const roleMap = new Map((roleRows || []).map((r: any) => [r.user_id, r.role as AppRole]));
     setUsers(
-      (appUsers || []).map((u) => ({
+      (appUsers || []).map((u: any) => ({
         id: u.user_id,
         email: u.email,
         role: roleMap.get(u.user_id) || "user",
@@ -220,13 +220,13 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
       }
 
       if (!updated) {
-        const { error } = await supabase
+        const { error } = await (supabase as any)
           .from("user_roles")
           .upsert({ user_id: userId, role }, { onConflict: "user_id" });
         if (error) throw error;
       }
 
-      setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, role } : u)));
+      setUsers((prev) => prev.map((u: any) => (u.id === userId ? { ...u, role } : u)));
       toast({ title: "Role updated", description: "User role was updated successfully." });
     } catch (error: any) {
       toast({ title: "Update failed", description: error.message || "Could not update role", variant: "destructive" });
@@ -438,7 +438,7 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
               <p className="text-sm text-muted-foreground">No users available.</p>
             ) : (
               <div className="space-y-3">
-                {users.map((u) => (
+                {users.map((u: any) => (
                   <div
                     key={u.id}
                     className="flex items-center justify-between gap-3 p-3 rounded-md border border-border/60"
@@ -460,7 +460,7 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            {(["global_admin", "admin", "user", "viewer", "guest"] as AppRole[]).map((role) => (
+                            {(["global_admin", "admin", "user", "viewer", "guest"] as AppRole[]).map((role: any) => (
                               <SelectItem key={role} value={role}>
                                 {role}
                               </SelectItem>

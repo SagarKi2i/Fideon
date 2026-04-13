@@ -86,7 +86,7 @@ export default function SubmissionForm({ onSubmit, isRunning }: SubmissionFormPr
                 <SelectValue placeholder="Select line of business" />
               </SelectTrigger>
               <SelectContent>
-                {lineOfBusinessOptions.map((option) => (
+                {lineOfBusinessOptions.map((option: any) => (
                   <SelectItem key={option.value} value={option.value}>
                     <span className="flex items-center gap-2">
                       <span>{option.icon}</span>

@@ -114,13 +114,13 @@ type BacklogNotificationDetail = {
 
 async function fetchRecentAdminBacklog(recentIso: string) {
   return Promise.all([
-    supabase
+    (supabase as any)
       .from("pod_activation_requests")
       .select("id,user_id,model_name,status,requested_at")
       .gte("requested_at", recentIso)
       .order("requested_at", { ascending: false })
       .limit(20),
-    supabase
+    (supabase as any)
       .from("decision_reviews")
       .select("id,user_id,title,status,created_at")
       .gte("created_at", recentIso)
@@ -131,14 +131,14 @@ async function fetchRecentAdminBacklog(recentIso: string) {
 
 async function fetchRecentUserOutcomes(userId: string) {
   return Promise.all([
-    supabase
+    (supabase as any)
       .from("pod_activation_requests")
       .select("id,user_id,model_name,status,reviewed_at")
       .eq("user_id", userId)
       .in("status", ["approved", "rejected"])
       .order("reviewed_at", { ascending: false })
       .limit(20),
-    supabase
+    (supabase as any)
       .from("decision_reviews")
       .select("id,user_id,title,status,reviewed_at")
       .eq("user_id", userId)
@@ -238,7 +238,7 @@ export function useGlobalRealtimeSubscriptions() {
     fingerprint: string;
   }) => {
     const dedupeSince = new Date(Date.now() - 20_000).toISOString();
-    const { data: existing } = await supabase
+    const { data: existing } = await (supabase as any)
       .from("user_notifications")
       .select("id")
       .eq("user_id", userId)
@@ -247,7 +247,7 @@ export function useGlobalRealtimeSubscriptions() {
       .limit(1);
     if (Array.isArray(existing) && existing.length > 0) return;
 
-    await supabase
+    await (supabase as any)
       .from("user_notifications")
       .insert({
         user_id: userId,
@@ -285,7 +285,7 @@ export function useGlobalRealtimeSubscriptions() {
     if (cached) return cached;
     const fallback = `user ${String(userId).slice(0, 8)}`;
     try {
-      const { data, error } = await supabase
+      const { data, error } = await (supabase as any)
         .from("app_users")
         .select("full_name,email")
         .eq("user_id", userId)
@@ -334,14 +334,14 @@ export function useGlobalRealtimeSubscriptions() {
     cleanupChannels();
     currentUserIdRef.current = userId;
     try {
-      const { data: roleRows, error } = await supabase
+      const { data: roleRows, error } = await (supabase as any)
         .from("user_roles")
         .select("role")
         .eq("user_id", userId);
       if (error) throw error;
 
       const roles: string[] = Array.isArray(roleRows)
-        ? roleRows.flatMap((row) => (row?.role ? [row.role] : []))
+        ? roleRows.flatMap((row: any) => (row?.role ? [row.role] : []))
         : [];
 
       // Resolve deterministic role priority for notification routing.
@@ -356,7 +356,7 @@ export function useGlobalRealtimeSubscriptions() {
       currentRoleRef.current = null;
     }
     try {
-      const { data: profileRows, error } = await supabase
+      const { data: profileRows, error } = await (supabase as any)
         .from("app_users")
         .select("tenant_id")
         .eq("user_id", userId)

@@ -106,7 +106,7 @@ export default function AdminPodReview() {
         setTrainingHistory(historyJobs);
 
         const selectedFromHistory = opts?.selectedJobId
-          ? (historyJobs || []).find(j => String(j.id) === String(opts?.selectedJobId)) || null
+          ? (historyJobs || []).find((j: any) => String(j.id) === String(opts?.selectedJobId)) || null
           : null;
 
         const job = selectedFromHistory || latest;

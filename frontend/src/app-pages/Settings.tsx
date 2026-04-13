@@ -247,7 +247,7 @@ export default function Settings() {
     }
 
     setCarrierCredentials(prev => 
-      prev.map(c => 
+      prev.map((c: any) => 
         c.id === selectedCarrier.id 
           ? { 
               ...c, 
@@ -274,9 +274,9 @@ export default function Settings() {
   };
 
   const handleCarrierDisconnect = (carrierId: string) => {
-    const carrier = carrierCredentials.find(c => c.id === carrierId);
+    const carrier = carrierCredentials.find((c: any) => c.id === carrierId);
     setCarrierCredentials(prev => 
-      prev.map(c => 
+      prev.map((c: any) => 
         c.id === carrierId 
           ? { ...c, connected: false, lastSync: undefined, credentials: undefined }
           : c
@@ -290,13 +290,13 @@ export default function Settings() {
 
   const handleAMSConnect = (amsId: string) => {
     setAmsSystems(prev => 
-      prev.map(a => 
+      prev.map((a: any) => 
         a.id === amsId 
           ? { ...a, connected: !a.connected }
           : a
       )
     );
-    const ams = amsSystems.find(a => a.id === amsId);
+    const ams = amsSystems.find((a: any) => a.id === amsId);
     toast({
       title: ams?.connected ? "Disconnected" : "Connected",
       description: `${ams?.name} ${ams?.connected ? "disconnected" : "connected"} successfully`,
@@ -327,7 +327,7 @@ export default function Settings() {
     }
 
     setAmsSystems(prev =>
-      prev.map(a =>
+      prev.map((a: any) =>
         a.id === selectedAMS.id
           ? {
               ...a,
@@ -440,8 +440,8 @@ export default function Settings() {
     }
   };
 
-  const connectedCarriers = carrierCredentials.filter(c => c.connected).length;
-  const connectedAMS = amsSystems.filter(a => a.connected).length;
+  const connectedCarriers = carrierCredentials.filter((c: any) => c.connected).length;
+  const connectedAMS = amsSystems.filter((a: any) => a.connected).length;
 
   if (isInitialLoading) {
     return (
@@ -509,7 +509,7 @@ export default function Settings() {
             </CardHeader>
             <CardContent>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {carrierCredentials.map((carrier) => (
+                {carrierCredentials.map((carrier: any) => (
                   <Card 
                     key={carrier.id} 
                     className={`border transition-all ${getConnectionStatusCardClass(carrier.connected)}`}
@@ -636,7 +636,7 @@ export default function Settings() {
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
-                {amsSystems.map((ams) => (
+                {amsSystems.map((ams: any) => (
                   <Card 
                     key={ams.id} 
                     className={`border transition-all ${getConnectionStatusCardClass(ams.connected)}`}
@@ -972,7 +972,7 @@ export default function Settings() {
                 {apiKeys.length === 0 ? (
                   <p className="text-sm text-muted-foreground">No personal API keys created yet.</p>
                 ) : (
-                  apiKeys.map((key) => (
+                  apiKeys.map((key: any) => (
                     <div
                       key={key.id}
                       className="flex flex-col md:flex-row md:items-center justify-between gap-3 p-3 border border-border rounded-lg"

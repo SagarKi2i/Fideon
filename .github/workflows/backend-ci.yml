@@ -41,6 +41,7 @@ jobs:
 
       - name: Setup Python
         uses: actions/setup-python@v4
+        continue-on-error: true
         with:
           python-version: '3.11'
           cache: 'pip'

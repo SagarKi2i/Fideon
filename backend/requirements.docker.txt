@@ -56,3 +56,7 @@ pgvector
 transformers>=4.36.0
 huggingface-hub
 peft>=0.7.0
+
+# --- SeaweedFS / S3-compatible object store (GGUF adapter delivery) ---
+boto3>=1.34.0
+botocore>=1.34.0

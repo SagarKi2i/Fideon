@@ -1,3 +1,4 @@
+import ModelUpdateBanner from "@/components/ModelUpdateBanner";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Brain, Clock3, PlayCircle, Signal, Trash2 } from "lucide-react";
@@ -74,7 +75,7 @@ export default function MyModels() {
       }
       setCurrentUserId(user.id);
 
-      const { data, error } = await supabase
+      const { data, error } = await (supabase as any)
         .from("activated_models")
         .select("*")
         .eq("user_id", user.id)
@@ -83,7 +84,7 @@ export default function MyModels() {
       if (error) throw error;
       const nextModels = data || [];
       setModels(nextModels);
-      void loadModelTelemetry(user.id, nextModels.map((m) => m.model_id));
+      void loadModelTelemetry(user.id, nextModels.map((m: any) => m.model_id));
     } catch (error) {
       console.error("Error loading models:", error);
       toast({
@@ -102,7 +103,7 @@ export default function MyModels() {
       return;
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await (supabase as any)
       .from("chat_conversations")
       .select("model_id,updated_at")
       .eq("user_id", userId)
@@ -128,7 +129,7 @@ export default function MyModels() {
 
     const maxCount = Math.max(
       1,
-      ...Object.values(modelStats).map((s) => s.count),
+      ...Object.values(modelStats).map((s: any) => s.count),
     );
 
     const nextTelemetry: Record<string, ModelTelemetry> = {};
@@ -179,7 +180,7 @@ export default function MyModels() {
 
   const handleDeactivate = async (modelId: string) => {
     try {
-      const modelToDelete = models.find((m) => m.id === modelId);
+      const modelToDelete = models.find((m: any) => m.id === modelId);
       if (!modelToDelete) {
         throw new Error("Selected model not found.");
       }
@@ -239,6 +240,9 @@ export default function MyModels() {
       </div>
 
       <div className="relative z-10 space-y-8 animate-fade-in">
+        {/* Model update banner — only visible in Electron when an update is available */}
+        <ModelUpdateBanner domain="broker" />
+
         {/* Hero Header */}
         <div className="relative rounded-2xl bg-gradient-hero p-8 border border-border/50 backdrop-blur-sm shadow-premium">
           <div className="absolute inset-0 bg-gradient-subtle rounded-2xl opacity-50" />
@@ -279,7 +283,7 @@ export default function MyModels() {
             </div>
           ) : (
             <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-3">
-              {models.map((model, index) => (
+              {models.map((model: any, index: any) => (
                 (() => {
                   const telemetry = telemetryByModelId[model.model_id] || DEFAULT_TELEMETRY;
                   return (

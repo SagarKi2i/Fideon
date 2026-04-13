@@ -118,7 +118,7 @@ export function HelpAssistant() {
         "";
 
       const requestBody = JSON.stringify({
-        messages: [...messages, userMessage].map(m => ({ role: m.role, content: m.content })),
+        messages: [...messages, userMessage].map((m: any) => ({ role: m.role, content: m.content })),
       });
 
       let resp: Response | null = null;
@@ -182,7 +182,7 @@ export function HelpAssistant() {
         variant: "destructive",
       });
       if (!assistantContent) {
-        setMessages(prev => prev.filter(m => m.content !== ""));
+        setMessages(prev => prev.filter((m: any) => m.content !== ""));
       }
     } finally {
       setIsLoading(false);
@@ -214,7 +214,7 @@ export function HelpAssistant() {
       {messages.length > 0 && (
         <ScrollArea className="h-[180px] pr-2" ref={scrollRef}>
           <div className="space-y-2">
-            {messages.map((message) => (
+            {messages.map((message: any) => (
               <div
                 key={message.id}
                 className={cn(
@@ -248,7 +248,7 @@ export function HelpAssistant() {
       {/* Quick Prompts */}
       {messages.length === 0 && (
         <div className="grid grid-cols-1 gap-1.5">
-          {QUICK_PROMPTS.map((prompt) => (
+          {QUICK_PROMPTS.map((prompt: any) => (
             <button
               key={prompt.label}
               onClick={() => sendMessage(prompt.label)}

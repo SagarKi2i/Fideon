@@ -33,7 +33,7 @@ async function extractPdfText(file: File): Promise<ExtractedDocumentText> {
     const page = (await pdf.getPage(i)) as { getTextContent: () => Promise<unknown> };
     const content = (await page.getTextContent()) as { items?: Array<{ str?: unknown }> };
     const pageText = (content.items ?? [])
-      .map((it) => String(it?.str ?? ""))
+      .map((it: any) => String(it?.str ?? ""))
       .filter(Boolean)
       .join(" ");
     if (pageText.trim()) chunks.push(pageText);

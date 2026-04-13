@@ -112,7 +112,7 @@ const insuranceSegments: Record<string, { label: string; icon: any; description:
 
 // Convert insurance models to ModelCard format
 const convertInsuranceModels = (models: InsuranceModel[]): ModelCard[] => 
-  models.map(model => ({
+  models.map((model: any) => ({
     id: model.id,
     name: model.name,
     domain: model.domain,
@@ -475,12 +475,12 @@ export default function Marketplace() {
       if (selectedInsuranceSegment === "carrier") return carrierModelCards;
       return allInsuranceModels;
     }
-    return allModels.filter(model => model.domain === selectedDomain);
+    return allModels.filter((model: any) => model.domain === selectedDomain);
   };
 
   const filteredModels = getFilteredModels();
 
-  const groupedModels = filteredModels.reduce((acc, model) => {
+  const groupedModels = filteredModels.reduce((acc: any, model: any) => {
     const key = model.domain === "insurance" && model.segment 
       ? `insurance-${model.segment}` 
       : model.domain;
@@ -493,10 +493,10 @@ export default function Marketplace() {
 
   const domainCounts = {
     insurance: allInsuranceModels.length,
-    healthcare: otherDomainModels.filter(m => m.domain === "healthcare").length,
-    banking: otherDomainModels.filter(m => m.domain === "banking").length,
-    legal: otherDomainModels.filter(m => m.domain === "legal").length,
-    travel: otherDomainModels.filter(m => m.domain === "travel").length,
+    healthcare: otherDomainModels.filter((m: any) => m.domain === "healthcare").length,
+    banking: otherDomainModels.filter((m: any) => m.domain === "banking").length,
+    legal: otherDomainModels.filter((m: any) => m.domain === "legal").length,
+    travel: otherDomainModels.filter((m: any) => m.domain === "travel").length,
   };
 
   const domainIcons: Record<string, any> = {
@@ -775,11 +775,11 @@ export default function Marketplace() {
         <div className="space-y-6 md:space-y-12">
           {loading ? (
             <div className="grid gap-3 md:gap-5 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-              {LOADING_SKELETON_IDS.map((id) => (
+              {LOADING_SKELETON_IDS.map((id: any) => (
                 <Skeleton key={id} className="h-[280px] md:h-[340px] w-full rounded-xl" />
               ))}
             </div>
-          ) : Object.entries(groupedModels).map(([key, models]) => (
+          ) : Object.entries(groupedModels).map(([key, models]: [string, any]) => (
             <div key={key} className="animate-fade-in">
               <div className="flex items-center gap-2 md:gap-3 mb-3 md:mb-6 p-3 md:p-4 rounded-lg md:rounded-xl bg-gradient-hero border border-border/50 backdrop-blur-sm">
                 {(() => {
@@ -801,7 +801,7 @@ export default function Marketplace() {
                 <Badge variant="outline" className="ml-auto border-primary/30 text-primary text-[10px] md:text-xs whitespace-nowrap">{models.length} models</Badge>
               </div>
               <div className="grid gap-3 md:gap-5 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 auto-rows-fr items-stretch">
-                {models.map((model, index) => renderModelCard(model, index))}
+                {models.map((model: any, index: any) => renderModelCard(model, index))}
               </div>
             </div>
           ))}

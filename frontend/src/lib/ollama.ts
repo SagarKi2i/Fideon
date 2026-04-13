@@ -159,6 +159,32 @@ declare global {
         onEvent: (callback: (evt: any) => void) => void;
         removeEventListener: () => void;
       };
+      model?: {
+        checkUpdate: (domain: string) => Promise<{
+          success: boolean;
+          available: boolean;
+          version?: string;
+          minElectronVer?: string;
+          rollbackSafe?: boolean;
+          artifacts?: Array<{ quant_level: string; sha256: string; size_bytes: number }>;
+          error?: string;
+        }>;
+        downloadAndInstall: (opts: {
+          domain: string;
+          version: string;
+          quant: string;
+          sha256Expected: string;
+          sizeBytes: number;
+        }) => Promise<{ success: boolean; modelName?: string; error?: string }>;
+        onInstallProgress: (callback: (data: {
+          phase: "downloading" | "verifying" | "installing";
+          bytesReceived?: number;
+          totalBytes?: number;
+          percent?: number;
+          detail?: string;
+        }) => void) => void;
+        removeInstallProgressListener: () => void;
+      };
     };
   }
 }

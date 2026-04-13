@@ -45,7 +45,7 @@ export default function PolicyComparison() {
         setDocuments([]);
         return;
       }
-      const { data, error } = await supabase
+      const { data, error } = await (supabase as any)
         .from("documents")
         .select("id, filename, file_type")
         .eq("user_id", user.id)
@@ -138,7 +138,7 @@ export default function PolicyComparison() {
                   <SelectValue placeholder="Select first policy" />
                 </SelectTrigger>
                 <SelectContent>
-                  {documents.map((doc) => (
+                  {documents.map((doc: any) => (
                     <SelectItem key={doc.id} value={doc.id}>
                       {doc.filename}
                     </SelectItem>
@@ -154,7 +154,7 @@ export default function PolicyComparison() {
                   <SelectValue placeholder="Select second policy" />
                 </SelectTrigger>
                 <SelectContent>
-                  {documents.map((doc) => (
+                  {documents.map((doc: any) => (
                     <SelectItem key={doc.id} value={doc.id}>
                       {doc.filename}
                     </SelectItem>

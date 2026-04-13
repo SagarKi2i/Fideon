@@ -124,7 +124,7 @@ export function SendToReviewButton({ podModelId, podModelName, domain, result, i
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {DECISION_TYPES.map((t) => (
+                {DECISION_TYPES.map((t: any) => (
                   <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>
                 ))}
               </SelectContent>

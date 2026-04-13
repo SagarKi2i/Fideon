@@ -239,20 +239,20 @@ export default function Mailbox() {
   const [selectedEmail, setSelectedEmail] = useState<Email | null>(null);
   const [filter, setFilter] = useState<string>("all");
 
-  const unreadCount = emails.filter((e) => !e.read).length;
+  const unreadCount = emails.filter((e: any) => !e.read).length;
 
   let filteredEmails = emails;
   if (filter === "unread") {
-    filteredEmails = emails.filter((e) => !e.read);
+    filteredEmails = emails.filter((e: any) => !e.read);
   } else if (filter === "starred") {
-    filteredEmails = emails.filter((e) => e.starred);
+    filteredEmails = emails.filter((e: any) => e.starred);
   } else if (filter === "attachments") {
-    filteredEmails = emails.filter((e) => e.attachments.length > 0);
+    filteredEmails = emails.filter((e: any) => e.attachments.length > 0);
   }
 
   const openEmail = (email: Email) => {
     setEmails((prev) =>
-      prev.map((e) => (e.id === email.id ? { ...e, read: true } : e))
+      prev.map((e: any) => (e.id === email.id ? { ...e, read: true } : e))
     );
     setSelectedEmail({ ...email, read: true });
   };
@@ -260,7 +260,7 @@ export default function Mailbox() {
   const toggleStar = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     setEmails((prev) =>
-      prev.map((em) => (em.id === id ? { ...em, starred: !em.starred } : em))
+      prev.map((em: any) => (em.id === id ? { ...em, starred: !em.starred } : em))
     );
     if (selectedEmail?.id === id) {
       setSelectedEmail((prev) => prev ? { ...prev, starred: !prev.starred } : null);
@@ -288,7 +288,7 @@ export default function Mailbox() {
           { key: "unread", label: `Unread (${unreadCount})` },
           { key: "starred", label: "Starred" },
           { key: "attachments", label: "With Attachments" },
-        ].map((f) => (
+        ].map((f: any) => (
           <Button
             key={f.key}
             variant={filter === f.key ? "default" : "outline"}
@@ -316,7 +316,7 @@ export default function Mailbox() {
           </CardHeader>
           <CardContent className="p-0">
             <ScrollArea className="h-[550px]">
-              {filteredEmails.map((email) => (
+              {filteredEmails.map((email: any) => (
                 <div
                   key={email.id}
                   onClick={() => openEmail(email)}
@@ -350,7 +350,7 @@ export default function Mailbox() {
                         {email.preview}
                       </p>
                       <div className="flex items-center gap-2 mt-1.5">
-                        {email.tags.map((tag) => (
+                        {email.tags.map((tag: any) => (
                           <Badge
                             key={tag}
                             variant="outline"
@@ -422,7 +422,7 @@ export default function Mailbox() {
                     </div>
                   </div>
                   <div className="flex items-center gap-1">
-                    {selectedEmail.tags.map((tag) => (
+                    {selectedEmail.tags.map((tag: any) => (
                       <Badge
                         key={tag}
                         variant="outline"
@@ -450,7 +450,7 @@ export default function Mailbox() {
                       Attachments ({selectedEmail.attachments.length})
                     </p>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      {selectedEmail.attachments.map((att) => (
+                      {selectedEmail.attachments.map((att: any) => (
                         <div
                           key={`${att.name}-${att.size}`}
                           className="flex items-center gap-3 p-3 rounded-lg border border-border bg-muted/30 hover:bg-muted/60 transition-colors group"

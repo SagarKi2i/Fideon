@@ -44,5 +44,32 @@ contextBridge.exposeInMainWorld("electron", {
     clearAuth: () => ipcRenderer.invoke("device:clearAuth"),
     ensureAuth: () => ipcRenderer.invoke("device:ensureAuth"),
   },
+
+  model: {
+    checkUpdate: (domain: string) =>
+      ipcRenderer.invoke("model:checkUpdate", domain),
+
+    downloadAndInstall: (opts: {
+      domain: string;
+      version: string;
+      quant: string;
+      sha256Expected: string;
+      sizeBytes: number;
+    }) => ipcRenderer.invoke("model:downloadAndInstall", opts),
+
+    onInstallProgress: (callback: (data: {
+      phase: "downloading" | "verifying" | "installing";
+      bytesReceived?: number;
+      totalBytes?: number;
+      percent?: number;
+      detail?: string;
+    }) => void) => {
+      ipcRenderer.on("model:installProgress", (_event, data) => callback(data));
+    },
+
+    removeInstallProgressListener: () => {
+      ipcRenderer.removeAllListeners("model:installProgress");
+    },
+  },
 });
 

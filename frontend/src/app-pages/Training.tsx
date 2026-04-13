@@ -73,7 +73,7 @@ export default function Training() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) { navigate("/auth"); return; }
 
-      const { data: models } = await supabase
+      const { data: models } = await (supabase as any)
         .from("activated_models")
         .select("model_id, model_name")
         .eq("user_id", user.id);
@@ -196,7 +196,7 @@ export default function Training() {
   };
 
   const hasContributed = (round: FederatedRound) =>
-    contributions.some(c => c.model_id === round.model_id && c.round_number === round.round_number);
+    contributions.some((c: any) => c.model_id === round.model_id && c.round_number === round.round_number);
   const getJobBadgeVariant = (status: string): "default" | "destructive" | "secondary" => {
     if (status === "completed") return "default";
     if (status === "failed") return "destructive";
@@ -338,7 +338,7 @@ export default function Training() {
                     <SelectValue placeholder="Select model" />
                   </SelectTrigger>
                   <SelectContent>
-                    {activatedModels.map(m => (
+                    {activatedModels.map((m: any) => (
                       <SelectItem key={m.model_id} value={m.model_id}>{m.model_name}</SelectItem>
                     ))}
                   </SelectContent>
@@ -359,7 +359,7 @@ export default function Training() {
               <div className="space-y-2">
                 <Label>Rating</Label>
                 <div className="flex gap-1">
-                  {[1, 2, 3, 4, 5].map(star => (
+                  {[1, 2, 3, 4, 5].map((star: any) => (
                     <Button
                       key={star}
                       variant={feedbackRating >= star ? "default" : "outline"}
@@ -386,7 +386,7 @@ export default function Training() {
               </CardHeader>
               <CardContent>
                 <div className="space-y-3">
-                  {feedback.slice(0, 10).map(fb => (
+                  {feedback.slice(0, 10).map((fb: any) => (
                     <div key={fb.id} className="flex items-start justify-between p-3 border rounded-lg">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1">
@@ -427,7 +427,7 @@ export default function Training() {
             <CardContent className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {activatedModels.map(({ model_id: modelId, model_name: modelName }) => {
-                  const modelFeedback = feedback.filter(f => f.model_id === modelId && !f.is_used_for_training);
+                  const modelFeedback = feedback.filter((f: any) => f.model_id === modelId && !f.is_used_for_training);
                   return (
                     <div key={modelId} className="p-4 border rounded-lg space-y-3">
                       <div className="flex items-center justify-between">
@@ -465,7 +465,7 @@ export default function Training() {
               </CardHeader>
               <CardContent>
                 <div className="space-y-3">
-                  {jobs.map(job => (
+                  {jobs.map((job: any) => (
                     <div key={job.id} className="flex items-center justify-between p-3 border rounded-lg">
                       <div className="flex items-center gap-3">
                         {statusIcon(job.status)}
@@ -526,7 +526,7 @@ export default function Training() {
                 </div>
               ) : (
                 <div className="space-y-4">
-                  {rounds.map(round => {
+                  {rounds.map((round: any) => {
                     const contributed = hasContributed(round);
                     const progress = (round.current_participants / round.min_participants) * 100;
                     return (
@@ -585,7 +585,7 @@ export default function Training() {
                   { step: "2", title: "Train Locally", desc: "Fine-tune the model on your device using LoRA adapters", icon: Cpu },
                   { step: "3", title: "Share Gradients", desc: "Only encrypted weight deltas are sent (not your data)", icon: Shield },
                   { step: "4", title: "Global Update", desc: "Server aggregates updates and distributes improved model", icon: Globe },
-                ].map(item => (
+                ].map((item: any) => (
                   <div key={item.step} className="text-center p-4 border rounded-lg">
                     <div className="mx-auto mb-2 h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center">
                       <item.icon className="h-5 w-5 text-primary" />

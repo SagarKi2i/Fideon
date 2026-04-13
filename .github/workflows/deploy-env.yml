@@ -155,6 +155,7 @@ jobs:
                 -e NEXT_PUBLIC_SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
                 -e NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY="$SUPABASE_PUBLIC_KEY" \
                 -e NEXT_PUBLIC_API_URL="${{ secrets.NEXT_PUBLIC_API_URL }}" \
+                -e NEXT_PUBLIC_SUPABASE_AUTH_NO_WEB_LOCKS="true" \
                 neurapodacr.azurecr.io/${{ inputs.component }}:${{ inputs.image_sha }}
             else
               docker run -d \
@@ -213,6 +214,8 @@ jobs:
                     -e NEXT_PUBLIC_SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
                     -e NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY="$SUPABASE_PUBLIC_KEY" \
                     -e NEXT_PUBLIC_API_URL="${{ secrets.NEXT_PUBLIC_API_URL }}" \
+                    -e NEXT_PUBLIC_SUPABASE_AUTH_NO_WEB_LOCKS="true" \
+                    -e NEXT_PUBLIC_SUPABASE_REALTIME_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_REALTIME_URL }}" \
                     "$PREV_IMAGE"
                 else
                   docker run -d \

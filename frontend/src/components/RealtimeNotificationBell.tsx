@@ -62,7 +62,7 @@ export function RealtimeNotificationBell() {
         ) : (
           <ScrollArea className="h-80">
             <div className="space-y-2 p-3">
-              {items.map((item) => (
+              {items.map((item: any) => (
                 item.targetPath ? (
                   <button
                     key={item.id}

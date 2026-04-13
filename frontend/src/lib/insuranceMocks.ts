@@ -1808,7 +1808,7 @@ Frozen pipe burst in Warehouse B during cold snap. Water damage to inventory, eq
 ⚠️ Casualty QS: Jan 1, 2026`
   };
 
-  const model = insuranceModels.find(m => m.id === modelId);
+  const model = insuranceModels.find((m: any) => m.id === modelId);
   
   return responses[modelId] || `**${model?.name || "Insurance Analysis"}**
 

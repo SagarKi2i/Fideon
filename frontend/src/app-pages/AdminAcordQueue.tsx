@@ -71,7 +71,7 @@ export default function AdminAcordQueue() {
   const [healthByRunId, setHealthByRunId] = useState<Record<string, any>>({});
   const [historyByRunId, setHistoryByRunId] = useState<Record<string, any[]>>({});
   const visibleItems = useMemo(() => {
-    return items.filter(row => {
+    return items.filter((row: any) => {
       const runId = String(row.run_id || "");
       const run = row.acord_extraction_runs || {};
       const conf = Number(run.overall_confidence || 0);
@@ -87,8 +87,8 @@ export default function AdminAcordQueue() {
     });
   }, [items, healthByRunId, filterCalibMin, filterCalibMax, filterQg]);
 
-  const allVisibleIds = useMemo(() => visibleItems.map(r => r.run_id as string), [visibleItems]);
-  const allSelected = allVisibleIds.length > 0 && allVisibleIds.every(id => selected.has(id));
+  const allVisibleIds = useMemo(() => visibleItems.map((r: any) => r.run_id as string), [visibleItems]);
+  const allSelected = allVisibleIds.length > 0 && allVisibleIds.every((id: any) => selected.has(id));
   const someSelected = selected.size > 0;
 
   // ── Loaders ─────────────────────────────────────────────────────────────────
@@ -140,7 +140,7 @@ export default function AdminAcordQueue() {
   useEffect(() => {
     if (items.length === 0) return;
     let cancelled = false;
-    const runIds = items.map(i => String(i.run_id || "")).filter(Boolean);
+    const runIds = items.map((i: any) => String(i.run_id || "")).filter(Boolean);
     Promise.all(
       runIds.map(async runId => {
         try {
@@ -294,7 +294,7 @@ export default function AdminAcordQueue() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="__all">All types</SelectItem>
-                    {FORM_TYPES.map(ft => (
+                    {FORM_TYPES.map((ft: any) => (
                       <SelectItem key={ft} value={ft}>ACORD {ft}</SelectItem>
                     ))}
                   </SelectContent>
@@ -480,7 +480,7 @@ export default function AdminAcordQueue() {
           )}
 
           {/* Item rows */}
-          {visibleItems.map((row) => {
+          {visibleItems.map((row: any) => {
             const run = row.acord_extraction_runs || {};
             const runId = row.run_id as string;
             const conf = Number(run.overall_confidence || 0);
