@@ -224,7 +224,7 @@ export default function AdminDashboard() {
       }
 
       setPairingDbReady(true);
-      setPairings(pairingRows ?? []);
+      setPairings((pairingRows ?? []) as unknown as PairingSession[]);
 
       const { data: allRecentDevices, error: devicesError } = await supabase
         .from('devices')
@@ -235,7 +235,7 @@ export default function AdminDashboard() {
       if (devicesError) throw devicesError;
 
       const linked = (allRecentDevices ?? []).filter((row: any) => row?.metadata?.linked_from_pairing === true);
-      setLinkedDevices(linked.slice(0, 12));
+      setLinkedDevices(linked.slice(0, 12) as unknown as LinkedDevice[]);
     } catch (error) {
       console.error('Error fetching device pairing insights:', error);
     }
