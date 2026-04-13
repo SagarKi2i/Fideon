@@ -122,6 +122,7 @@ def _include_routers(app: FastAPI) -> None:
     from app.routes import (
         acord,
         activity,
+        adapter_registry,
         admin,
         agents,
         chat,
@@ -145,6 +146,7 @@ def _include_routers(app: FastAPI) -> None:
     routers: Iterable = (
         health.router,
         activity.router,
+        adapter_registry.router,
         admin.router,
         agents.router,
         chat.router,
