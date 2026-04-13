@@ -233,9 +233,14 @@ export default function DeviceSetup() {
             throw new Error(res?.error || "Could not register device");
           }
         } catch (e) {
+          const msg = e instanceof Error ? e.message : "Unknown error";
+          const hint =
+            typeof msg === "string" && msg.toLowerCase().includes("fetch failed")
+              ? " Check the backend is running and Electron main uses the same API port as the app (electron/.env ELECTRON_API_BASE_URL, default 127.0.0.1:8080)."
+              : "";
           toast({
             title: "Reconnect failed",
-            description: e instanceof Error ? e.message : "Unknown error",
+            description: msg + hint,
             variant: "destructive",
           });
         } finally {

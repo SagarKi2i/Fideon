@@ -1,8 +1,7 @@
 // Electron main process entrypoint.
 // Creates the BrowserWindow and wires IPC handlers that call into
 // the local Ollama backend helpers.
-import "dotenv/config";
-
+import dotenv from "dotenv";
 import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, protocol, session } from "electron";
 import fs from "node:fs";
 import path from "path";
@@ -22,8 +21,22 @@ import {
   getMachineId,
   getMachineName,
   clearStoredDeviceJwtAsync,
+  getElectronApiBaseUrl,
 } from "./device-client";
 import { checkForModelUpdate, downloadAndInstall } from "./model-updater";
+
+function loadElectronDotenv(): void {
+  try {
+    if (app.isPackaged) {
+      dotenv.config({ path: path.join(process.resourcesPath, ".env") });
+    } else {
+      dotenv.config({ path: path.join(__dirname, "..", ".env") });
+    }
+  } catch {
+    dotenv.config();
+  }
+}
+loadElectronDotenv();
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -505,7 +518,7 @@ ipcMain.handle("model:checkUpdate", async (_event, domain: string) => {
     if (!deviceId || !deviceJwt) {
       return { success: false, error: "Device not registered" };
     }
-    const apiBase = process.env.ELECTRON_API_BASE_URL?.replace(/\/+$/, "") ?? "http://localhost:8000";
+    const apiBase = getElectronApiBaseUrl();
     const result = await checkForModelUpdate({ domain, deviceId, deviceJwt, apiBase });
     return { success: true, ...result };
   } catch (err) {
@@ -526,7 +539,7 @@ ipcMain.handle(
       if (!deviceJwt) {
         return { success: false, error: "Device not registered" };
       }
-      const apiBase = process.env.ELECTRON_API_BASE_URL?.replace(/\/+$/, "") ?? "http://localhost:8000";
+      const apiBase = getElectronApiBaseUrl();
       const result = await downloadAndInstall({
         ...opts,
         deviceJwt,

@@ -11,7 +11,7 @@
     "dev:wait": "npm run build && node -e \"const u=process.env.ELECTRON_START_URL||'http://localhost:3000/';const http=require(u.startsWith('https')?'https':'http');const deadline=Date.now()+60000;function tick(){const req=http.request(u,{method:'GET'},res=>{res.resume();console.log('[dev:wait] ready',u,'status',res.statusCode);process.exit(0);});req.on('error',()=>{if(Date.now()>deadline){console.error('[dev:wait] timeout waiting for',u);process.exit(1);}setTimeout(tick,500);});req.end();}tick();\" && npm start",
     "prepack": "node scripts/pre-dist.cjs",
     "pack": "electron-builder --dir",
-    "predist": "node scripts/pre-dist.cjs",
+    "predist": "node scripts/ensure-electron-env.cjs && node scripts/pre-dist.cjs",
     "dist": "electron-builder",
     "dist:full": "npm run --prefix ../frontend build && npm run build && npm run dist",
     "test": "node --test"
@@ -54,13 +54,13 @@
         ]
       },
       {
-        "from": "../frontend/.next-build/standalone",
+        "from": "../frontend/.next/standalone",
         "filter": [
           "**/*"
         ]
       },
       {
-        "from": "../frontend/.next-build/static",
+        "from": "../frontend/.next/static",
         "to": ".next/static",
         "filter": [
           "**/*"
@@ -74,7 +74,7 @@
         ]
       },
       {
-        "from": "../frontend/.next-build",
+        "from": "../frontend/.next",
         "to": ".next",
         "filter": [
           "required-server-files.json",
@@ -101,6 +101,10 @@
       {
         "from": "build/icon-256.png",
         "to": "icon-256.png"
+      },
+      {
+        "from": ".env",
+        "to": ".env"
       }
     ]
   }
