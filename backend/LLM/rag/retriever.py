@@ -10,20 +10,25 @@ Responsible for:
 from __future__ import annotations
 
 import logging
-from typing import List, Dict
+from typing import Any, List, Dict
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
 
 from LLM.vectorstore import pgvector_store
 
 logger = logging.getLogger("fideon.rag")
-_embedding_model: SentenceTransformer | None = None
+_embedding_model: Any | None = None
 
 
-def _get_embedding_model() -> SentenceTransformer:
+def _get_embedding_model() -> Any:
     global _embedding_model
     if _embedding_model is None:
+        try:
+            from sentence_transformers import SentenceTransformer  # lazy import — not in docker image
+        except ImportError as exc:
+            raise RuntimeError(
+                "sentence-transformers is not installed in this environment."
+            ) from exc
         _embedding_model = SentenceTransformer("BAAI/bge-large-en")
     return _embedding_model
 

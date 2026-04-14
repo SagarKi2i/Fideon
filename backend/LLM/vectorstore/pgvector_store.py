@@ -10,12 +10,11 @@ from urllib.parse import urlparse
 
 import psycopg
 from pgvector.psycopg import register_vector
-from sentence_transformers import SentenceTransformer
 
 
 logger = logging.getLogger("fideon.pgvector")
 
-_embedder: SentenceTransformer | None = None
+_embedder: Any | None = None
 
 
 def _load_backend_env_file() -> None:
@@ -39,9 +38,16 @@ def _load_backend_env_file() -> None:
 _load_backend_env_file()
 
 
-def _get_embedder(model_name: str = "BAAI/bge-large-en") -> SentenceTransformer:
+def _get_embedder(model_name: str = "BAAI/bge-large-en") -> Any:
     global _embedder
     if _embedder is None:
+        try:
+            from sentence_transformers import SentenceTransformer  # lazy import — not in docker image
+        except ImportError as exc:
+            raise RuntimeError(
+                "sentence-transformers is not installed in this environment. "
+                "Add it to requirements.txt or install it manually."
+            ) from exc
         # Try local cache only first to avoid blocking on a slow / absent internet
         # connection.  If the model is not cached yet, fall back to a download but
         # only when the user has explicitly allowed it via env var.
