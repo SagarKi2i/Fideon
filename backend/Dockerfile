@@ -23,10 +23,10 @@ WORKDIR /app
 COPY requirements.docker.txt .
 COPY requirements.paddle.txt .
 
+# Set INSTALL_PADDLE_OCR=1 at build time to include PaddleOCR deps.
 ARG INSTALL_PADDLE_OCR=0
 
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
     && pip install --no-cache-dir -r requirements.docker.txt \
     && if [ "$INSTALL_PADDLE_OCR" = "1" ]; then pip install --no-cache-dir -r requirements.paddle.txt; fi \
     && pip install --no-cache-dir gunicorn uvicorn[standard] \
