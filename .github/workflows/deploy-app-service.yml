@@ -178,6 +178,9 @@ jobs:
             if [ -n "$API_URL" ]; then
               FE_SETTINGS+=("NEXT_PUBLIC_API_URL=${API_URL}")
             fi
+            # Disable Web Locks to prevent auth deadlock behind Azure APIM
+            # (navigator.locks stalls in NODE_ENV=production, causing 403s on all Supabase queries)
+            FE_SETTINGS+=("NEXT_PUBLIC_SUPABASE_AUTH_NO_WEB_LOCKS=true")
             if [ -z "$NEXT_PUBLIC_SUPABASE_URL" ] || [ -z "$SUPABASE_CLIENT_KEY" ]; then
               echo "::warning::Frontend: set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY or NEXT_PUBLIC_SUPABASE_ANON_KEY on the GitHub Environment so the App Service has Supabase client config at runtime."
             fi
