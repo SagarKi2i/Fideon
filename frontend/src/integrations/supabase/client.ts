@@ -52,11 +52,5 @@ export const supabase = createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABL
 
   },
 
-  // Realtime disabled — no permanent WSS URL yet.
-
-  // Re-enable once a domain + named Cloudflare tunnel is set up.
-
-  // realtime: { url: process.env.NEXT_PUBLIC_SUPABASE_REALTIME_URL }
-
 });
  

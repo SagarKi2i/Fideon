@@ -28,9 +28,9 @@ interface AllocatedModel {
 
 // All available models from marketplace
 const allModels = [
-  ...brokerModels.map(m => ({ id: m.id, name: m.name, domain: m.domain })),
-  ...mgaModels.map(m => ({ id: m.id, name: m.name, domain: m.domain })),
-  ...carrierModels.map(m => ({ id: m.id, name: m.name, domain: m.domain })),
+  ...brokerModels.map((m: any) => ({ id: m.id, name: m.name, domain: m.domain })),
+  ...mgaModels.map((m: any) => ({ id: m.id, name: m.name, domain: m.domain })),
+  ...carrierModels.map((m: any) => ({ id: m.id, name: m.name, domain: m.domain })),
 ];
 
 export function ModelAllocationSection() {
@@ -62,21 +62,21 @@ export function ModelAllocationSection() {
   }, [selectedUserId]);
 
   async function fetchUsersFromSupabaseFallback() {
-    const { data: appUsers, error: appUsersError } = await supabase
+    const { data: appUsers, error: appUsersError } = await (supabase as any)
       .from('app_users')
       .select('user_id,email')
       .order('email', { ascending: true });
 
     if (appUsersError) throw appUsersError;
 
-    const { data: roleRows, error: rolesError } = await supabase
+    const { data: roleRows, error: rolesError } = await (supabase as any)
       .from('user_roles')
       .select('user_id,role');
 
     if (rolesError) throw rolesError;
 
-    const roleMap = new Map((roleRows || []).map(r => [r.user_id, r.role]));
-    const fallbackUsers: UserInfo[] = (appUsers || []).map(u => ({
+    const roleMap = new Map((roleRows || []).map((r: any) => [r.user_id, r.role]));
+    const fallbackUsers: UserInfo[] = (appUsers || []).map((u: any) => ({
       id: u.user_id,
       email: u.email,
       role: roleMap.get(u.user_id) || 'user',
@@ -144,7 +144,7 @@ export function ModelAllocationSection() {
   async function handleAllocate() {
     if (!selectedUserId || !selectedModelId) return;
 
-    const model = allModels.find(m => m.id === selectedModelId);
+    const model = allModels.find((m: any) => m.id === selectedModelId);
     if (!model) return;
 
     setAllocating(true);
@@ -218,9 +218,9 @@ export function ModelAllocationSection() {
     }
   }
 
-  const allocatedModelIds = new Set(allocatedModels.map(m => m.model_id));
-  const availableModels = allModels.filter(m => !allocatedModelIds.has(m.id));
-  const selectedUser = users.find(u => u.id === selectedUserId);
+  const allocatedModelIds = new Set(allocatedModels.map((m: any) => m.model_id));
+  const availableModels = allModels.filter((m: any) => !allocatedModelIds.has(m.id));
+  const selectedUser = users.find((u: any) => u.id === selectedUserId);
 
   return (
     <Card className="border-border/50 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 shadow-premium">
@@ -241,7 +241,7 @@ export function ModelAllocationSection() {
                 <SelectValue placeholder={loadingUsers ? "Loading users..." : "Choose a user"} />
               </SelectTrigger>
               <SelectContent>
-                {users.map(user => (
+                {users.map((user: any) => (
                   <SelectItem key={user.id} value={user.id}>
                     <div className="flex items-center gap-2">
                       <span>{user.email}</span>
@@ -262,7 +262,7 @@ export function ModelAllocationSection() {
                     <SelectValue placeholder="Choose a model" />
                   </SelectTrigger>
                   <SelectContent>
-                    {availableModels.map(model => (
+                    {availableModels.map((model: any) => (
                       <SelectItem key={model.id} value={model.id}>
                         <div className="flex items-center gap-2">
                           <span>{model.name}</span>
@@ -312,7 +312,7 @@ export function ModelAllocationSection() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {allocatedModels.map(model => (
+                  {allocatedModels.map((model: any) => (
                     <TableRow key={model.id}>
                       <TableCell className="font-medium">{model.model_name}</TableCell>
                       <TableCell>

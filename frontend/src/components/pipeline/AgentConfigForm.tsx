@@ -115,9 +115,9 @@ function DocumentRetrievalConfig({ config, onChange }: AgentSectionProps) {
       <div className="space-y-1.5">
         <Label className="text-xs flex items-center gap-1"><Building2 className="h-3 w-3" /> Carriers {selectedCarriers.length > 0 && <Badge variant="secondary" className="text-[10px] ml-1">{selectedCarriers.length}</Badge>}</Label>
         <div className="grid grid-cols-5 gap-1.5">
-          {carriers.map(c => (
+          {carriers.map((c: any) => (
             <button key={c.id} type="button"
-              onClick={() => onChange({ ...config, carriers: selectedCarriers.includes(c.id) ? selectedCarriers.filter(x => x !== c.id) : [...selectedCarriers, c.id] })}
+              onClick={() => onChange({ ...config, carriers: selectedCarriers.includes(c.id) ? selectedCarriers.filter((x: any) => x !== c.id) : [...selectedCarriers, c.id] })}
               className={`flex flex-col items-center gap-0.5 p-2 rounded-lg border text-center transition-all ${selectedCarriers.includes(c.id) ? "border-primary bg-primary/10 ring-1 ring-primary" : "border-border hover:border-primary/50"}`}>
               {selectedCarriers.includes(c.id) && <CheckCircle2 className="h-3 w-3 text-primary absolute top-0.5 right-0.5" />}
               <span className="text-lg">{c.logo}</span>
@@ -131,7 +131,7 @@ function DocumentRetrievalConfig({ config, onChange }: AgentSectionProps) {
       <div className="space-y-1.5">
         <Label className="text-xs flex items-center gap-1"><FolderOpen className="h-3 w-3" /> Target AMS</Label>
         <div className="grid grid-cols-5 gap-1.5">
-          {amsOptions.map(ams => (
+          {amsOptions.map((ams: any) => (
             <button key={ams.id} type="button"
               onClick={() => onChange({ ...config, ams: ams.id })}
               className={`flex flex-col items-center gap-0.5 p-2 rounded-lg border transition-all ${selectedAMS === ams.id ? "border-primary bg-primary/10 ring-1 ring-primary" : "border-border hover:border-primary/50"}`}>
@@ -146,11 +146,11 @@ function DocumentRetrievalConfig({ config, onChange }: AgentSectionProps) {
       <div className="space-y-1.5">
         <Label className="text-xs">Document Types</Label>
         <div className="grid grid-cols-4 gap-1.5">
-          {documentTypes.map(dt => {
+          {documentTypes.map((dt: any) => {
             const Icon = dt.icon;
             return (
               <button key={dt.id} type="button"
-                onClick={() => onChange({ ...config, documentTypes: selectedDocTypes.includes(dt.id) ? selectedDocTypes.filter(x => x !== dt.id) : [...selectedDocTypes, dt.id] })}
+                onClick={() => onChange({ ...config, documentTypes: selectedDocTypes.includes(dt.id) ? selectedDocTypes.filter((x: any) => x !== dt.id) : [...selectedDocTypes, dt.id] })}
                 className={`flex items-center gap-1.5 p-2 rounded-lg border text-xs transition-all ${selectedDocTypes.includes(dt.id) ? "border-primary bg-primary/10" : "border-border hover:border-primary/50"}`}>
                 <Icon className="h-3 w-3 flex-shrink-0" />
                 <span className="truncate">{dt.label}</span>
@@ -188,7 +188,7 @@ function PolicyComparisonConfig({ config, onChange }: AgentSectionProps) {
       <div className="space-y-1.5">
         <Label className="text-xs">Focus Areas</Label>
         <div className="flex flex-wrap gap-1.5">
-          {["Premiums", "Deductibles", "Liability Limits", "Cyber Coverage", "EPL", "Water Damage"].map(area => {
+          {["Premiums", "Deductibles", "Liability Limits", "Cyber Coverage", "EPL", "Water Damage"].map((area: any) => {
             const selected = (config.focusAreas || []).includes(area);
             return (
               <button key={area} type="button"
@@ -214,7 +214,7 @@ function QuoteGenerationConfig({ config, onChange }: AgentSectionProps) {
         <Select value={config.insuranceType || ""} onValueChange={v => onChange({ ...config, insuranceType: v })}>
           <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Select type" /></SelectTrigger>
           <SelectContent>
-            {INSURANCE_TYPES.map(t => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}
+            {INSURANCE_TYPES.map((t: any) => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}
           </SelectContent>
         </Select>
       </div>
@@ -227,9 +227,9 @@ function QuoteGenerationConfig({ config, onChange }: AgentSectionProps) {
       <div className="space-y-1.5">
         <Label className="text-xs">Carriers to Quote {selectedCarriers.length > 0 && <Badge variant="secondary" className="text-[10px] ml-1">{selectedCarriers.length}</Badge>}</Label>
         <div className="grid grid-cols-3 gap-1.5 max-h-32 overflow-y-auto">
-          {QUOTE_CARRIERS.map(c => (
+          {QUOTE_CARRIERS.map((c: any) => (
             <button key={c.id} type="button"
-              onClick={() => onChange({ ...config, carriers: selectedCarriers.includes(c.id) ? selectedCarriers.filter(x => x !== c.id) : [...selectedCarriers, c.id] })}
+              onClick={() => onChange({ ...config, carriers: selectedCarriers.includes(c.id) ? selectedCarriers.filter((x: any) => x !== c.id) : [...selectedCarriers, c.id] })}
               className={`flex items-center gap-1.5 p-1.5 rounded-md border text-xs transition-all ${selectedCarriers.includes(c.id) ? "border-primary bg-primary/10" : "border-border hover:border-primary/50"}`}>
               <Checkbox checked={selectedCarriers.includes(c.id)} className="h-3 w-3 pointer-events-none" />
               <span className="truncate">{c.name}</span>
@@ -274,7 +274,7 @@ function ClaimsAdjudicationConfig({ config, onChange }: AgentSectionProps) {
         <Select value={config.claimType || ""} onValueChange={v => onChange({ ...config, claimType: v })}>
           <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Select claim type" /></SelectTrigger>
           <SelectContent>
-            {CLAIM_TYPES.map(t => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}
+            {CLAIM_TYPES.map((t: any) => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}
           </SelectContent>
         </Select>
       </div>
@@ -367,9 +367,9 @@ function CustomWorkflowConfig({ config, onChange }: AgentSectionProps) {
       try {
         const { data: { user } } = await supabase.auth.getUser();
         if (!user) return;
-        const { data } = await supabase.from("workflows").select("id, title, description, category, parsed_steps").eq("user_id", user.id).order("created_at", { ascending: false });
+        const { data } = await (supabase as any).from("workflows").select("id, title, description, category, parsed_steps").eq("user_id", user.id).order("created_at", { ascending: false });
         if (data) {
-          setWorkflows(data.map(w => ({
+          setWorkflows(data.map((w: any) => ({
             id: w.id,
             title: w.title,
             description: w.description,
@@ -383,7 +383,7 @@ function CustomWorkflowConfig({ config, onChange }: AgentSectionProps) {
     load();
   }, []);
 
-  const selectedWorkflow = workflows.find(w => w.id === config.workflowId);
+  const selectedWorkflow = workflows.find((w: any) => w.id === config.workflowId);
 
   if (loading) {
     return <div className="flex items-center justify-center py-4"><Loader2 className="h-4 w-4 animate-spin text-muted-foreground" /></div>;
@@ -400,7 +400,7 @@ function CustomWorkflowConfig({ config, onChange }: AgentSectionProps) {
           </div>
         ) : (
           <div className="space-y-1.5 max-h-48 overflow-y-auto">
-            {workflows.map(wf => (
+            {workflows.map((wf: any) => (
               <button key={wf.id} type="button"
                 onClick={() => onChange({ ...config, workflowId: wf.id, workflowTitle: wf.title })}
                 className={`w-full flex items-center justify-between p-2.5 rounded-lg border text-left transition-all ${config.workflowId === wf.id ? "border-primary bg-primary/10 ring-1 ring-primary" : "border-border hover:border-primary/50"}`}>

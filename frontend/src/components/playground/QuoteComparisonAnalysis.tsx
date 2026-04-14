@@ -34,21 +34,21 @@ interface QuoteComparisonAnalysisProps {
 }
 
 export default function QuoteComparisonAnalysis({ quotes }: QuoteComparisonAnalysisProps) {
-  const completedQuotes = quotes.filter(q => q.status === "complete");
+  const completedQuotes = quotes.filter((q: any) => q.status === "complete");
   
   if (completedQuotes.length === 0) return null;
 
   // Calculate analytics
-  const premiums = completedQuotes.map(q => q.premium);
+  const premiums = completedQuotes.map((q: any) => q.premium);
   const lowestPremium = Math.min(...premiums);
   const highestPremium = Math.max(...premiums);
-  const avgPremium = Math.round(premiums.reduce((a, b) => a + b, 0) / premiums.length);
+  const avgPremium = Math.round(premiums.reduce((a: any, b: any) => a + b, 0) / premiums.length);
   const potentialSavings = highestPremium - lowestPremium;
 
   // Find best options
-  const lowestPremiumCarrier = completedQuotes.find(q => q.premium === lowestPremium);
-  const lowestDeductibleCarrier = completedQuotes.reduce((a, b) => a.deductible < b.deductible ? a : b, completedQuotes[0]!);
-  const bestValueCarrier = completedQuotes.reduce((a, b) => {
+  const lowestPremiumCarrier = completedQuotes.find((q: any) => q.premium === lowestPremium);
+  const lowestDeductibleCarrier = completedQuotes.reduce((a: any, b: any) => a.deductible < b.deductible ? a : b, completedQuotes[0]!);
+  const bestValueCarrier = completedQuotes.reduce((a: any, b: any) => {
     const aScore = (a.premium / 100) + (a.deductible / 50);
     const bScore = (b.premium / 100) + (b.deductible / 50);
     return aScore < bScore ? a : b;
@@ -116,7 +116,7 @@ export default function QuoteComparisonAnalysis({ quotes }: QuoteComparisonAnaly
         </CardHeader>
         <CardContent className="p-0">
           <div className="divide-y divide-border">
-            {sortedByPremium.map((quote, idx) => {
+            {sortedByPremium.map((quote: any, idx: any) => {
               const savingsFromHighest = highestPremium - quote.premium;
               const percentFromLowest = ((quote.premium - lowestPremium) / lowestPremium * 100);
               const isLowest = quote.premium === lowestPremium;
@@ -201,7 +201,7 @@ export default function QuoteComparisonAnalysis({ quotes }: QuoteComparisonAnaly
                 </tr>
               </thead>
               <tbody>
-                {sortedByPremium.map((quote) => (
+                {sortedByPremium.map((quote: any) => (
                   <tr key={quote.carrier} className="border-b border-border/50 hover:bg-muted/10">
                     <td className="py-3 px-2">
                       <div className="flex items-center gap-2">
@@ -216,7 +216,7 @@ export default function QuoteComparisonAnalysis({ quotes }: QuoteComparisonAnaly
                     <td className="py-3 px-2 text-right">{quote.coverage}</td>
                     <td className="py-3 px-2">
                       <div className="flex flex-wrap gap-1 justify-center">
-                        {quote.features.slice(0, 2).map((feature) => (
+                        {quote.features.slice(0, 2).map((feature: any) => (
                           <Badge key={feature} variant="secondary" className="text-xs whitespace-nowrap">
                             {feature}
                           </Badge>

@@ -181,12 +181,12 @@ export default function DeviceDetails() {
         return;
       }
 
-      const { data: roles } = await supabase
+      const { data: roles } = await (supabase as any)
         .from("user_roles")
         .select("role")
         .eq("user_id", user.id);
 
-      const isAdmin = roles?.some(r => r.role === "admin" || r.role === "global_admin");
+      const isAdmin = roles?.some((r: any) => r.role === "admin" || r.role === "global_admin");
       if (!isAdmin) {
         toast({
           title: "Access Denied",
@@ -279,8 +279,8 @@ export default function DeviceDetails() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not authenticated");
 
-      const modelsToInsert = selectedModels.map((modelId) => {
-        const model = availableModels.find((m) => m.model_id === modelId);
+      const modelsToInsert = selectedModels.map((modelId: any) => {
+        const model = availableModels.find((m: any) => m.model_id === modelId);
         return {
           device_id: id,
           model_id: modelId,
@@ -290,7 +290,7 @@ export default function DeviceDetails() {
         };
       });
 
-      const { error } = await supabase.from("device_models").insert(modelsToInsert);
+      const { error } = await (supabase as any).from("device_models").insert(modelsToInsert);
 
       if (error) throw error;
 
@@ -318,7 +318,7 @@ export default function DeviceDetails() {
     if (!confirm(`Remove ${modelName} from this device?`)) return;
 
     try {
-      const { error } = await supabase.from("device_models").delete().eq("id", modelId);
+      const { error } = await (supabase as any).from("device_models").delete().eq("id", modelId);
 
       if (error) throw error;
 
@@ -415,7 +415,7 @@ export default function DeviceDetails() {
       );
       if (tokenError) throw tokenError;
 
-      const { error } = await supabase
+      const { error } = await (supabase as any)
         .from("devices")
         .update({ device_token: tokenData, status: "never_checked_in" })
         .eq("id", id);
@@ -492,7 +492,7 @@ export default function DeviceDetails() {
     return null;
   }
 
-  const alreadyAllocated = allocatedModels.map((m) => m.model_id);
+  const alreadyAllocated = allocatedModels.map((m: any) => m.model_id);
   const availableToAllocate = availableModels.filter(
     (m) => !alreadyAllocated.includes(m.model_id)
   );
@@ -653,7 +653,7 @@ export default function DeviceDetails() {
                         </p>
                       ) : (
                         <div className="space-y-2 max-h-96 overflow-y-auto">
-                          {availableToAllocate.map((model) => (
+                          {availableToAllocate.map((model: any) => (
                             <label
                               key={model.id}
                               className="flex items-center gap-3 p-3 rounded-lg border border-border hover:bg-muted/50 cursor-pointer"
@@ -666,7 +666,7 @@ export default function DeviceDetails() {
                                     setSelectedModels([...selectedModels, model.model_id]);
                                   } else {
                                     setSelectedModels(
-                                      selectedModels.filter((id) => id !== model.model_id)
+                                      selectedModels.filter((id: any) => id !== model.model_id)
                                     );
                                   }
                                 }}
@@ -743,7 +743,7 @@ export default function DeviceDetails() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {allocatedModels.map((model) => (
+                    {allocatedModels.map((model: any) => (
                       <TableRow key={model.id}>
                         <TableCell className="font-medium">{model.model_name}</TableCell>
                         <TableCell>
@@ -871,7 +871,7 @@ export default function DeviceDetails() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {syncLogs.map((log) => (
+                    {syncLogs.map((log: any) => (
                       <TableRow key={log.id}>
                         <TableCell>
                           <Badge variant="outline">{log.sync_type}</Badge>
@@ -923,7 +923,7 @@ export default function DeviceDetails() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {usageLogs.map((log) => (
+                    {usageLogs.map((log: any) => (
                       <TableRow key={log.id}>
                         <TableCell className="font-medium">{log.model_id}</TableCell>
                         <TableCell>{log.prompt_count}</TableCell>

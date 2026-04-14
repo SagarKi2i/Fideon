@@ -204,7 +204,7 @@ export default function ElectronPlayground() {
           </div>
 
           <div className="flex-1 overflow-y-auto p-2 space-y-1">
-            {models.map((model) => (
+            {models.map((model: any) => (
               <div
                 key={model.name}
                 className={`p-3 rounded-lg cursor-pointer transition-colors ${
@@ -282,7 +282,7 @@ export default function ElectronPlayground() {
                       <SelectValue placeholder="Select a model" />
                     </SelectTrigger>
                     <SelectContent>
-                      {models.map((model) => (
+                      {models.map((model: any) => (
                         <SelectItem key={model.name} value={model.name}>
                           {model.name}
                         </SelectItem>
@@ -342,10 +342,10 @@ export default function ElectronPlayground() {
               </CardHeader>
               <CardContent>
                 <div className="space-y-3">
-                  {popularModels.map((model) => {
+                  {popularModels.map((model: any) => {
                     const isPulling = pullingModels.has(model.name);
                     const progress = pullProgress[model.name] ?? 0;
-                    const isInstalled = models.some(m => m.name === model.name);
+                    const isInstalled = models.some((m: any) => m.name === model.name);
 
                     return (
                       <div key={model.name} className="border border-border rounded-lg p-4">

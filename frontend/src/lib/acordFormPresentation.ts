@@ -200,5 +200,5 @@ const LAYOUT: Record<string, string[]> = {
 export function getFieldSectionsForFormType(formType: string | null | undefined): SectionDef[] {
   const key = normalizeAcordFormKey(formType);
   const ids = LAYOUT[key] ?? LAYOUT.default;
-  return ids.map((id) => SECTION_REGISTRY[id]).filter(Boolean);
+  return ids.map((id: any) => SECTION_REGISTRY[id]).filter(Boolean);
 }

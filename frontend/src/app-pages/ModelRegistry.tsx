@@ -64,12 +64,12 @@ export default function ModelRegistry() {
 
   const taskKeys = useMemo(() => {
     const s = new Set<string>();
-    rows.forEach((r) => s.add(r.task_key));
+    rows.forEach((r: any) => s.add(r.task_key));
     return Array.from(s).sort();
   }, [rows]);
 
   const displayedRows = useMemo(
-    () => (taskFilter === "all" ? rows : rows.filter((r) => r.task_key === taskFilter)),
+    () => (taskFilter === "all" ? rows : rows.filter((r: any) => r.task_key === taskFilter)),
     [rows, taskFilter],
   );
 
@@ -83,7 +83,7 @@ export default function ModelRegistry() {
   };
 
   const compared = useMemo(
-    () => displayedRows.filter((r) => selected.has(r.id)),
+    () => displayedRows.filter((r: any) => selected.has(r.id)),
     [displayedRows, selected],
   );
 
@@ -169,7 +169,7 @@ export default function ModelRegistry() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All tasks</SelectItem>
-                  {taskKeys.map((k) => (
+                  {taskKeys.map((k: any) => (
                     <SelectItem key={k} value={k}>
                       {k}
                     </SelectItem>
@@ -204,7 +204,7 @@ export default function ModelRegistry() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {displayedRows.map((r) => (
+                  {displayedRows.map((r: any) => (
                     <TableRow key={r.id} className={selected.has(r.id) ? "bg-muted/50" : undefined}>
                       <TableCell>
                         <input
@@ -273,7 +273,7 @@ export default function ModelRegistry() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {compared.map((r) => (
+                {compared.map((r: any) => (
                   <TableRow key={r.id}>
                     <TableCell className="font-medium">{r.display_name || r.base_model}</TableCell>
                     <TableCell>{r.task_label}</TableCell>

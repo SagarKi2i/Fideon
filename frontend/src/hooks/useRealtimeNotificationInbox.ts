@@ -17,7 +17,7 @@ export function useRealtimeNotificationInbox() {
         return;
       }
 
-      const { data, error } = await supabase
+      const { data, error } = await (supabase as any)
         .from("user_notifications")
         .select("id, table_name, event_type, message, target_path, created_at, read_at, source_fingerprint")
         .eq("user_id", user.id)
@@ -29,7 +29,7 @@ export function useRealtimeNotificationInbox() {
         return;
       }
 
-      const mapped: StoredRealtimeNotification[] = (data || []).map((row) => ({
+      const mapped: StoredRealtimeNotification[] = (data || []).map((row: any) => ({
         id: row.id,
         table: row.table_name as StoredRealtimeNotification["table"],
         eventType: row.event_type as StoredRealtimeNotification["eventType"],
@@ -52,14 +52,14 @@ export function useRealtimeNotificationInbox() {
     };
   }, [refresh]);
 
-  const unreadCount = items.filter((item) => !item.read).length;
+  const unreadCount = items.filter((item: any) => !item.read).length;
 
   const markAllRead = useCallback(() => {
     void (async () => {
       const { data: userData } = await supabase.auth.getUser();
       const user = userData.user;
       if (!user) return;
-      await supabase
+      await (supabase as any)
         .from("user_notifications")
         .update({ read_at: new Date().toISOString() })
         .eq("user_id", user.id)
@@ -73,7 +73,7 @@ export function useRealtimeNotificationInbox() {
       const { data: userData } = await supabase.auth.getUser();
       const user = userData.user;
       if (!user) return;
-      await supabase
+      await (supabase as any)
         .from("user_notifications")
         .delete()
         .eq("user_id", user.id);
@@ -83,7 +83,7 @@ export function useRealtimeNotificationInbox() {
 
   const markRead = useCallback((id: string) => {
     void (async () => {
-      await supabase
+      await (supabase as any)
         .from("user_notifications")
         .update({ read_at: new Date().toISOString() })
         .eq("id", id)

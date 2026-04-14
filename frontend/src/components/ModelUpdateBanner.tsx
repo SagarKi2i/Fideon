@@ -46,8 +46,8 @@ function formatBytes(bytes: number): string {
 // Pick the best quant: prefer q5_k_m, fall back to q4_k_m
 function pickArtifact(artifacts: Artifact[]): Artifact {
   return (
-    artifacts.find((a) => a.quant_level === "q5_k_m") ??
-    artifacts.find((a) => a.quant_level === "q4_k_m") ??
+    artifacts.find((a: any) => a.quant_level === "q5_k_m") ??
+    artifacts.find((a: any) => a.quant_level === "q4_k_m") ??
     artifacts[0]
   );
 }

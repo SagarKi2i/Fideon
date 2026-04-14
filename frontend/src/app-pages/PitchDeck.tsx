@@ -464,7 +464,7 @@ const slides = [
         <div className="space-y-6">
           <h3 className="text-2xl font-bold text-center">Target Industries</h3>
           <div className="grid grid-cols-5 gap-4">
-            {["Insurance", "Healthcare", "Banking", "Legal", "Travel"].map((industry) => (
+            {["Insurance", "Healthcare", "Banking", "Legal", "Travel"].map((industry: any) => (
               <Card key={industry} className="p-4 text-center border-primary/20">
                 <p className="font-semibold">{industry}</p>
               </Card>
@@ -723,13 +723,13 @@ const slides = [
             { phase: "Phase 2", duration: "Months 3–5", title: "AI Engine", icon: <Sparkles className="w-8 h-8 text-primary" />, items: ["Model marketplace", "Ollama integration", "Playground interfaces", "Electron desktop app"] },
             { phase: "Phase 3", duration: "Months 5–7", title: "Scale & Polish", icon: <Layers className="w-8 h-8 text-primary" />, items: ["Federated learning", "Workflow automation", "Document processing", "Multi-tenant isolation"] },
             { phase: "Phase 4", duration: "Months 7–9 (Q3)", title: "Enterprise Ready", icon: <Rocket className="w-8 h-8 text-primary" />, items: ["Security audit & SOC2", "Performance optimization", "CI/CD & auto-updates", "GA launch"] },
-          ].map((p) => (
+          ].map((p: any) => (
             <Card key={p.phase} className="p-5 border-primary/20">
               <div className="flex items-center gap-2 mb-2">{p.icon}<span className="text-xs font-semibold text-primary">{p.phase}</span></div>
               <p className="text-sm font-bold text-muted-foreground mb-1">{p.duration}</p>
               <h3 className="text-lg font-bold mb-3">{p.title}</h3>
               <ul className="space-y-1.5 text-muted-foreground text-sm">
-                {p.items.map((item) => (
+                {p.items.map((item: any) => (
                   <li key={item} className="flex items-start"><CheckCircle className="w-4 h-4 mr-1.5 text-primary mt-0.5 flex-shrink-0" /><span>{item}</span></li>
                 ))}
               </ul>
@@ -758,7 +758,7 @@ const slides = [
             { icon: <Cloud className="w-10 h-10 text-primary" />, label: "Cloud Platform", desc: "Auth, model registry, sync orchestration, analytics" },
             { icon: <ArrowRight className="w-6 h-6 text-muted-foreground" />, label: "", desc: "" },
             { icon: <MonitorSmartphone className="w-10 h-10 text-primary" />, label: "Edge Devices", desc: "Electron app + Ollama for local AI inference" },
-          ].map((item, index) => (
+          ].map((item: any, index: any) => (
             item.label ? (
               <Card key={`node-${item.label}`} className="p-4 border-primary/20 text-center h-full flex flex-col justify-center">
                 <div className="flex justify-center mb-2">{item.icon}</div>
@@ -872,7 +872,7 @@ const slides = [
             { pod: "Policy Comparison Pod", revenue: "$10K–$40K/yr", scale: "Per-comparison analysis fees", icon: "⚖️", how: "Side-by-side AI analysis of coverage gaps. Per-comparison fee model. High value for brokers managing portfolio renewals." },
             { pod: "ACORD Parser Pod", revenue: "$15K–$45K/yr", scale: "Per-document parsing volume", icon: "🔍", how: "Extracts structured data from ACORD forms. Per-page parsing fee. Critical for carriers receiving 1000s of submissions/month." },
             { pod: "Custom Workflow Pod", revenue: "$30K–$100K/yr", scale: "Per-execution + seat licensing", icon: "⚡", how: "Multi-step AI agent workflows. Premium pricing for complex automation chains. Highest stickiness — customers build processes around it." },
-          ].map((p) => (
+          ].map((p: any) => (
             <Card key={p.pod} className="p-4 border-primary/20">
               <div className="flex items-start gap-3">
                 <span className="text-2xl">{p.icon}</span>
@@ -1240,7 +1240,7 @@ const slides = [
 
       return (
         <div className="grid grid-cols-2 gap-5 h-full overflow-y-auto pb-2">
-          {jdRoles.map((role) => {
+          {jdRoles.map((role: any) => {
             const c = colorMap[role.color];
             const Icon = role.icon;
             return (
@@ -1268,7 +1268,7 @@ const slides = [
                     <p className="text-[9px] font-bold text-muted-foreground uppercase tracking-wide">Education</p>
                   </div>
                   <ul className="space-y-0.5">
-                    {role.education.map((e) => (
+                    {role.education.map((e: any) => (
                       <li key={e} className="text-[9px] text-muted-foreground flex items-start gap-1">
                         <span className={`${c.accent} mt-0.5 shrink-0`}>▸</span><span>{e}</span>
                       </li>
@@ -1283,7 +1283,7 @@ const slides = [
                     <p className="text-[9px] font-bold text-muted-foreground uppercase tracking-wide">Experience</p>
                   </div>
                   <ul className="space-y-0.5">
-                    {role.experience.map((e) => (
+                    {role.experience.map((e: any) => (
                       <li key={e} className="text-[9px] text-muted-foreground flex items-start gap-1">
                         <span className={`${c.accent} mt-0.5 shrink-0`}>▸</span><span>{e}</span>
                       </li>
@@ -1298,7 +1298,7 @@ const slides = [
                     <p className="text-[9px] font-bold text-muted-foreground uppercase tracking-wide">Required Skills</p>
                   </div>
                   <ul className="space-y-0.5">
-                    {role.skills.map((s) => (
+                    {role.skills.map((s: any) => (
                       <li key={s} className="text-[9px] text-muted-foreground flex items-start gap-1">
                         <span className={`${c.accent} mt-0.5 shrink-0`}>▸</span><span>{s}</span>
                       </li>
@@ -1313,7 +1313,7 @@ const slides = [
                     <p className="text-[9px] font-bold text-muted-foreground uppercase tracking-wide">Key Responsibilities</p>
                   </div>
                   <ul className="space-y-0.5">
-                    {role.responsibilities.map((r) => (
+                    {role.responsibilities.map((r: any) => (
                       <li key={r} className="text-[9px] text-muted-foreground flex items-start gap-1">
                         <span className={`${c.accent} mt-0.5 shrink-0`}>▸</span><span>{r}</span>
                       </li>
@@ -1361,7 +1361,7 @@ const slides = [
               ml: ["Policy comparison model training", "Document retrieval embeddings pipeline", "Model pack creation (bundle per domain)", "Automated evaluation suite (BLEU, F1, accuracy)"],
               qa: "RBAC permission matrix testing, E2E flows",
             },
-          ].map((s) => (
+          ].map((s: any) => (
             <Card key={s.sprint} className={`p-3 border-sky-500/30 bg-sky-500/5 ${s.sync ? 'ring-2 ring-amber-500/50' : ''}`}>
               <div className="flex items-center justify-between mb-2">
                 <h4 className="font-bold text-xs text-sky-700">{s.sprint}</h4>
@@ -1371,13 +1371,13 @@ const slides = [
               <div className="space-y-2">
                 <div>
                   <p className="text-[9px] font-bold text-purple-600 mb-0.5">Product Team (4 eng)</p>
-                  {s.product.map((item) => (
+                  {s.product.map((item: any) => (
                     <p key={item} className="text-[9px] text-muted-foreground flex items-start gap-1"><span className="text-purple-400 mt-px">▸</span>{item}</p>
                   ))}
                 </div>
                 <div>
                   <p className="text-[9px] font-bold text-indigo-600 mb-0.5">ML Team (3 eng)</p>
-                  {s.ml.map((item) => (
+                  {s.ml.map((item: any) => (
                     <p key={item} className="text-[9px] text-muted-foreground flex items-start gap-1"><span className="text-indigo-400 mt-px">▸</span>{item}</p>
                   ))}
                 </div>
@@ -1422,7 +1422,7 @@ const slides = [
               ml: ["Package all models as Ollama-compatible GGUF", "Create model manifests with version metadata", "Offline inference validation (no network)", "Memory/GPU profiling per model size"],
               qa: "Electron smoke tests, offline/online toggle",
             },
-          ].map((s) => (
+          ].map((s: any) => (
             <Card key={s.sprint} className="p-3 border-purple-500/30 bg-purple-500/5">
               <div className="flex items-center justify-between mb-2">
                 <h4 className="font-bold text-xs text-purple-700">{s.sprint}</h4>
@@ -1431,13 +1431,13 @@ const slides = [
               <div className="space-y-2">
                 <div>
                   <p className="text-[9px] font-bold text-purple-600 mb-0.5">Product Team</p>
-                  {s.product.map((item) => (
+                  {s.product.map((item: any) => (
                     <p key={item} className="text-[9px] text-muted-foreground flex items-start gap-1"><span className="text-purple-400 mt-px">▸</span>{item}</p>
                   ))}
                 </div>
                 <div>
                   <p className="text-[9px] font-bold text-indigo-600 mb-0.5">ML Team</p>
-                  {s.ml.map((item) => (
+                  {s.ml.map((item: any) => (
                     <p key={item} className="text-[9px] text-muted-foreground flex items-start gap-1"><span className="text-indigo-400 mt-px">▸</span>{item}</p>
                   ))}
                 </div>
@@ -1482,7 +1482,7 @@ const slides = [
               ml: ["Healthcare domain model pack (3 models)", "Banking domain model pack (3 models)", "Model A/B testing framework", "Automated regression tests for all models"],
               qa: "Tenant isolation verification, load testing",
             },
-          ].map((s) => (
+          ].map((s: any) => (
             <Card key={s.sprint} className="p-3 border-indigo-500/30 bg-indigo-500/5">
               <div className="flex items-center justify-between mb-2">
                 <h4 className="font-bold text-xs text-indigo-700">{s.sprint}</h4>
@@ -1491,13 +1491,13 @@ const slides = [
               <div className="space-y-2">
                 <div>
                   <p className="text-[9px] font-bold text-purple-600 mb-0.5">Product Team</p>
-                  {s.product.map((item) => (
+                  {s.product.map((item: any) => (
                     <p key={item} className="text-[9px] text-muted-foreground flex items-start gap-1"><span className="text-purple-400 mt-px">▸</span>{item}</p>
                   ))}
                 </div>
                 <div>
                   <p className="text-[9px] font-bold text-indigo-600 mb-0.5">ML Team</p>
-                  {s.ml.map((item) => (
+                  {s.ml.map((item: any) => (
                     <p key={item} className="text-[9px] text-muted-foreground flex items-start gap-1"><span className="text-indigo-400 mt-px">▸</span>{item}</p>
                   ))}
                 </div>
@@ -1542,7 +1542,7 @@ const slides = [
               ml: ["Legal domain model pack (3 models)", "Travel domain model pack (3 models)", "Model marketplace: 50+ models published", "Training data pipeline documentation"],
               qa: "Full regression, launch readiness checklist",
             },
-          ].map((s) => (
+          ].map((s: any) => (
             <Card key={s.sprint} className="p-3 border-teal-500/30 bg-teal-500/5">
               <div className="flex items-center justify-between mb-2">
                 <h4 className="font-bold text-xs text-teal-700">{s.sprint}</h4>
@@ -1551,13 +1551,13 @@ const slides = [
               <div className="space-y-2">
                 <div>
                   <p className="text-[9px] font-bold text-purple-600 mb-0.5">Product Team</p>
-                  {s.product.map((item) => (
+                  {s.product.map((item: any) => (
                     <p key={item} className="text-[9px] text-muted-foreground flex items-start gap-1"><span className="text-purple-400 mt-px">▸</span>{item}</p>
                   ))}
                 </div>
                 <div>
                   <p className="text-[9px] font-bold text-indigo-600 mb-0.5">ML Team</p>
-                  {s.ml.map((item) => (
+                  {s.ml.map((item: any) => (
                     <p key={item} className="text-[9px] text-muted-foreground flex items-start gap-1"><span className="text-indigo-400 mt-px">▸</span>{item}</p>
                   ))}
                 </div>
@@ -1908,7 +1908,7 @@ export default function PitchDeck() {
       doc.setFont("helvetica", "normal");
       doc.setFontSize(9.5);
       doc.setTextColor(40, 40, 60);
-      items.forEach((item) => {
+      items.forEach((item: any) => {
         const lines = doc.splitTextToSize(`•  ${item}`, contentW - 6);
         lines.forEach((line: string) => {
           doc.text(line, marginL + 4, nextY);
@@ -1919,7 +1919,7 @@ export default function PitchDeck() {
       return nextY;
     };
 
-    jdRoles.forEach((role, roleIdx) => {
+    jdRoles.forEach((role: any, roleIdx: any) => {
       if (roleIdx > 0) doc.addPage();
       drawPageHeader(roleIdx + 1, totalPages);
 
@@ -1952,7 +1952,7 @@ export default function PitchDeck() {
         { label: "Key Responsibilities", items: role.responsibilities },
       ];
 
-      sections.forEach((sec) => {
+      sections.forEach((sec: any) => {
         // Section header
         doc.setFillColor(role.accentR, role.accentG, role.accentB);
         doc.rect(marginL, y, contentW, 7, "F");
@@ -2045,7 +2045,7 @@ export default function PitchDeck() {
       items: string[],
       options: { x: number; y: number; step: number; width: number; fontSize: number; color: string },
     ) => {
-      items.forEach((item, itemIndex) => {
+      items.forEach((item: any, itemIndex: any) => {
         slide.addText(item, {
           x: options.x,
           y: options.y + itemIndex * options.step,
@@ -2066,7 +2066,7 @@ export default function PitchDeck() {
       fontSize: number,
       color: string = COLORS.darkText,
     ) => {
-      items.forEach((item, index) => {
+      items.forEach((item: any, index: any) => {
         slide.addText(`•  ${item}`, {
           x,
           y: y + index * step,
@@ -2096,7 +2096,7 @@ export default function PitchDeck() {
         bulletColor?: string;
       },
     ) => {
-      columns.forEach((col, index) => {
+      columns.forEach((col: any, index: any) => {
         const x = options.startX + index * options.gapX;
         addCard(slide, x, options.startY, options.cardW, options.cardH, { fill: options.fill, border: options.border });
         slide.addText(col.title, {
@@ -2130,7 +2130,7 @@ export default function PitchDeck() {
         bulletFontSize: number;
       },
     ) => {
-      columns.forEach((col, index) => {
+      columns.forEach((col: any, index: any) => {
         const columnIndex = index % options.cols;
         const rowIndex = Math.floor(index / options.cols);
         const x = options.startX + columnIndex * options.gapX;
@@ -2167,7 +2167,7 @@ export default function PitchDeck() {
         fill: string;
       },
     ) => {
-      metrics.forEach((metric, index) => {
+      metrics.forEach((metric: any, index: any) => {
         const x = options.startX + index * options.gapX;
         addCard(slide, x, options.startY, options.cardW, options.cardH, { fill: options.fill });
         slide.addText(metric.value, {
@@ -2231,7 +2231,7 @@ export default function PitchDeck() {
         descFontSize: number;
       },
     ) => {
-      items.forEach((item, index) => {
+      items.forEach((item: any, index: any) => {
         const col = index % options.cols;
         const row = Math.floor(index / options.cols);
         const x = options.startX + col * options.gapX;
@@ -2267,7 +2267,7 @@ export default function PitchDeck() {
         cardH: number;
       },
     ) => {
-      teams.forEach((team, index) => {
+      teams.forEach((team: any, index: any) => {
         const x = options.startX + index * options.gapX;
         addCard(slide, x, options.startY, options.cardW, options.cardH, { fill: COLORS.white, border: team.color });
         slide.addText(team.title, {
@@ -2287,7 +2287,7 @@ export default function PitchDeck() {
           fontSize: 9,
           color: COLORS.muted,
         });
-        team.items.forEach((item, itemIndex) => {
+        team.items.forEach((item: any, itemIndex: any) => {
           slide.addText(`▸  ${item}`, {
             x: x + 0.15,
             y: options.startY + 0.9 + itemIndex * 0.35,
@@ -2316,7 +2316,7 @@ export default function PitchDeck() {
         descColor: string;
       },
     ) => {
-      items.forEach((item, index) => {
+      items.forEach((item: any, index: any) => {
         const col = index % options.cols;
         const row = Math.floor(index / options.cols);
         const x = options.startX + col * options.gapX;
@@ -2356,7 +2356,7 @@ export default function PitchDeck() {
         textColor: string;
       },
     ) => {
-      labels.forEach((label, index) => {
+      labels.forEach((label: any, index: any) => {
         const x = options.startX + index * options.gapX;
         addCard(slide, x, options.startY, options.chipW, options.chipH, { fill: options.fill, border: options.border });
         slide.addText(label, {
@@ -2418,7 +2418,7 @@ export default function PitchDeck() {
         });
       };
 
-      sprints.forEach((sp, index) => {
+      sprints.forEach((sp: any, index: any) => {
         const x = options.startX + index * options.gapX;
         const borderColor = options.showSyncBanner && sp.sync ? "F59E0B" : options.borderColor;
         addCard(slide, x, options.startY, options.cardW, options.cardH, { fill: COLORS.white, border: borderColor });
@@ -2495,7 +2495,7 @@ export default function PitchDeck() {
         arrowFontSize: number;
       },
     ) => {
-      labels.forEach((label, index) => {
+      labels.forEach((label: any, index: any) => {
         const x = options.startX + index * options.gapX;
         if (label === "→") {
           slide.addText("→", {
@@ -2531,7 +2531,7 @@ export default function PitchDeck() {
       options: { startX: number; startY: number; sectionWidth: number; sectionColor: string },
     ) => {
       let curY = options.startY;
-      sections.forEach((sec) => {
+      sections.forEach((sec: any) => {
         addCard(slide, options.startX, curY, options.sectionWidth, 0.28, { fill: options.sectionColor, border: options.sectionColor });
         slide.addText(sec.label.toUpperCase(), {
           x: options.startX + 0.12,
@@ -2543,7 +2543,7 @@ export default function PitchDeck() {
           color: COLORS.white,
         });
         curY += 0.3;
-        sec.items.forEach((item) => {
+        sec.items.forEach((item: any) => {
           slide.addText(`   ${item}`, {
             x: options.startX + 0.12,
             y: curY,
@@ -2665,7 +2665,7 @@ export default function PitchDeck() {
             { title: "Role-Based Access", desc: "Enterprise auth with granular permissions and multi-user support" },
             { title: "Document Processing", desc: "Upload, analyze documents with AI-powered insights" },
           ];
-          features.forEach((f, i) => {
+          features.forEach((f: any, i: any) => {
             const col = i % 2; const row = Math.floor(i / 2);
             const x = 0.5 + col * 6.2; const y = 1.7 + row * 1.7;
             addCard(slide, x, y, 5.8, 1.5, { fill: COLORS.white, border: "DDDDEE" });
@@ -2683,7 +2683,7 @@ export default function PitchDeck() {
             { value: "24", label: "Deployed Models" },
             { value: "1.2M", label: "Inferences/Day" },
           ];
-          metrics.forEach((m, i) => {
+          metrics.forEach((m: any, i: any) => {
             const x = 0.5 + i * 4.2;
             addCard(slide, x, 1.7, 3.8, 1.5, { fill: COLORS.primaryLight });
             slide.addText(m.value, { x, y: 1.8, w: 3.8, h: 0.8, fontSize: 32, bold: true, color: COLORS.primary, align: "center" });
@@ -2715,7 +2715,7 @@ export default function PitchDeck() {
           addCard(slide, 0.5, 1.7, 12, 2.2, { fill: COLORS.bgGray });
           slide.addText("Electron Desktop Application", { x: 0.8, y: 1.8, w: 11, h: 0.5, fontSize: 18, bold: true, color: COLORS.darkText });
           slide.addText("Cross-platform for Windows, macOS, and Linux with full offline support", { x: 0.8, y: 2.3, w: 11, h: 0.4, fontSize: 12, color: COLORS.muted });
-          ["Secure Token Auth", "Auto Sync", "Local Inference"].forEach((t, i) => {
+          ["Secure Token Auth", "Auto Sync", "Local Inference"].forEach((t: any, i: any) => {
             addCard(slide, 1 + i * 3.8, 2.9, 3.2, 0.8, { fill: COLORS.white });
             slide.addText(t, { x: 1 + i * 3.8, y: 2.95, w: 3.2, h: 0.7, fontSize: 12, bold: true, color: COLORS.primary, align: "center" });
           });
@@ -2850,7 +2850,7 @@ export default function PitchDeck() {
             { phase: "Phase 2: Q3–Q4", title: "Pilot → Production", items: ["Convert pilots to paid", "Healthcare & banking", "50+ customers"] },
             { phase: "Phase 3: 2026", title: "Global Scale", items: ["EU & APAC", "Model marketplace", "1,000+ customers"] },
           ];
-          const phaseColumns = phases.map((phase) => ({
+          const phaseColumns = phases.map((phase: any) => ({
             title: `${phase.phase} | ${phase.title}`,
             items: phase.items,
           }));
@@ -2935,7 +2935,7 @@ export default function PitchDeck() {
             { phase: "Phase 3", duration: "Mo 5–7", title: "Scale & Polish", items: ["Federated learning", "Workflow engine", "Doc processing", "Multi-tenant"] },
             { phase: "Phase 4", duration: "Mo 7–9 (Q3)", title: "Enterprise Ready", items: ["Security audit", "Performance opt.", "CI/CD pipeline", "GA launch"] },
           ];
-          const earlyPhaseColumns = phases.slice(0, 2).map((phase) => ({
+          const earlyPhaseColumns = phases.slice(0, 2).map((phase: any) => ({
             title: `${phase.phase} • ${phase.duration} | ${phase.title}`,
             items: phase.items,
           }));
@@ -2952,7 +2952,7 @@ export default function PitchDeck() {
             bulletStep: 0.4,
             bulletFontSize: 10,
           });
-          const latePhaseColumns = phases.slice(2).map((phase) => ({
+          const latePhaseColumns = phases.slice(2).map((phase: any) => ({
             title: `${phase.phase} • ${phase.duration} | ${phase.title}`,
             items: phase.items,
           }));
@@ -3347,7 +3347,7 @@ export default function PitchDeck() {
             { pod: "ACORD Parser", revenue: "$15K–$45K/yr", desc: "Per-page parsing volume" },
             { pod: "Custom Workflows", revenue: "$30K–$100K/yr", desc: "Per-execution + seat licensing" },
           ];
-          const podCards = pods.map((podItem) => ({
+          const podCards = pods.map((podItem: any) => ({
             title: `${podItem.pod} | ${podItem.revenue}`,
             desc: podItem.desc,
             accent: COLORS.darkText,
@@ -3581,7 +3581,7 @@ export default function PitchDeck() {
             "Own API documentation, versioning strategy, and SLA monitoring dashboards.",
           ],
         },
-      ] as Array<{ title: string; dept: string; color: string; education: string[]; experience: string[]; skills: string[]; responsibilities: string[] }>).map((jd) => ({
+      ] as Array<{ title: string; dept: string; color: string; education: string[]; experience: string[]; skills: string[]; responsibilities: string[] }>).map((jd: any) => ({
         title: jd.title,
         subtitle: `${jd.dept} | NeuraPod Private AI Tenant`,
         build: (slide: ReturnType<typeof pptx.addSlide>) => {
@@ -3643,7 +3643,7 @@ export default function PitchDeck() {
     ];
 
     console.log(`PPTX Export: ${slideData.length} slides in slideData, ${totalSlides} UI slides`);
-    slideData.forEach((sd, index) => {
+    slideData.forEach((sd: any, index: any) => {
       try {
         const pptSlide = pptx.addSlide();
         // Add header for content slides (not title/closing)
@@ -3702,7 +3702,7 @@ export default function PitchDeck() {
           </Button>
 
           <div className="flex gap-2">
-            {slides.map((slide, index) => (
+            {slides.map((slide: any, index: any) => (
               <button
                 key={slide.id}
                 onClick={() => goToSlide(index)}

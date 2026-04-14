@@ -168,7 +168,7 @@ export async function createTrainingJob(data: {
 }): Promise<{ success: boolean; job: TrainingJob }> {
   const token = getDeviceToken();
   if (!token) {
-    const localFeedback = getLocalFeedback().filter(f => f.model_id === data.model_id && !f.is_used_for_training);
+    const localFeedback = getLocalFeedback().filter((f: any) => f.model_id === data.model_id && !f.is_used_for_training);
     const job: TrainingJob = {
       id: crypto.randomUUID(),
       device_id: 'local',
@@ -185,8 +185,8 @@ export async function createTrainingJob(data: {
     };
     // Mark feedback as used
     const allFb = getLocalFeedback();
-    const usedIds = new Set(localFeedback.map(f => f.id));
-    const updated = allFb.map(f => usedIds.has(f.id) ? { ...f, is_used_for_training: true } : f);
+    const usedIds = new Set(localFeedback.map((f: any) => f.id));
+    const updated = allFb.map((f: any) => usedIds.has(f.id) ? { ...f, is_used_for_training: true } : f);
     localStorage.setItem(LOCAL_FEEDBACK_KEY, JSON.stringify(updated));
     // Save job locally
     const jobs = getLocalJobs();

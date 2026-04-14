@@ -71,7 +71,7 @@ export default function Playground() {
     const modelFromUrl = new URLSearchParams(location.search).get("model");
     if (!modelFromUrl) return;
     const requestedModel = decodeURIComponent(modelFromUrl);
-    if (models.some((model) => model.model_id === requestedModel)) {
+    if (models.some((model: any) => model.model_id === requestedModel)) {
       setSelectedModel(requestedModel);
     }
   }, [location.search, models]);
@@ -101,12 +101,12 @@ export default function Playground() {
         return;
       }
 
-      const { data: roles } = await supabase
+      const { data: roles } = await (supabase as any)
         .from("user_roles")
         .select("role")
         .eq("user_id", user.id);
 
-      const isAdmin = roles?.some(r => r.role === "admin");
+      const isAdmin = roles?.some((r: any) => r.role === "admin");
       if (isAdmin) {
         toast({
           title: "Access Denied",
@@ -126,7 +126,7 @@ export default function Playground() {
 
   const loadActivatedModels = async (userId: string) => {
     try {
-      const { data, error } = await supabase
+      const { data, error } = await (supabase as any)
         .from("activated_models")
         .select("*")
         .eq("user_id", userId);
@@ -137,7 +137,7 @@ export default function Playground() {
         const modelFromUrl = new URLSearchParams(location.search).get("model");
         const requestedModel = modelFromUrl ? decodeURIComponent(modelFromUrl) : null;
         const match = requestedModel
-          ? data.find((item) => item.model_id === requestedModel)
+          ? data.find((item: any) => item.model_id === requestedModel)
           : null;
         setSelectedModel(match?.model_id ?? data[0].model_id);
       }
@@ -163,7 +163,7 @@ export default function Playground() {
       return;
     }
 
-    const selectedModelData = models.find(m => m.model_id === selectedModel);
+    const selectedModelData = models.find((m: any) => m.model_id === selectedModel);
     const isInsuranceModel = selectedModelData?.domain === "insurance";
 
     setIsRunning(true);
@@ -257,7 +257,7 @@ export default function Playground() {
         // Check if model is installed
         const ollamaModels = await listOllamaModels();
         const ollamaModelName = getOllamaModelName(selectedModel);
-        const modelInstalled = ollamaModels.some(m => 
+        const modelInstalled = ollamaModels.some((m: any) => 
           m.name.startsWith(ollamaModelName.split(':')[0])
         );
 
@@ -343,7 +343,7 @@ export default function Playground() {
     }
   };
 
-  const selectedModelData = models.find(m => m.model_id === selectedModel);
+  const selectedModelData = models.find((m: any) => m.model_id === selectedModel);
   const modelName = selectedModelData?.model_name || "";
 
   const renderModelUI = () => {
@@ -475,7 +475,7 @@ export default function Playground() {
                   <SelectValue placeholder="Choose a model" />
                 </SelectTrigger>
                 <SelectContent>
-                  {models.map((model) => (
+                  {models.map((model: any) => (
                     <SelectItem key={model.id} value={model.model_id}>
                       {model.model_name}
                     </SelectItem>

@@ -124,7 +124,7 @@ export default function SubmissionResultCard({ submission }: SubmissionResultCar
                 Documents Received
               </h4>
               <div className="flex flex-wrap gap-2">
-                {submission.documents.map((doc) => (
+                {submission.documents.map((doc: any) => (
                   <Badge 
                     key={doc}
                     variant="secondary" 
@@ -164,7 +164,7 @@ export default function SubmissionResultCard({ submission }: SubmissionResultCar
                 Recommended Actions
               </h4>
               <div className="space-y-3">
-                {submission.nextSteps.map((step, idx) => (
+                {submission.nextSteps.map((step: any, idx: any) => (
                   <div 
                     key={`${idx + 1}-${step}`}
                     className="flex items-start gap-3 p-3 rounded-lg bg-muted/30 border border-border/50 hover:bg-muted/50 transition-colors"

@@ -55,7 +55,7 @@ function flattenValues(input: any, prefix = "", out: Record<string, string> = {}
   }
 
   if (Array.isArray(input)) {
-    input.forEach((v, i) => {
+    input.forEach((v: any, i: any) => {
       const nextPrefix = prefix ? `${prefix}[${i}]` : `[${i}]`;
       flattenValues(v, nextPrefix, out);
     });
@@ -423,7 +423,7 @@ export default function ACORDParserUI({ modelId, onRun, isRunning, result }: ACO
                           Showing up to {Math.min(changes.length, 120)} changed paths.
                         </p>
                         <div className="grid gap-2 max-h-[300px] overflow-auto pr-1">
-                          {changes.map((c) => (
+                          {changes.map((c: any) => (
                             <div
                               key={c.path + c.type}
                               className="rounded-lg border border-border/60 bg-card/70 p-3"
@@ -486,16 +486,16 @@ export default function ACORDParserUI({ modelId, onRun, isRunning, result }: ACO
                   <div className="flex items-center justify-between gap-4 flex-wrap">
                     <div className="flex items-center gap-2 flex-wrap">
                       <Badge className="bg-green-500/15 text-green-700 border border-green-500/30">
-                        Added ({changes.filter((c) => c.type === "added").length})
+                        Added ({changes.filter((c: any) => c.type === "added").length})
                       </Badge>
                       <Badge
                         variant="destructive"
                         className="bg-red-500/10 text-red-700 border border-red-500/30"
                       >
-                        Removed ({changes.filter((c) => c.type === "removed").length})
+                        Removed ({changes.filter((c: any) => c.type === "removed").length})
                       </Badge>
                       <Badge className="bg-amber-500/15 text-amber-700 border border-amber-500/30">
-                        Changed ({changes.filter((c) => c.type === "changed").length})
+                        Changed ({changes.filter((c: any) => c.type === "changed").length})
                       </Badge>
                     </div>
                     <p className="text-xs text-muted-foreground">
@@ -528,7 +528,7 @@ export default function ACORDParserUI({ modelId, onRun, isRunning, result }: ACO
                             Showing up to {Math.min(changes.length, 120)} changed paths.
                           </p>
                           <div className="grid gap-2 max-h-[300px] overflow-auto pr-1">
-                            {changes.map((c) => (
+                            {changes.map((c: any) => (
                               <div
                                 key={c.path + c.type}
                                 className="rounded-lg border border-border/60 bg-card/70 p-3"

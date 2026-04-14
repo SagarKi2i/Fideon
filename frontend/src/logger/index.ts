@@ -107,7 +107,7 @@ function contentScrubString(value: string): string {
 
 function scrubValue(value: unknown): unknown {
   if (Array.isArray(value)) {
-    return value.map((v) => scrubValue(v));
+    return value.map((v: any) => scrubValue(v));
   }
   if (value && typeof value === "object") {
     const obj = value as Record<string, unknown>;

@@ -48,9 +48,9 @@ export default function PolicyClauseRedlineUI({ result }: { result: string }) {
   const selected = clauses[selectedIdx] ?? null;
 
   const counts = useMemo(() => {
-    const added = clauses.filter((c) => c.status === "added").length;
-    const removed = clauses.filter((c) => c.status === "removed").length;
-    const changed = clauses.filter((c) => c.status === "changed").length;
+    const added = clauses.filter((c: any) => c.status === "added").length;
+    const removed = clauses.filter((c: any) => c.status === "removed").length;
+    const changed = clauses.filter((c: any) => c.status === "changed").length;
     return { added, removed, changed };
   }, [clauses]);
 
@@ -92,7 +92,7 @@ export default function PolicyClauseRedlineUI({ result }: { result: string }) {
                 <p className="text-sm text-muted-foreground">No clause changes detected.</p>
               ) : (
                 <div className="space-y-2 max-h-[520px] overflow-auto pr-1">
-                  {clauses.map((c, idx) => (
+                  {clauses.map((c: any, idx: any) => (
                     <button
                       key={`${c.id}-${c.status}-${idx}`}
                       type="button"

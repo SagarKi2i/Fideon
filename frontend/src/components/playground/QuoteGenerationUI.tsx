@@ -123,7 +123,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
   };
 
   const handleExportPdf = async () => {
-    const quote = quotes.find(q => q.carrier === selectedQuote);
+    const quote = quotes.find((q: any) => q.carrier === selectedQuote);
     if (!quote) return;
 
     setIsExportingPdf(true);
@@ -158,7 +158,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
       pdf.setFont('helvetica', 'normal');
       pdf.text(`Carrier: ${quote.carrier}`, margin, yPos);
       yPos += 7;
-      pdf.text(`Insurance Type: ${INSURANCE_TYPES.find(t => t.id === insuranceType)?.name || insuranceType}`, margin, yPos);
+      pdf.text(`Insurance Type: ${INSURANCE_TYPES.find((t: any) => t.id === insuranceType)?.name || insuranceType}`, margin, yPos);
       yPos += 15;
 
       // Premium Details
@@ -220,7 +220,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
         yPos += 10;
         pdf.setFontSize(11);
         pdf.setFont('helvetica', 'normal');
-        quote.features.forEach(feature => {
+        quote.features.forEach((feature: any) => {
           pdf.text(`• ${feature}`, margin, yPos);
           yPos += 6;
         });
@@ -259,7 +259,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
   const toggleCarrier = (carrierId: string) => {
     setSelectedCarriers(prev => 
       prev.includes(carrierId) 
-        ? prev.filter(c => c !== carrierId)
+        ? prev.filter((c: any) => c !== carrierId)
         : [...prev, carrierId]
     );
   };
@@ -276,8 +276,8 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
     setFetchProgress(0);
     setQuotes([]);
 
-    const initialQuotes: CarrierQuote[] = selectedCarriers.map(carrierId => {
-      const carrier = CARRIERS.find(c => c.id === carrierId);
+    const initialQuotes: CarrierQuote[] = selectedCarriers.map((carrierId: any) => {
+      const carrier = CARRIERS.find((c: any) => c.id === carrierId);
       return {
         carrier: carrier?.name || carrierId,
         logo: "shield",
@@ -292,13 +292,13 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
 
     // Simulate fetching from each carrier
     for (let i = 0; i < selectedCarriers.length; i++) {
-      const carrier = CARRIERS.find(c => c.id === selectedCarriers[i]);
+      const carrier = CARRIERS.find((c: any) => c.id === selectedCarriers[i]);
       if (!carrier) continue;
 
       setCurrentCarrier(carrier.name);
       
       // Update status to fetching
-      setQuotes(prev => prev.map((q, idx) => 
+      setQuotes(prev => prev.map((q: any, idx: any) => 
         idx === i ? { ...q, status: "fetching" as const } : q
       ));
 
@@ -321,7 +321,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
         ].slice(0, 2 + Math.floor(Math.random() * 2)),
       };
 
-      setQuotes(prev => prev.map((q, idx) => 
+      setQuotes(prev => prev.map((q: any, idx: any) => 
         idx === i ? mockQuote : q
       ));
 
@@ -344,7 +344,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
   const generateProposal = () => {
     if (!selectedQuote) return;
     
-    const quote = quotes.find(q => q.carrier === selectedQuote);
+    const quote = quotes.find((q: any) => q.carrier === selectedQuote);
     if (!quote) return;
 
     setStep("proposal");
@@ -386,7 +386,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
                 <SelectValue placeholder="Select insurance type" />
               </SelectTrigger>
               <SelectContent>
-                {INSURANCE_TYPES.map(type => (
+                {INSURANCE_TYPES.map((type: any) => (
                   <SelectItem key={type.id} value={type.id}>
                     {type.name}
                   </SelectItem>
@@ -463,7 +463,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
           <div className="space-y-4">
             <Label className="text-base font-semibold">Select Carriers to Quote</Label>
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-            {CARRIERS.map(carrier => (
+            {CARRIERS.map((carrier: any) => (
                 <div
                   key={carrier.id}
                   onClick={() => toggleCarrier(carrier.id)}
@@ -550,7 +550,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
         </div>
 
         <div className="space-y-3">
-          {quotes.map((quote) => (
+          {quotes.map((quote: any) => (
             <div
               key={quote.carrier}
               className={`p-4 rounded-lg border ${getFetchingStatusClass(quote.status)}`}
@@ -609,7 +609,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {quotes.filter(q => q.status === "complete").map((quote) => (
+            {quotes.filter((q: any) => q.status === "complete").map((quote: any) => (
               <div
                 key={quote.carrier}
                 onClick={() => setSelectedQuote(quote.carrier)}
@@ -661,7 +661,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
                   <div className="space-y-1">
                     <span className="text-sm text-muted-foreground">Included Features:</span>
                     <div className="flex flex-wrap gap-1">
-                      {quote.features.map((feature) => (
+                      {quote.features.map((feature: any) => (
                         <Badge key={`${quote.carrier}-${feature}`} variant="secondary" className="text-xs">
                           {feature}
                         </Badge>
@@ -715,7 +715,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
             Policy Coverage Details
           </CardTitle>
           <CardDescription>
-            Complete coverage schedule, limits, exclusions, and conditions for {INSURANCE_TYPES.find(t => t.id === insuranceType)?.name ?? "this policy type"}
+            Complete coverage schedule, limits, exclusions, and conditions for {INSURANCE_TYPES.find((t: any) => t.id === insuranceType)?.name ?? "this policy type"}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -726,7 +726,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
   );
 
   const renderProposalStep = () => {
-    const quote = quotes.find(q => q.carrier === selectedQuote);
+    const quote = quotes.find((q: any) => q.carrier === selectedQuote);
     const expirationDate = new Date(effectiveDate.getTime() + 365 * 24 * 60 * 60 * 1000);
     
     return (
@@ -743,7 +743,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
                 <div>
                   <h1 className="text-2xl font-bold">Insurance Proposal</h1>
                   <p className="text-primary-foreground/80 text-sm">
-                    {INSURANCE_TYPES.find(t => t.id === insuranceType)?.name}
+                    {INSURANCE_TYPES.find((t: any) => t.id === insuranceType)?.name}
                   </p>
                 </div>
               </div>
@@ -880,7 +880,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
                     <h3 className="font-semibold text-foreground">Included Benefits & Features</h3>
                   </div>
                   <div className="grid grid-cols-2 gap-2">
-                    {quote.features.map((feature) => (
+                    {quote.features.map((feature: any) => (
                       <div key={`${quote.carrier}-benefit-${feature}`} className="flex items-center gap-2 bg-background rounded-lg p-3">
                         <CheckCircle2 className="h-4 w-4 text-green-500 flex-shrink-0" />
                         <span className="text-sm text-foreground">{feature}</span>
@@ -1019,7 +1019,7 @@ export default function QuoteGenerationUI({ onRun, isRunning, result }: QuoteGen
               premium: quote.premium,
               coverage: quote.coverage,
               deductible: quote.deductible,
-              insuranceType: INSURANCE_TYPES.find(t => t.id === insuranceType)?.name ?? insuranceType,
+              insuranceType: INSURANCE_TYPES.find((t: any) => t.id === insuranceType)?.name ?? insuranceType,
               proposalNumber: proposalNumber.current,
               effectiveDate: effectiveDate,
             }}

@@ -114,7 +114,7 @@ export default function OutputCorrection({ modelId, prompt, output, children }: 
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1">
               <span className="text-xs text-muted-foreground mr-2">Quality:</span>
-              {[1, 2, 3, 4, 5].map((s) => (
+              {[1, 2, 3, 4, 5].map((s: any) => (
                 <Button
                   key={s}
                   variant={rating >= s ? "default" : "outline"}

@@ -105,7 +105,7 @@ export default function Workflows() {
           typeof candidate.completed_at === "string"
         );
       })
-      .map((item) => ({ step: item.step, notes: item.notes, completed_at: item.completed_at }));
+      .map((item: any) => ({ step: item.step, notes: item.notes, completed_at: item.completed_at }));
   };
 
   useEffect(() => {
@@ -120,7 +120,7 @@ export default function Workflows() {
     try {
       const uid = userId ?? currentUserId;
       if (!uid) return;
-      const { data } = await supabase.from("activated_models").select("*").eq("user_id", uid);
+      const { data } = await (supabase as any).from("activated_models").select("*").eq("user_id", uid);
       if (data && data.length > 0) {
         setModels(data);
         setSelectedModel(data[0].model_id);
@@ -135,7 +135,7 @@ export default function Workflows() {
     try {
       const uid = userId ?? currentUserId;
       if (!uid) return;
-      const { data, error } = await supabase
+      const { data, error } = await (supabase as any)
         .from("workflows")
         .select("*")
         .eq("user_id", uid)
@@ -182,7 +182,7 @@ export default function Workflows() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not authenticated");
 
-      const { error } = await supabase.from("workflows").insert({
+      const { error } = await (supabase as any).from("workflows").insert({
         user_id: user.id,
         title: newTitle,
         description: newDescription || null,
@@ -213,7 +213,7 @@ export default function Workflows() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
-      const { data, error } = await supabase.from("workflow_runs").insert({
+      const { data, error } = await (supabase as any).from("workflow_runs").insert({
         workflow_id: workflow.id,
         user_id: user.id,
         status: "in_progress",
@@ -248,7 +248,7 @@ export default function Workflows() {
 
     try {
       const previousNotes = activeRun.run.step_results
-        .map(r => `Step ${r.step + 1}: ${r.notes}`)
+        .map((r: any) => `Step ${r.step + 1}: ${r.notes}`)
         .join("\n");
 
       await streamFromEdgeFunction("workflow-ai", {
@@ -278,7 +278,7 @@ export default function Workflows() {
     const nextStep = activeRun.run.current_step + 1;
     const isComplete = nextStep >= activeRun.workflow.parsed_steps.length;
 
-    await supabase.from("workflow_runs").update({
+    await (supabase as any).from("workflow_runs").update({
       current_step: nextStep,
       step_results: newResults as any,
       status: isComplete ? "completed" : "in_progress",
@@ -299,7 +299,7 @@ export default function Workflows() {
   };
 
   const deleteWorkflow = async (id: string) => {
-    await supabase.from("workflows").delete().eq("id", id).eq("user_id", currentUserId ?? "");
+    await (supabase as any).from("workflows").delete().eq("id", id).eq("user_id", currentUserId ?? "");
     await loadWorkflows();
   };
 
@@ -373,7 +373,7 @@ export default function Workflows() {
 
           {/* Step Timeline */}
           <div className="flex gap-2 overflow-x-auto pb-2">
-            {activeRun.workflow.parsed_steps.map((s, i) => (
+            {activeRun.workflow.parsed_steps.map((s: any, i: any) => (
               <div key={`${s.title}-${i}`} className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-medium shrink-0 ${getStepTimelineClass(i, activeRun.run.current_step)}`}>
                 {i < activeRun.run.current_step ? <CheckCircle2 className="h-3 w-3" /> : <Circle className="h-3 w-3" />}
                 {s.title}
@@ -466,7 +466,7 @@ export default function Workflows() {
                     <Select value={selectedModel} onValueChange={setSelectedModel}>
                       <SelectTrigger className="bg-background"><SelectValue placeholder="Select model" /></SelectTrigger>
                       <SelectContent>
-                        {models.map(m => (
+                        {models.map((m: any) => (
                           <SelectItem key={m.id} value={m.model_id}>{m.model_name}</SelectItem>
                         ))}
                       </SelectContent>
@@ -503,7 +503,7 @@ export default function Workflows() {
               </CardHeader>
               <CardContent>
                 <div className="space-y-2">
-                  {activeRun.run.step_results.map((r) => (
+                  {activeRun.run.step_results.map((r: any) => (
                     <div key={`${r.step}-${r.completed_at}`} className="flex items-start gap-2 text-sm">
                       <CheckCircle2 className="h-4 w-4 text-green-500 mt-0.5 shrink-0" />
                       <div>
@@ -622,7 +622,7 @@ export default function Workflows() {
           </Card>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {workflows.map((w) => (
+            {workflows.map((w: any) => (
               <Card key={w.id} className="bg-card/80 backdrop-blur-sm border-border/50 hover:shadow-elevated transition-shadow">
                 <CardHeader className="pb-3">
                   <div className="flex items-start justify-between">
@@ -638,7 +638,7 @@ export default function Workflows() {
                 </CardHeader>
                 <CardContent>
                   <div className="space-y-2 mb-4">
-                    {w.parsed_steps.slice(0, 3).map((s, i) => (
+                    {w.parsed_steps.slice(0, 3).map((s: any, i: any) => (
                       <div key={`${w.id}-${s.title}-${i}`} className="flex items-center gap-2 text-sm text-muted-foreground">
                         <Circle className="h-3 w-3 shrink-0" />
                         <span className="truncate">{s.title}</span>

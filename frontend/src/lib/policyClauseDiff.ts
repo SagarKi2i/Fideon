@@ -16,7 +16,7 @@ export type PolicyClauseDiff = {
 
 function stripCodeFences(input: string): string[] {
   const matches = input.match(/```(?:json)?\s*([\s\S]*?)\s*```/gi);
-  return matches?.map((m) => m.replace(/```(?:json)?/i, "").replace(/```$/, "").trim()) ?? [];
+  return matches?.map((m: any) => m.replace(/```(?:json)?/i, "").replace(/```$/, "").trim()) ?? [];
 }
 
 function tryParseJson(candidate: string): unknown | null {
@@ -113,7 +113,7 @@ function normalizeFromArray(
   statusHint: ClauseDiffStatus,
 ): PolicyClauseDiffClause[] {
   return arr
-    .map((item, idx) => {
+    .map((item: any, idx: any) => {
       const before = normalizeBefore(item);
       const after = normalizeAfter(item);
       const status = statusHint ?? normalizeClauseStatus(item, before, after);
@@ -127,7 +127,7 @@ function normalizeFromArray(
         path: toMaybeString(item?.path ?? item?.field),
       } as PolicyClauseDiffClause;
     })
-    .filter((c) => Boolean(c.id));
+    .filter((c: any) => Boolean(c.id));
 }
 
 export function parsePolicyClauseDiff(input: string): PolicyClauseDiff | null {

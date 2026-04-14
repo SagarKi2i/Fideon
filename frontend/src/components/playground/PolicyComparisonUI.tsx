@@ -470,7 +470,7 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {gaps.map((gap) => (
+              {gaps.map((gap: any) => (
                 <div key={gap} className="flex items-start gap-3 p-3 rounded-lg bg-amber-500/5 border border-amber-500/20">
                   <AlertTriangle className="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" />
                   <div>
@@ -494,7 +494,7 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
             </CardHeader>
             <CardContent>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {(structured.recommendation?.rationale ?? []).map((rationale) => (
+                {(structured.recommendation?.rationale ?? []).map((rationale: any) => (
                   <div 
                     key={rationale} 
                     className="flex items-start gap-3 p-3 rounded-lg border bg-green-500/5 border-green-500/20"

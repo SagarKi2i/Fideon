@@ -13,12 +13,12 @@ const steps = [
 ];
 
 export default function SubmissionStatusStepper({ status }: SubmissionStatusStepperProps) {
-  const currentIndex = steps.findIndex((s) => s.id === status);
+  const currentIndex = steps.findIndex((s: any) => s.id === status);
   const isDeclined = status === "declined";
 
   return (
     <div className="flex items-center justify-between w-full max-w-xl mx-auto py-4">
-      {steps.map((step, index) => {
+      {steps.map((step: any, index: any) => {
         const Icon = step.icon;
         const isCompleted = index < currentIndex;
         const isCurrent = index === currentIndex;

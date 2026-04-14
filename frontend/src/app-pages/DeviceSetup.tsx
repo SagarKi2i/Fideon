@@ -136,7 +136,7 @@ export default function DeviceSetup() {
 
     const intervalId = window.setInterval(async () => {
       try {
-        const localModelStatuses = allocatedModels.map(model => ({
+        const localModelStatuses = allocatedModels.map((model: any) => ({
           model_id: model.model_id,
           is_downloaded: isModelInstalled(model.ollama_model_name),
         }));
@@ -280,7 +280,7 @@ export default function DeviceSetup() {
     if (!deviceJwt) return;
     setLoading(true);
     try {
-      const localModelStatuses = allocatedModels.map(model => ({
+      const localModelStatuses = allocatedModels.map((model: any) => ({
         model_id: model.model_id,
         is_downloaded: isModelInstalled(model.ollama_model_name),
       }));
@@ -363,7 +363,7 @@ export default function DeviceSetup() {
   };
 
   const isModelInstalled = (ollamaModelName: string): boolean => {
-    return localModels.some(m => m.name === ollamaModelName);
+    return localModels.some((m: any) => m.name === ollamaModelName);
   };
 
   if (!isElectronApp) {
@@ -564,7 +564,7 @@ export default function DeviceSetup() {
           </CardHeader>
           <CardContent>
             <div className="space-y-4">
-              {allocatedModels.map((model) => {
+              {allocatedModels.map((model: any) => {
                 const installed = isModelInstalled(model.ollama_model_name);
                 const progress = downloadProgress[model.model_id];
                 

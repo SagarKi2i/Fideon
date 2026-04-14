@@ -144,7 +144,7 @@ export default function Dashboard() {
 
   const loadActivatedPods = useCallback(async (userId: string) => {
     try {
-      const { data: profile } = await supabase
+      const { data: profile } = await (supabase as any)
         .from("app_users")
         .select("full_name,email")
         .eq("user_id", userId)
@@ -153,7 +153,7 @@ export default function Dashboard() {
       const fallbackName = authData.user?.email?.split("@")[0] ?? "User";
       setDisplayName(profile?.full_name ?? profile?.email?.split("@")[0] ?? fallbackName);
 
-      const { data, error } = await supabase
+      const { data, error } = await (supabase as any)
         .from("activated_models")
         .select("*")
         .eq("user_id", userId)
@@ -163,7 +163,7 @@ export default function Dashboard() {
       const podsData = data ?? [];
       setPods(podsData);
 
-      const { data: conversations } = await supabase
+      const { data: conversations } = await (supabase as any)
         .from("chat_conversations")
         .select("id, model_id, updated_at, title, chat_messages(id,created_at)")
         .eq("user_id", userId);
@@ -205,7 +205,7 @@ export default function Dashboard() {
           action: conv.title ? `Conversation: ${conv.title}` : "Conversation activity",
           time: toRelativeTime(activityTime),
           status: "success",
-          podName: podsData.find((p) => p.model_id === modelId)?.model_name ?? modelId,
+          podName: podsData.find((p: any) => p.model_id === modelId)?.model_name ?? modelId,
         });
       }
 
@@ -214,22 +214,22 @@ export default function Dashboard() {
       setTotalQueries(conversationQueryTotal);
       setQueryTrendPct(calculateQueryTrend(currentMonthQueries, previousMonthQueries));
 
-      const { data: runs } = await supabase
+      const { data: runs } = await (supabase as any)
         .from("workflow_runs")
         .select("id,status,started_at,completed_at")
         .eq("user_id", userId)
         .order("started_at", { ascending: false })
         .limit(100);
 
-      const runRows = runs ?? [];
-      const completedRuns = runRows.filter((r) => r.status === "completed");
-      const failedRuns = runRows.filter((r) => r.status === "failed");
+      const runRows: any[] = runs ?? [];
+      const completedRuns = runRows.filter((r: any) => r.status === "completed");
+      const failedRuns = runRows.filter((r: any) => r.status === "failed");
       const consideredRuns = completedRuns.length + failedRuns.length;
       const successRate = consideredRuns > 0 ? (completedRuns.length / consideredRuns) * 100 : null;
       setAvgSuccessRate(successRate);
 
       const completedDurations = completedRuns
-        .map((run) => {
+        .map((run: any) => {
           if (!run.started_at || !run.completed_at) return null;
           const durationSec = (new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()) / 1000;
           return Number.isFinite(durationSec) && durationSec >= 0 ? durationSec : null;
@@ -237,15 +237,15 @@ export default function Dashboard() {
         .filter((v): v is number => v !== null);
 
       if (completedDurations.length > 0) {
-        const avg = completedDurations.reduce((sum, value) => sum + value, 0) / completedDurations.length;
+        const avg = completedDurations.reduce((sum: any, value: any) => sum + value, 0) / completedDurations.length;
         setAvgResponseSeconds(avg);
       } else {
         setAvgResponseSeconds(null);
       }
 
       const currentMonthDurations = completedRuns
-        .filter((run) => run.started_at && new Date(run.started_at) >= currentMonthStart)
-        .map((run) => {
+        .filter((run: any) => run.started_at && new Date(run.started_at) >= currentMonthStart)
+        .map((run: any) => {
           if (!run.started_at || !run.completed_at) return null;
           const durationSec = (new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()) / 1000;
           return Number.isFinite(durationSec) && durationSec >= 0 ? durationSec : null;
@@ -253,8 +253,8 @@ export default function Dashboard() {
         .filter((v): v is number => v !== null);
 
       const previousMonthDurations = completedRuns
-        .filter((run) => run.started_at && new Date(run.started_at) >= previousMonthStart && new Date(run.started_at) < currentMonthStart)
-        .map((run) => {
+        .filter((run: any) => run.started_at && new Date(run.started_at) >= previousMonthStart && new Date(run.started_at) < currentMonthStart)
+        .map((run: any) => {
           if (!run.started_at || !run.completed_at) return null;
           const durationSec = (new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()) / 1000;
           return Number.isFinite(durationSec) && durationSec >= 0 ? durationSec : null;
@@ -262,8 +262,8 @@ export default function Dashboard() {
         .filter((v): v is number => v !== null);
 
       if (currentMonthDurations.length > 0 && previousMonthDurations.length > 0) {
-        const currentAvg = currentMonthDurations.reduce((sum, value) => sum + value, 0) / currentMonthDurations.length;
-        const previousAvg = previousMonthDurations.reduce((sum, value) => sum + value, 0) / previousMonthDurations.length;
+        const currentAvg = currentMonthDurations.reduce((sum: any, value: any) => sum + value, 0) / currentMonthDurations.length;
+        const previousAvg = previousMonthDurations.reduce((sum: any, value: any) => sum + value, 0) / previousMonthDurations.length;
         if (previousAvg > 0) {
           setResponseImprovementPct(((previousAvg - currentAvg) / previousAvg) * 100);
         } else {
@@ -273,7 +273,7 @@ export default function Dashboard() {
         setResponseImprovementPct(null);
       }
 
-      const runActivities = runRows.slice(0, 5).map((r) => ({
+      const runActivities = runRows.slice(0, 5).map((r: any) => ({
         id: `run-${r.id}`,
         action: `Workflow run ${r.status}`,
         time: toRelativeTime(r.started_at),
@@ -485,7 +485,7 @@ export default function Dashboard() {
                 </Button>
               </div>
               <div className="grid gap-4 md:gap-6 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
-                {pods.map((pod, index) => {
+                {pods.map((pod: any, index: any) => {
                   const Icon = getPodIcon(pod.model_id);
                   const podQueries = podQueryCounts[pod.model_id] ?? 0;
                   const metrics: PodMetrics = {
@@ -564,7 +564,7 @@ export default function Dashboard() {
                 </CardHeader>
                 <CardContent>
                   <div className="space-y-3">
-                    {recentActivity.map((activity) => {
+                    {recentActivity.map((activity: any) => {
                       const Icon = Activity;
                       const colorClass = "text-primary";
                       

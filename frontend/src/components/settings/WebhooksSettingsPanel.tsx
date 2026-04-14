@@ -22,7 +22,7 @@ function eventsPayload(selected: Set<string>): string[] {
   if (selected.size === 0 || selected.size === CANONICAL_EVENTS.length) {
     return [];
   }
-  return CANONICAL_EVENTS.filter((e) => selected.has(e));
+  return CANONICAL_EVENTS.filter((e: any) => selected.has(e));
 }
 
 export function WebhooksSettingsPanel() {
@@ -163,7 +163,7 @@ export function WebhooksSettingsPanel() {
             <div className="space-y-2 sm:col-span-2">
               <Label>Events</Label>
               <div className="flex flex-wrap gap-4">
-                {CANONICAL_EVENTS.map((ev) => (
+                {CANONICAL_EVENTS.map((ev: any) => (
                   <label key={ev} className="flex items-center gap-2 text-sm cursor-pointer">
                     <Switch checked={newEvents.has(ev)} onCheckedChange={() => toggleNewEvent(ev)} />
                     <span className="font-mono text-xs">{ev}</span>
@@ -186,7 +186,7 @@ export function WebhooksSettingsPanel() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          {rows.map((w) => (
+          {rows.map((w: any) => (
             <div
               key={w.id}
               className="rounded-lg border border-border p-3 space-y-2 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between"
@@ -198,7 +198,7 @@ export function WebhooksSettingsPanel() {
                   {!w.events || w.events.length === 0 ? (
                     <Badge variant="secondary">all events</Badge>
                   ) : (
-                    w.events.map((ev) => (
+                    w.events.map((ev: any) => (
                       <Badge key={ev} variant="outline" className="font-mono text-[10px]">
                         {ev}
                       </Badge>
