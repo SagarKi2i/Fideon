@@ -21,3 +21,12 @@ supabase/supabase/.temp/
 
 # OS/editor
 .DS_Store
+
+# Cursor/AI local settings
+.claude/
+
+# Local scratch files
+Untitled
+
+# Electron frontend build outputs (local)
+electron/frontend-staging/
