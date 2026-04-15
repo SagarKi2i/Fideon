@@ -1,7 +1,7 @@
 param(
-  [string]$ApiUrl = "https://fideon-staging-apim.azure-api.net/stg",
-  [string]$FrontendUrl = "https://fideon-staging-frontend-gnbwcnhmhbeqbmhq.centralus-01.azurewebsites.net",
-  [string]$BackendDocsUrl = "https://fideon-staging-apim.azure-api.net/stg/docs",
+  [string]$ApiUrl = "http://13.68.145.18:8080",
+  [string]$FrontendUrl = "http://13.68.145.18:4200",
+  [string]$BackendDocsUrl = "http://13.68.145.18:8080/docs",
   [string]$PackageLabel = "staging",
   [switch]$SkipInstall,
   [switch]$SkipFrontendBuild,
@@ -29,15 +29,6 @@ $env:NEXT_PUBLIC_FRONTEND_URL = $FrontendUrl
 Write-Host "Using Backend Swagger URL (reference): $BackendDocsUrl" -ForegroundColor Cyan
 $env:NEXT_PUBLIC_BACKEND_DOCS_URL = $BackendDocsUrl
 
-# Supabase + feature flags — kept in sync with frontend/.env.local
-$env:NEXT_PUBLIC_SUPABASE_URL                = "http://52.249.220.12:8004"
-$env:NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY    = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJhbm9uIiwKICAgICJpc3MiOiAic3VwYWJhc2UtZGVtbyIsCiAgICAiaWF0IjogMTY0MTc2OTIwMCwKICAgICJleHAiOiAxNzk5NTM1NjAwCn0.dc_X5iR_VP_qT0zsiyj_I_OZ2T9FtRU2BBNWN8Bu4GE"
-$env:NEXT_PUBLIC_ENABLE_GLOBAL_REALTIME      = "true"
-$env:NEXT_PUBLIC_LOG_LEVEL                   = "info"
-$env:NEXT_PUBLIC_AUTH_ENABLE_SSO             = "false"
-$env:NEXT_PUBLIC_AUTH_SSO_PROVIDERS          = "google,github,azure"
-$env:NEXT_PUBLIC_AUTH_ENABLE_MFA             = "false"
-
 # Prevent file-lock issues during repackaging (app.asar is inside the exe folder).
 # If the process isn't running, `taskkill` writes an error; ignore it so the script keeps going.
 $oldEap = $ErrorActionPreference
@@ -51,19 +42,11 @@ if (-not $SkipFrontendBuild) {
   if (-not $SkipInstall) {
     npm install
   }
-  # NEXT_STANDALONE=1 enables output:"standalone" on Windows (required for Electron packaging).
-  $env:NEXT_STANDALONE = "1"
   npm run build
-  Remove-Item Env:\NEXT_STANDALONE -ErrorAction SilentlyContinue
   Pop-Location
 } else {
   Write-Host "SkipFrontendBuild enabled: not rebuilding frontend." -ForegroundColor Yellow
 }
-
-# Electron main process does not read NEXT_PUBLIC_*; it uses ELECTRON_API_BASE_URL (see electron/.env).
-$electronEnvPath = Join-Path $electronDir ".env"
-Set-Content -Path $electronEnvPath -Value "ELECTRON_API_BASE_URL=$ApiUrl" -Encoding utf8
-Write-Host "Wrote Electron main $electronEnvPath (ELECTRON_API_BASE_URL=$ApiUrl)" -ForegroundColor Cyan
 
 Write-Host "Building and packaging Electron..." -ForegroundColor Yellow
 Push-Location $electronDir
@@ -183,12 +166,6 @@ Set-Content -Path $batPath -Value $batContent -Encoding ascii
 
 $zipPath = $null
 if (-not $SkipZip) {
-  # Kill any running instance before zipping to avoid file-lock errors.
-  $oldEap2 = $ErrorActionPreference
-  $ErrorActionPreference = "SilentlyContinue"
-  taskkill /IM "Fideon OS.exe" /F | Out-Null
-  $ErrorActionPreference = $oldEap2
-
   $timestamp = Get-Date -Format "yyyyMMdd-HHmm"
   $safeLabel = ($PackageLabel -replace "[^a-zA-Z0-9_-]", "_")
   $zipName = "FideonOS-$safeLabel-$timestamp.zip"
@@ -196,20 +173,7 @@ if (-not $SkipZip) {
   if (Test-Path $zipPath) {
     Remove-Item -Path $zipPath -Force
   }
-
-  # Use tar.exe (built into Windows 10+) which uses read-sharing and works even
-  # when Windows Defender is scanning newly copied files (Compress-Archive does not).
-  $tarExe = "$env:SystemRoot\System32\tar.exe"
-  if (Test-Path $tarExe) {
-    Write-Host "Creating ZIP with tar.exe..." -ForegroundColor Yellow
-    & $tarExe -a -c -f $zipPath -C $shareDir .
-    if ($LASTEXITCODE -ne 0) {
-      Write-Host "tar.exe failed (exit $LASTEXITCODE), falling back to Compress-Archive." -ForegroundColor Yellow
-      Compress-Archive -Path (Join-Path $shareDir "*") -DestinationPath $zipPath -Force
-    }
-  } else {
-    Compress-Archive -Path (Join-Path $shareDir "*") -DestinationPath $zipPath -Force
-  }
+  Compress-Archive -Path (Join-Path $shareDir "*") -DestinationPath $zipPath -Force
 }
 
 Write-Host ""

@@ -37,20 +37,10 @@ async function getStore(): Promise<any> {
   return storePromise;
 }
 
-/**
- * Base URL for device register/heartbeat from the Electron **main** process.
- * Must match `NEXT_PUBLIC_API_URL` / `frontend` `getApiBaseUrl()` for local dev (default 8080).
- * Override with `ELECTRON_API_BASE_URL` or `electron/.env` (packaged: `resources/.env`).
- */
-export const DEFAULT_ELECTRON_API_BASE_URL = "http://127.0.0.1:8080";
-
-export function getElectronApiBaseUrl(): string {
-  const raw = process.env.ELECTRON_API_BASE_URL || DEFAULT_ELECTRON_API_BASE_URL;
-  return raw.replace(/\/+$/, "");
-}
-
 function apiBaseUrl(): string {
-  return getElectronApiBaseUrl();
+  // In dev, backend runs at 8000 (frontend electron:dev starts it).
+  const raw = process.env.ELECTRON_API_BASE_URL || "http://localhost:8000";
+  return raw.replace(/\/+$/, "");
 }
 
 function deviceLabel(): string {
@@ -93,23 +83,7 @@ export async function ensureDeviceAuthAsync(opts?: { log?: (msg: string) => void
   const existingJwt = await getStoredDeviceJwtAsync();
   const existingId = await getStoredDeviceIdAsync();
   if (existingJwt && existingId) {
-    try {
-      await heartbeat(existingJwt);
-      return { device_id: existingId, device_jwt: existingJwt };
-    } catch (e) {
-      const status =
-        e && typeof e === "object" && "httpStatus" in e ? (e as { httpStatus?: number }).httpStatus : undefined;
-      if (status === 401 || status === 403) {
-        opts?.log?.(
-          `[device] stored JWT rejected (${status}), clearing and re-registering... base=${apiBaseUrl()}`,
-        );
-        store.delete?.("device_jwt");
-        store.delete?.("device_id");
-        store.delete?.("registered_at");
-      } else {
-        throw e;
-      }
-    }
+    return { device_id: existingId, device_jwt: existingJwt };
   }
 
   opts?.log?.(`[device] ensureDeviceAuthAsync registering... base=${apiBaseUrl()}`);
@@ -155,9 +129,7 @@ async function heartbeat(deviceJwt: string): Promise<void> {
     const payload = await res.json().catch(() => ({}));
     const p: any = payload;
     const msg = p?.error || p?.detail || JSON.stringify(payload) || `HTTP ${res.status}`;
-    const err = new Error(`Heartbeat failed: ${msg}`) as Error & { httpStatus?: number };
-    err.httpStatus = res.status;
-    throw err;
+    throw new Error(`Heartbeat failed: ${msg}`);
   }
 }
 

@@ -28,9 +28,6 @@ from app.core.supabase import (
 log = structlog.get_logger("device")
 router = APIRouter()
 DEVICE_TOKEN_REQUIRED_DETAIL = "Device token is required"
-DEVICE_DEACTIVATED_DETAIL = (
-    "Device is deactivated — an admin must re-enable it before it can register, link, or sync."
-)
 UTC_OFFSET_SUFFIX = "+00:00"
 
 
@@ -235,8 +232,6 @@ async def _upsert_device_for_registration(
     )
     if existing:
         device = existing[0]
-        if not device.get("is_active", False):
-            raise HTTPException(status_code=403, detail=DEVICE_DEACTIVATED_DETAIL)
         await postgrest_patch(
             "devices",
             f"id=eq.{quote(device['id'], safe='')}",
@@ -541,7 +536,7 @@ async def revoke_device(
         raise HTTPException(status_code=404, detail="Device not found")
     target = rows[0]
 
-    if requester_role != "global_admin":
+    if requester_role in {"admin", "global_admin"}:
         if not requester_tenant_id:
             raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
         target_tenant_id = target.get("tenant_id")
@@ -566,52 +561,6 @@ async def revoke_device(
     )
     log.info("device.revoked", device_id=device_id)
     return {"success": True, "device_id": device_id, "revoked_at": now.isoformat()}
-
-
-@router.post("/api/v1/devices/{device_id}/enable")
-async def enable_device(
-    device_id: str = Path(...),
-    authorization: Optional[str] = Header(default=None),
-):
-    """
-    Admin endpoint: mark a device active again so it can use device JWT APIs after re-registration.
-
-    Does not clear jwt_issued_after; existing device JWTs remain invalid until the device
-    calls POST /api/v1/devices/register again (new JWT).
-    """
-    await verify_admin(authorization)
-    requester_context = await get_user_context(authorization)
-    requester_role = requester_context.get("role")
-    requester_tenant_id = requester_context.get("tenant_id")
-
-    rows = await postgrest_get(
-        "devices",
-        f"select=id,tenant_id,registered_by&id=eq.{quote(device_id, safe='')}&limit=1",
-    )
-    if not rows:
-        raise HTTPException(status_code=404, detail="Device not found")
-    target = rows[0]
-
-    if requester_role != "global_admin":
-        if not requester_tenant_id:
-            raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
-        target_tenant_id = target.get("tenant_id")
-        if not target_tenant_id and target.get("registered_by"):
-            owner_rows = await postgrest_get(
-                "app_users",
-                f"select=tenant_id&user_id=eq.{quote(str(target['registered_by']), safe='')}&limit=1",
-            )
-            target_tenant_id = owner_rows[0].get("tenant_id") if owner_rows else None
-        if target_tenant_id != requester_tenant_id:
-            raise HTTPException(status_code=403, detail="Cross-tenant device access denied")
-
-    await postgrest_patch(
-        "devices",
-        f"id=eq.{quote(device_id, safe='')}",
-        {"is_active": True},
-    )
-    log.info("device.enabled", device_id=device_id)
-    return {"success": True, "device_id": device_id}
 
 
 @router.post("/api/v1/devices/link")
@@ -642,14 +591,11 @@ async def link_device_v1(request: Request, authorization: Optional[str] = Header
 
     rows = await postgrest_get(
         "devices",
-        f"select=id,tenant_id,registered_by,metadata,is_active&id=eq.{quote(device_id, safe='')}&limit=1",
+        f"select=id,tenant_id,registered_by,metadata&id=eq.{quote(device_id, safe='')}&limit=1",
     )
     if not rows:
         raise HTTPException(status_code=404, detail="Device not found")
     target = rows[0]
-
-    if not target.get("is_active", False):
-        raise HTTPException(status_code=403, detail=DEVICE_DEACTIVATED_DETAIL)
 
     target_tenant_id = target.get("tenant_id")
     if requester_role != "global_admin":
@@ -761,17 +707,6 @@ async def get_device_admin(device_id: str = Path(...), authorization: Optional[s
     if not device_rows:
         raise HTTPException(status_code=404, detail="Device not found")
     device = device_rows[0]
-
-    uid = device.get("registered_by")
-    if uid:
-        users = await postgrest_get(
-            "app_users",
-            f"select=user_id,email,full_name&user_id=eq.{quote(str(uid), safe='')}&limit=1",
-        )
-        if users:
-            u = users[0]
-            device["registered_by_email"] = u.get("email")
-            device["registered_by_name"] = u.get("full_name")
 
     if requester_role != "global_admin" and requester_tenant_id:
         if str(device.get("tenant_id") or "") != str(requester_tenant_id):

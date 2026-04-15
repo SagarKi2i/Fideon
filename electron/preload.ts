@@ -43,8 +43,6 @@ contextBridge.exposeInMainWorld("electron", {
     getAuth: () => ipcRenderer.invoke("device:getAuth"),
     clearAuth: () => ipcRenderer.invoke("device:clearAuth"),
     ensureAuth: () => ipcRenderer.invoke("device:ensureAuth"),
-    /** Hostname (os.hostname) + stable hardware id (node-machine-id) — main process only. */
-    getDeviceInfo: () => ipcRenderer.invoke("device:getDeviceInfo"),
   },
 
   model: {
