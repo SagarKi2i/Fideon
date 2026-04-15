@@ -82,8 +82,22 @@ export async function ensureDeviceAuthAsync(opts?: { log?: (msg: string) => void
   const store = await getStore();
   const existingJwt = await getStoredDeviceJwtAsync();
   const existingId = await getStoredDeviceIdAsync();
+
+  // Validate stored JWT against the backend before trusting it
   if (existingJwt && existingId) {
-    return { device_id: existingId, device_jwt: existingJwt };
+    try {
+      const res = await fetch(`${apiBaseUrl()}/api/v1/adapter/latest?domain=_ping`, {
+        headers: { Authorization: `Bearer ${existingJwt}` },
+      });
+      // 401 = invalid/expired JWT → re-register; any other response = JWT is valid
+      if (res.status !== 401) {
+        return { device_id: existingId, device_jwt: existingJwt };
+      }
+      opts?.log?.("[device] stored JWT rejected by backend — re-registering");
+    } catch {
+      // Network error — return stored JWT optimistically
+      return { device_id: existingId, device_jwt: existingJwt };
+    }
   }
 
   opts?.log?.(`[device] ensureDeviceAuthAsync registering... base=${apiBaseUrl()}`);

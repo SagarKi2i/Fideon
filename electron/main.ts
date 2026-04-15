@@ -498,13 +498,8 @@ ipcMain.handle("settings:setAutoLaunch", async (_event, enabled: boolean) => {
 // IPC: model update check (canary-gated via backend)
 ipcMain.handle("model:checkUpdate", async (_event, domain: string) => {
   try {
-    const [deviceId, deviceJwt] = await Promise.all([
-      getStoredDeviceIdAsync(),
-      getStoredDeviceJwtAsync(),
-    ]);
-    if (!deviceId || !deviceJwt) {
-      return { success: false, error: "Device not registered" };
-    }
+    const auth = await ensureDeviceAuthAsync({ log });
+    const { device_id: deviceId, device_jwt: deviceJwt } = auth;
     const apiBase = process.env.ELECTRON_API_BASE_URL?.replace(/\/+$/, "") ?? "http://localhost:8000";
     const result = await checkForModelUpdate({ domain, deviceId, deviceJwt, apiBase });
     return { success: true, ...result };
