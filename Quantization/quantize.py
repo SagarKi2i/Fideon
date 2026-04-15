@@ -26,7 +26,8 @@ def sha256_file(filepath: str) -> str:
 def sign_file(filepath: str):
     """Create GPG detached signature. Requires GPG key imported on node."""
     subprocess.run(
-        ["gpg", "--batch", "--yes", "--detach-sign", filepath],
+        ["gpg", "--batch", "--yes", "--pinentry-mode", "loopback",
+         "--passphrase", "", "--detach-sign", filepath],
         check=True,
     )
 
