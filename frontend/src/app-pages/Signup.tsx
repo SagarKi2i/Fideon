@@ -9,10 +9,10 @@ import { Input } from "@/components/ui/input";
 import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { CheckCircle2, ChevronLeft, ChevronRight, Cpu, MonitorSmartphone, Shield, Sparkles, User } from "lucide-react";
+import { CheckCircle2, ChevronLeft, ChevronRight, Cpu, MonitorSmartphone, Sparkles, User } from "lucide-react";
 import { apiUrl } from "@/lib/apiBaseUrl";
 
-type WizardStep = 0 | 1 | 2 | 3;
+type WizardStep = 0 | 1 | 2;
 type AppRole = Database["public"]["Enums"]["app_role"];
 type DeviceType = "desktop" | "laptop" | "mobile" | "tablet" | "other";
 type NavigatorWithUserAgentData = Navigator & { userAgentData?: { platform?: string } };
@@ -94,9 +94,8 @@ const PLANS = [
 
 const STEP_META = [
   { index: 0, label: "Account" },
-  { index: 1, label: "Plan" },
-  { index: 2, label: "Agent Packs" },
-  { index: 3, label: "Device" },
+  { index: 1, label: "Agent Packs" },
+  { index: 2, label: "Device" },
 ] as const;
 
 const AGENT_PACKS = [
@@ -362,17 +361,13 @@ export default function Signup() {
     }
     if (step === 1) {
       if (checkingTenant) return false;
-      return !!selectedPlan;
-    }
-    if (step === 2) {
-      if (checkingTenant) return false;
       if (selectedPacks.length === 0) return false;
       const activePlan = PLANS.find((p: any) => p.id === selectedPlan);
       const maxPacks = tenantConfig ? (tenantConfig.max_agent_packs ?? null) : (activePlan?.maxPacks ?? null);
       if (maxPacks !== null && selectedPacks.length > maxPacks) return false;
       return true;
     }
-    if (step === 3) {
+    if (step === 2) {
       return !!deviceName.trim();
     }
     return true;
@@ -495,7 +490,7 @@ export default function Signup() {
       return;
     }
     setStep0Errors({});
-    setStep((s) => (s < 3 ? ((s + 1) as WizardStep) : s));
+    setStep((s) => (s < 2 ? ((s + 1) as WizardStep) : s));
   };
 
   const prevStep = () => {
@@ -629,6 +624,7 @@ export default function Signup() {
 
       // GoTrue / DB trigger failures propagate as code `P0001` with messages like:
       //   FIDEON_OS_LIMIT:PACKS Agent pack limit reached (2/1). Upgrade plan to add more packs.
+      //   FIDEON_OS_LIMIT:SEATS Seat limit reached (5/5). Upgrade your plan to add more users.
       if (
         errCode === "p0001"
         && (rawMessage.includes("pack limit reached") || rawMessage.includes("fideon_os_limit:packs"))
@@ -640,6 +636,12 @@ export default function Signup() {
         } else {
           friendlyMessage = `Pack limit reached for this tenant. Please select up to ${tenantConfig?.remaining_pack_slots} more pack(s).`;
         }
+      }
+      if (
+        errCode === "p0001"
+        && (rawMessage.includes("seat limit reached") || rawMessage.includes("fideon_os_limit:seats"))
+      ) {
+        friendlyMessage = "This tenant has reached its user seat limit. Contact your administrator to upgrade the plan.";
       }
       toast({
         title: "Onboarding failed",
@@ -938,108 +940,7 @@ export default function Signup() {
             </div>
           </div>
         );
-      case 1:
-        return (
-          <div className="space-y-6">
-            <div>
-              <h2 className="text-2xl font-semibold flex items-center gap-2">
-                <Shield className="h-5 w-5 text-primary" />
-                Choose a Plan
-              </h2>
-              <p className="text-sm text-muted-foreground">
-                {tenantConfig
-                  ? "This tenant already exists. Plan is locked to the global admin selection."
-                  : "You can change plans later as you scale."}
-              </p>
-            </div>
-            <div className="grid gap-4 md:grid-cols-3">
-              {PLANS.map((plan: any) => (
-                <button
-                  key={plan.id}
-                  type="button"
-                  onClick={() => {
-                    if (tenantConfig) return;
-                    setSelectedPlan(plan.id);
-                    setWorkflowAddonSlots(0);
-                    setSelectedPacks([]);
-                  }}
-                  disabled={Boolean(tenantConfig)}
-                  className={`rounded-xl border p-4 text-left transition h-full ${
-                    selectedPlan === plan.id
-                      ? "border-primary bg-primary/5 shadow-sm"
-                      : tenantConfig
-                      ? "border-border opacity-50 cursor-not-allowed"
-                      : "border-border hover:border-primary/40"
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-1">
-                    <h3 className="font-semibold">{plan.name}</h3>
-                    {selectedPlan === plan.id && (
-                      <Badge className="text-[10px]">Selected</Badge>
-                    )}
-                  </div>
-                  <p className="text-xs font-medium text-primary mb-1">{plan.price}</p>
-                  <p className="text-xs text-muted-foreground mb-3">
-                    {plan.description}
-                  </p>
-                  <ul className="space-y-1 text-xs text-muted-foreground">
-                    {plan.features.map((f: any) => (
-                      <li key={f} className="flex items-center gap-1.5">
-                        <CheckCircle2 className="h-3 w-3 text-primary" />
-                        <span>{f}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </button>
-              ))}
-            </div>
-
-            {/* Workflow Slots Configuration */}
-            {(() => {
-              const activePlan = PLANS.find((p: any) => p.id === selectedPlan);
-              if (!activePlan) return null;
-              return (
-                <div className="rounded-xl border p-4 space-y-3">
-                  <div>
-                    <h3 className="font-semibold text-sm">Workflow Slots</h3>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      {activePlan.includedSlots === null
-                        ? "Unlimited workflow slots included with Enterprise."
-                        : `${activePlan.includedSlots} slots included with ${activePlan.name}.`}
-                      {activePlan.maxAddonSlots > 0 && " Add up to 5 extra slots at $5,000–$6,000 each."}
-                    </p>
-                  </div>
-                  {activePlan.maxAddonSlots > 0 ? (
-                    <div className="flex items-center gap-3">
-                      <label htmlFor="addon-slots" className="text-xs font-medium whitespace-nowrap">
-                        Additional slots (0–{activePlan.maxAddonSlots}):
-                      </label>
-                      <input
-                        id="addon-slots"
-                        type="number"
-                        min={0}
-                        max={activePlan.maxAddonSlots}
-                        value={workflowAddonSlots}
-                        onChange={(e) =>
-                          setWorkflowAddonSlots(
-                            Math.min(activePlan.maxAddonSlots, Math.max(0, Number(e.target.value)))
-                          )
-                        }
-                        className="w-20 rounded-md border border-input bg-background px-3 py-1.5 text-sm"
-                      />
-                      <span className="text-xs text-muted-foreground">
-                        Total: {activePlan.includedSlots! + workflowAddonSlots} slots
-                      </span>
-                    </div>
-                  ) : (
-                    <p className="text-xs text-primary font-medium">No additional slots needed — unlimited included.</p>
-                  )}
-                </div>
-              );
-            })()}
-          </div>
-        );
-      case 2: {
+      case 1: {
         const activePlan = PLANS.find((p: any) => p.id === selectedPlan);
         const maxPacks   = tenantConfig ? (tenantConfig.max_agent_packs ?? null) : (activePlan?.maxPacks ?? null);
         const maxModels  = activePlan?.maxModels ?? null;
@@ -1128,7 +1029,7 @@ export default function Signup() {
           </div>
         );
       }
-      case 3:
+      case 2:
         return (
           <div className="space-y-6">
             <div>
@@ -1249,11 +1150,11 @@ export default function Signup() {
                 Tenant Onboarding Wizard
               </CardTitle>
               <CardDescription className="text-xs md:text-sm">
-                Sign-up to first model and device, in four guided steps.
+                Sign-up to first model and device, in three guided steps.
               </CardDescription>
             </div>
             <Badge variant="outline" className="hidden md:inline-flex text-[11px]">
-              4-step onboarding
+              3-step onboarding
             </Badge>
           </div>
           <div className="flex items-center gap-2 mt-2">
@@ -1277,7 +1178,7 @@ export default function Signup() {
                   <div className="hidden md:block text-[11px] text-muted-foreground">
                     {stepItem.label}
                   </div>
-                  {i < 3 && (
+                  {i < 2 && (
                     <div className="flex-1 h-[1px] bg-border/60" />
                   )}
                 </div>
@@ -1300,7 +1201,7 @@ export default function Signup() {
               Back
             </Button>
             <div className="flex items-center gap-2">
-              {step < 3 ? (
+              {step < 2 ? (
                 <div className="flex flex-col items-end gap-1">
                   <Button
                     type="button"

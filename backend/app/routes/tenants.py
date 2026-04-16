@@ -264,13 +264,14 @@ def _extract_tenant_input_fields(body: dict) -> tuple[str, str, str, str, str, s
     )
 
 
-def _plan_limits(plan: str, workflow_addon_slots: int) -> tuple[Optional[int], Optional[int], int]:
+def _plan_limits(plan: str, workflow_addon_slots: int) -> tuple[Optional[int], Optional[int], Optional[int], int]:
+    """Return (max_agent_packs, max_active_models, max_users, addon_slots). None = unlimited."""
     addon = max(0, min(5, int(workflow_addon_slots)))
     if plan == "enterprise":
-        return None, None, addon
+        return None, None, None, addon
     if plan == "professional":
-        return 3, 8, addon
-    return 1, 3, addon
+        return 3, 8, 25, addon
+    return 1, 3, 5, addon  # starter (default for all unrecognised plans)
 
 
 def _validate_tenant_input(
@@ -310,7 +311,7 @@ def _validate_tenant_input(
                 + ", ".join(invalid_packs)
             ),
         )
-    max_agent_packs, _, _ = _plan_limits(plan, workflow_addon_slots)
+    max_agent_packs, _, _, _ = _plan_limits(plan, workflow_addon_slots)
     if max_agent_packs is not None and len(agent_packs) > max_agent_packs:
         raise HTTPException(
             status_code=400,
@@ -403,7 +404,7 @@ async def _create_tenant_row_or_raise(
     workflow_addon_slots: int,
     tenant_metadata: dict,
 ) -> dict:
-    max_agent_packs, max_active_models, addon = _plan_limits(plan, workflow_addon_slots)
+    max_agent_packs, max_active_models, max_users, addon = _plan_limits(plan, workflow_addon_slots)
     workflow_slots_total = None if plan == "enterprise" else (15 + addon if plan == "professional" else 3 + addon)
     try:
         rows = await postgrest_insert(
@@ -419,6 +420,7 @@ async def _create_tenant_row_or_raise(
                 "workflow_slots_total": workflow_slots_total,
                 "max_agent_packs": max_agent_packs,
                 "max_active_models": max_active_models,
+                "max_users": max_users,
                 "metadata": tenant_metadata,
             },
         )
@@ -441,7 +443,7 @@ async def _create_admin_auth_user_or_rollback(
     agent_packs: list[str],
     workflow_addon_slots: int,
 ) -> dict:
-    max_agent_packs, max_active_models, addon = _plan_limits(plan, workflow_addon_slots)
+    max_agent_packs, max_active_models, max_users, addon = _plan_limits(plan, workflow_addon_slots)
     async with httpx.AsyncClient(timeout=30) as client:
         auth_resp = await client.post(
             f"{SUPABASE_URL}/auth/v1/admin/users",

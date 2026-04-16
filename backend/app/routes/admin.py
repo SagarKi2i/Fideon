@@ -189,11 +189,30 @@ async def _finalize_user_creation(
 
             tenants = await postgrest_get(
                 "tenants",
-                f"select=id,name,plan,agent_packs,workflow_addon_slots&is_active=eq.true&id=eq.{quote(tenant_id_str, safe='')}&limit=1",
+                f"select=id,name,plan,agent_packs,workflow_addon_slots,max_users&is_active=eq.true&id=eq.{quote(tenant_id_str, safe='')}&limit=1",
             )
             tenant_row = tenants[0] if tenants else {}
             tenant_name = tenant_row.get("name")
             tenant_plan = tenant_row.get("plan")
+
+            # ── Seat limit pre-flight check ───────────────────────────────────
+            # Enforce BEFORE creating the auth user so a rejected seat never
+            # leaves an orphaned auth.users record.
+            tenant_max_users = tenant_row.get("max_users")  # None = unlimited
+            if tenant_max_users is not None:
+                seat_count_rows = await postgrest_get(
+                    "app_users",
+                    f"select=user_id&tenant_id=eq.{quote(tenant_id_str, safe='')}&status=neq.deleted",
+                )
+                current_seat_count = len(seat_count_rows or [])
+                if current_seat_count >= int(tenant_max_users):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Seat limit reached ({current_seat_count}/{tenant_max_users}). "
+                            "Upgrade your plan to add more users."
+                        ),
+                    )
 
             # Device template:
             # Prefer a device owned by the requester in this tenant; otherwise any device in the tenant.
@@ -249,6 +268,9 @@ async def _finalize_user_creation(
                 "device_name": device_name,
                 "device_profile": device_profile,
             }
+        except HTTPException:
+            # Seat limit and other explicit rejections must propagate.
+            raise
         except Exception:
             # If onboarding metadata resolution fails, still create the user.
             onboarding_metadata = {}
