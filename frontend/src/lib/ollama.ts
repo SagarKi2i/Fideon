@@ -158,10 +158,16 @@ declare global {
         >;
       };
       webhooks?: {
-        getReceiver: () => Promise<{ success: boolean; url?: string; error?: string }>;
-        setSigningSecret: (secret: string) => Promise<{ success: boolean; error?: string }>;
-        onEvent: (callback: (evt: any) => void) => void;
-        removeEventListener: () => void;
+        // Outbound webhook CRUD via backend (used by Settings UI in Electron).
+        list?: (accessToken: string) => Promise<{ success: boolean; webhooks?: any[]; payload?: any; status?: number; error?: string }>;
+        create?: (accessToken: string, input: { url: string; description?: string; events?: string[] }) => Promise<any>;
+        update?: (
+          accessToken: string,
+          id: string,
+          patch: Partial<{ url: string; description: string; events: string[]; is_active: boolean }>,
+        ) => Promise<{ success: boolean; payload?: any; status?: number; error?: string }>;
+        delete?: (accessToken: string, id: string) => Promise<{ success: boolean; payload?: any; status?: number; error?: string }>;
+        rotateSecret?: (accessToken: string, id: string) => Promise<any>;
       };
       model?: {
         checkUpdate: (domain: string) => Promise<{

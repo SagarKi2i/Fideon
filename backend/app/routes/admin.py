@@ -10,6 +10,7 @@ import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 
 from app.core.config import SUPABASE_URL
+from app.core.config import DEVICE_OFFLINE_AFTER_SECONDS
 from app.core.supabase import (
     admin_list_users,
     insert_audit_log,
@@ -657,7 +658,7 @@ async def admin_dashboard_stats(authorization: Optional[str] = Header(default=No
     # device rows in that tenant.
     device_rows = await postgrest_get(
         "devices",
-        f"select=id,status,registered_by,registered_at&tenant_id=eq.{tenant_id_q}",
+        f"select=id,status,registered_by,registered_at,last_seen_at&tenant_id=eq.{tenant_id_q}",
     )
     included_device_rows: list[dict] = []
     non_admin_user_id_set = set(non_admin_user_ids)
@@ -672,14 +673,28 @@ async def admin_dashboard_stats(authorization: Optional[str] = Header(default=No
     # Online/Offline cards = user-level status.
     user_has_online_device: set[str] = set()
     user_has_offline_device: set[str] = set()
+    cutoff = now - datetime.timedelta(seconds=float(DEVICE_OFFLINE_AFTER_SECONDS))
     for d in included_device_rows:
         uid = d.get("registered_by")
         if uid is None:
             continue
         uid_str = str(uid)
-        if d.get("status") == "online":
+        status = str(d.get("status") or "").lower()
+        last_seen_raw = d.get("last_seen_at")
+        last_seen_dt: Optional[datetime.datetime] = None
+        if isinstance(last_seen_raw, str) and last_seen_raw:
+            try:
+                last_seen_dt = datetime.datetime.fromisoformat(last_seen_raw.replace("Z", "+00:00")).astimezone(
+                    datetime.timezone.utc
+                )
+            except Exception:
+                last_seen_dt = None
+
+        # Normalize "online" to "offline" if stale.
+        is_stale = bool(last_seen_dt and last_seen_dt < cutoff)
+        if status == "online" and not is_stale:
             user_has_online_device.add(uid_str)
-        if d.get("status") == "offline":
+        elif status in {"offline", "online"} and (status == "offline" or is_stale):
             user_has_offline_device.add(uid_str)
 
     online_devices = len(user_has_online_device)
