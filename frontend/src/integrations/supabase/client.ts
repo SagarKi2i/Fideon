@@ -27,12 +27,21 @@ const authLockNoOp: <R>(name: string, acquireTimeout: number, fn: () => Promise<
   fn,
 
 ) => fn();
- 
+
+// Packaged Electron runs a production Next bundle (NODE_ENV=production). Supabase then uses
+// navigator.locks by default, which can stall auth behind Azure APIM (token request stays pending).
+// `npm start` often loads the Next dev server instead, which disables locks — hence "works in dev".
+const isElectronRenderer =
+  (typeof navigator !== "undefined" && /\bElectron\b/i.test(navigator.userAgent)) ||
+  (typeof window !== "undefined" && typeof window.electron !== "undefined");
+
 const disableWebLocks =
 
   process.env.NODE_ENV === "development" ||
 
-  process.env.NEXT_PUBLIC_SUPABASE_AUTH_NO_WEB_LOCKS === "true";
+  process.env.NEXT_PUBLIC_SUPABASE_AUTH_NO_WEB_LOCKS === "true" ||
+
+  isElectronRenderer;
  
 // Import the supabase client like this:
 

@@ -152,6 +152,10 @@ declare global {
         getAuth?: () => Promise<{ success: boolean; device_id: string | null; device_jwt: string | null; error?: string }>;
         clearAuth?: () => Promise<{ success: boolean; error?: string }>;
         ensureAuth?: () => Promise<{ success: boolean; device_id?: string | null; device_jwt?: string | null; error?: string }>;
+        getDeviceInfo?: () => Promise<
+          | { success: true; machineName: string; machineId: string; platform: string }
+          | { success: false; error?: string }
+        >;
       };
       webhooks?: {
         getReceiver: () => Promise<{ success: boolean; url?: string; error?: string }>;

@@ -18,6 +18,8 @@ import { promisify } from "node:util";
 import { app } from "electron";
 
 const execFileAsync = promisify(execFile);
+const OLLAMA_BIN = (process.env.OLLAMA_BIN || "ollama").trim() || "ollama";
+const OLLAMA_BASE_URL = (process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434").trim();
 
 export interface UpdateCheckResult {
   available: boolean;
@@ -161,6 +163,20 @@ async function verifyGpgSig(filePath: string, sigPath: string): Promise<boolean>
   }
 }
 
+async function requireOllamaRunning(): Promise<void> {
+  try {
+    const res = await fetch(`${OLLAMA_BASE_URL.replace(/\/+$/, "")}/api/tags`, { method: "GET" });
+    if (res.ok) return;
+    // If Ollama responds but not OK, surface a concise hint.
+    throw new Error(`Ollama not ready (HTTP ${res.status}) at ${OLLAMA_BASE_URL}`);
+  } catch (err: any) {
+    // Network error / refused: most common on dev machines.
+    throw new Error(
+      `Ollama is not running at ${OLLAMA_BASE_URL}. Start Ollama and try again.`,
+    );
+  }
+}
+
 // ── Public API ───────────────────────────────────────────────────────────────
 
 /**
@@ -289,11 +305,20 @@ export async function downloadAndInstall(opts: {
   // ── Step 7: Import into Ollama ───────────────────────────────────────────
   onProgress({ phase: "installing", detail: `Running ollama create ${modelName}...` });
 
+  // Ensure the local Ollama server is up before running the CLI import.
+  await requireOllamaRunning();
+
   fs.writeFileSync(modelfilePath, `FROM ${ggufPath}\n`, "utf8");
 
   try {
-    await execFileAsync("ollama", ["create", modelName, "-f", modelfilePath]);
+    await execFileAsync(OLLAMA_BIN, ["create", modelName, "-f", modelfilePath]);
   } catch (err: any) {
+    if (err?.code === "ENOENT") {
+      throw new Error(
+        `ollama create failed: Ollama CLI not found.\n` +
+          `Install Ollama and ensure 'ollama' is in PATH, or set OLLAMA_BIN to the full path of ollama.exe.`,
+      );
+    }
     throw new Error(`ollama create failed: ${String(err.stderr || err.message)}`);
   }
 

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -22,8 +22,10 @@ import {
   getStoredDeviceJwt,
   setStoredDeviceJwt,
   clearStoredDeviceJwt,
+  sendDeviceHeartbeat,
   type DeviceModel,
 } from "@/lib/deviceApi";
+import { ApiRequestError } from "@/lib/httpErrors";
 import {
   checkOllamaStatus,
   listOllamaModels,
@@ -47,17 +49,85 @@ export default function DeviceSetup() {
   const [deviceJwt, setDeviceJwt] = useState("");
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const [manualDisconnected, setManualDisconnected] = useState(false);
+  /** From Electron main: os.hostname + node-machine-id (registration fingerprint). */
+  const [localMachine, setLocalMachine] = useState<{
+    machineName: string;
+    machineId: string;
+    platform: string;
+  } | null>(null);
+  const authLossToastShown = useRef(false);
+
+  const handleInvalidDeviceAuth = useCallback(
+    (message?: string) => {
+      clearStoredDeviceJwt();
+      setDeviceJwt("");
+      setDeviceId(null);
+      setIsConnected(false);
+      setAllocatedModels([]);
+      if (window.electron?.device?.clearAuth) {
+        void window.electron.device.clearAuth();
+      }
+      if (!authLossToastShown.current) {
+        authLossToastShown.current = true;
+        toast({
+          title: "Device no longer connected",
+          description:
+            message ||
+            "This device was disabled or its token was revoked. Ask an admin to re-enable it if needed, then use Refresh to register again.",
+          variant: "destructive",
+        });
+      }
+    },
+    [toast],
+  );
+
+  const verifyCloudSession = useCallback(
+    async (jwt: string): Promise<boolean> => {
+      try {
+        await sendDeviceHeartbeat(jwt);
+        authLossToastShown.current = false;
+        return true;
+      } catch (e) {
+        if (e instanceof ApiRequestError && e.isAuthError) {
+          handleInvalidDeviceAuth(e.message);
+          return false;
+        }
+        throw e;
+      }
+    },
+    [handleInvalidDeviceAuth],
+  );
 
   useEffect(() => {
     void checkElectron();
     const storedJwt = getStoredDeviceJwt();
     if (storedJwt) {
-      setDeviceJwt(storedJwt);
-      setIsConnected(true);
-      void loadDeviceModels(storedJwt);
+      void (async () => {
+        const ok = await verifyCloudSession(storedJwt);
+        if (ok) {
+          setDeviceJwt(storedJwt);
+          setIsConnected(true);
+          void loadDeviceModels(storedJwt);
+        }
+      })();
     }
     void checkOllama();
+    // Intentionally mount-only: avoid re-running Electron bootstrap when callbacks change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!isElectronApp || !window.electron?.device?.getDeviceInfo) return;
+    void window.electron.device.getDeviceInfo().then((res) => {
+      if (res?.success && "machineName" in res && "machineId" in res) {
+        setLocalMachine({
+          machineName: res.machineName,
+          machineId: res.machineId,
+          platform: res.platform ?? "",
+        });
+      }
+    });
+  }, [isElectronApp]);
 
   // Background heartbeat: every 60s, report device + local model status to cloud.
   useEffect(() => {
@@ -72,13 +142,17 @@ export default function DeviceSetup() {
           is_downloaded: isModelInstalled(model.ollama_model_name),
         }));
         await performDeviceCheckin(deviceJwt, localModelStatuses);
-      } catch {
-        // Best-effort heartbeat; errors are intentionally swallowed to avoid UI noise.
+      } catch (e) {
+        if (e instanceof ApiRequestError && e.isAuthError) {
+          handleInvalidDeviceAuth(e.message);
+          return;
+        }
+        // Transient errors: keep UI connected; next Refresh/Sync will surface if persistent.
       }
     }, 60000); // 60s
 
     return () => window.clearInterval(intervalId);
-  }, [isElectronApp, deviceJwt, isConnected, allocatedModels, localModels]);
+  }, [isElectronApp, deviceJwt, isConnected, allocatedModels, localModels, handleInvalidDeviceAuth]);
 
   const checkElectron = async () => {
     const result = await isElectron();
@@ -90,6 +164,8 @@ export default function DeviceSetup() {
         if (res?.success) {
           setDeviceId(res.device_id ?? null);
           if (res.device_jwt) {
+            const ok = await verifyCloudSession(res.device_jwt);
+            if (!ok) return;
             setStoredDeviceJwt(res.device_jwt);
             setDeviceJwt(res.device_jwt);
             setIsConnected(true);
@@ -122,6 +198,7 @@ export default function DeviceSetup() {
   const handleDisconnect = () => {
     clearStoredDeviceJwt();
     setDeviceJwt("");
+    setDeviceId(null);
     setIsConnected(false);
     setAllocatedModels([]);
     setManualDisconnected(true);
@@ -145,8 +222,11 @@ export default function DeviceSetup() {
       if (window.electron?.device?.ensureAuth) {
         try {
           setLoading(true);
+          toast({ title: "Refreshing…", description: "Registering/reconnecting this device." });
           const res = await window.electron.device.ensureAuth();
           if (res?.success && res.device_jwt) {
+            const ok = await verifyCloudSession(res.device_jwt);
+            if (!ok) return;
             setStoredDeviceJwt(res.device_jwt);
             setDeviceJwt(res.device_jwt);
             setIsConnected(true);
@@ -156,9 +236,14 @@ export default function DeviceSetup() {
             throw new Error(res?.error || "Could not register device");
           }
         } catch (e) {
+          const msg = e instanceof Error ? e.message : "Unknown error";
+          const hint =
+            typeof msg === "string" && msg.toLowerCase().includes("fetch failed")
+              ? " Check the backend is running and Electron main uses the same API port as the app (electron/.env ELECTRON_API_BASE_URL, default 127.0.0.1:8080)."
+              : "";
           toast({
             title: "Reconnect failed",
-            description: e instanceof Error ? e.message : "Unknown error",
+            description: msg + hint,
             variant: "destructive",
           });
         } finally {
@@ -171,6 +256,26 @@ export default function DeviceSetup() {
     }
     setLoading(true);
     try {
+      const ok = await verifyCloudSession(deviceJwt);
+      if (!ok) {
+        // Token was invalid/revoked. Auto re-register in Electron so Refresh is one-click recovery.
+        if (window.electron?.device?.ensureAuth) {
+          toast({ title: "Reconnecting…", description: "Device token was invalid. Re-registering now." });
+          const res = await window.electron.device.ensureAuth();
+          if (res?.success && res.device_jwt) {
+            const ok2 = await verifyCloudSession(res.device_jwt);
+            if (!ok2) return;
+            setStoredDeviceJwt(res.device_jwt);
+            setDeviceJwt(res.device_jwt);
+            setIsConnected(true);
+            if (res.device_id) setDeviceId(res.device_id);
+            await loadDeviceModels(res.device_jwt);
+          } else {
+            throw new Error(res?.error || "Could not re-register device");
+          }
+        }
+        return;
+      }
       await loadDeviceModels(deviceJwt);
       await checkOllama();
       toast({
@@ -178,11 +283,15 @@ export default function DeviceSetup() {
         description: "Models list updated",
       });
     } catch (error: any) {
-      toast({
-        title: "Error",
-        description: error.message,
-        variant: "destructive",
-      });
+      if (error instanceof ApiRequestError && error.isAuthError) {
+        handleInvalidDeviceAuth(error.message);
+      } else {
+        toast({
+          title: "Error",
+          description: error.message,
+          variant: "destructive",
+        });
+      }
     } finally {
       setLoading(false);
     }
@@ -205,11 +314,15 @@ export default function DeviceSetup() {
         description: "Device status synchronized with cloud",
       });
     } catch (error: any) {
-      toast({
-        title: "Sync Failed",
-        description: error.message,
-        variant: "destructive",
-      });
+      if (error instanceof ApiRequestError && error.isAuthError) {
+        handleInvalidDeviceAuth(error.message);
+      } else {
+        toast({
+          title: "Sync Failed",
+          description: error.message,
+          variant: "destructive",
+        });
+      }
     } finally {
       setLoading(false);
     }
@@ -308,8 +421,34 @@ export default function DeviceSetup() {
             Link this device to your tenant using your current login session.
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-2">
-          <Label>Device ID</Label>
+        <CardContent className="space-y-4">
+          {localMachine ? (
+            <div className="rounded-lg border border-border/60 bg-muted/30 p-3 space-y-2">
+              <p className="text-xs font-medium text-muted-foreground">This computer</p>
+              <div className="grid gap-2 text-sm">
+                <div className="grid grid-cols-1 sm:grid-cols-[8rem_1fr] gap-1 sm:gap-3">
+                  <span className="text-muted-foreground">Hostname</span>
+                  <span className="font-mono text-foreground break-all">{localMachine.machineName}</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-[8rem_1fr] gap-1 sm:gap-3">
+                  <span className="text-muted-foreground">Machine ID</span>
+                  <span className="font-mono text-xs break-all">{localMachine.machineId}</span>
+                </div>
+                {localMachine.platform ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-[8rem_1fr] gap-1 sm:gap-3">
+                    <span className="text-muted-foreground">Platform</span>
+                    <span className="font-mono">{localMachine.platform}</span>
+                  </div>
+                ) : null}
+              </div>
+              <p className="text-[11px] text-muted-foreground pt-1 border-t border-border/50">
+                Stable hardware-derived ID used for registration. This is not the same as the cloud device ID below.
+              </p>
+            </div>
+          ) : null}
+
+          <div className="space-y-2">
+          <Label>Cloud device ID</Label>
           <div className="flex flex-col sm:flex-row gap-2">
             <Input value={deviceId ?? "Not registered yet"} readOnly className="font-mono text-xs" />
             <Button
@@ -320,7 +459,7 @@ export default function DeviceSetup() {
                 if (!deviceId) return;
                 try {
                   await navigator.clipboard.writeText(deviceId);
-                  toast({ title: "Copied", description: "Device ID copied to clipboard." });
+                  toast({ title: "Copied", description: "Cloud device ID copied to clipboard." });
                 } catch {
                   toast({ title: "Copy failed", description: "Please copy manually.", variant: "destructive" });
                 }
@@ -332,7 +471,7 @@ export default function DeviceSetup() {
             <Button
               type="button"
               className="bg-gradient-primary"
-              disabled={!deviceId || loading}
+              disabled={!deviceId || loading || !isConnected}
               onClick={async () => {
                 if (!deviceId) return;
                 try {
@@ -342,7 +481,9 @@ export default function DeviceSetup() {
                 } catch (e) {
                   toast({
                     title: "Link failed",
-                    description: e instanceof Error ? e.message : "Unknown error",
+                    description:
+                      (e instanceof Error ? e.message : "Unknown error") +
+                      (!isConnected ? " (Register/reconnect this device first using Refresh.)" : ""),
                     variant: "destructive",
                   });
                 } finally {
@@ -356,6 +497,7 @@ export default function DeviceSetup() {
           <p className="text-xs text-muted-foreground">
             If this shows “Not registered yet”, click Refresh below to register/reconnect, then link.
           </p>
+          </div>
         </CardContent>
       </Card>
 
@@ -396,7 +538,12 @@ export default function DeviceSetup() {
                 <Button variant="outline" size="sm" onClick={handleSync} disabled={loading || !deviceJwt}>
                   Sync Status
                 </Button>
-                <Button variant="destructive" size="sm" onClick={handleDisconnect}>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={handleDisconnect}
+                  disabled={!deviceJwt}
+                >
                   Disconnect
                 </Button>
               </div>
