@@ -624,6 +624,7 @@ export default function Signup() {
 
       // GoTrue / DB trigger failures propagate as code `P0001` with messages like:
       //   FIDEON_OS_LIMIT:PACKS Agent pack limit reached (2/1). Upgrade plan to add more packs.
+      //   FIDEON_OS_LIMIT:SEATS Seat limit reached (5/5). Upgrade your plan to add more users.
       if (
         errCode === "p0001"
         && (rawMessage.includes("pack limit reached") || rawMessage.includes("fideon_os_limit:packs"))
@@ -635,6 +636,12 @@ export default function Signup() {
         } else {
           friendlyMessage = `Pack limit reached for this tenant. Please select up to ${tenantConfig?.remaining_pack_slots} more pack(s).`;
         }
+      }
+      if (
+        errCode === "p0001"
+        && (rawMessage.includes("seat limit reached") || rawMessage.includes("fideon_os_limit:seats"))
+      ) {
+        friendlyMessage = "This tenant has reached its user seat limit. Contact your administrator to upgrade the plan.";
       }
       toast({
         title: "Onboarding failed",
