@@ -47,6 +47,8 @@ router = APIRouter()
 log = structlog.get_logger("tenants")
 
 _VALID_PLANS = {"starter", "professional", "enterprise"}
+# Supported pack ids used across signup + marketplace pack-gating.
+_VALID_AGENT_PACKS = {"underwriting", "claims", "distribution", "compliance", "agentic-rag"}
 # Custom slug: lowercase, alphanumeric + hyphens, min 3 chars, no leading/trailing hyphen.
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9\-]+[a-z0-9]$")
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -231,15 +233,44 @@ def _extract_idempotency_key(
     return None
 
 
-def _extract_tenant_input_fields(body: dict) -> tuple[str, str, str, str, str, str, dict]:
+def _extract_tenant_input_fields(body: dict) -> tuple[str, str, str, str, str, str, list[str], int, dict]:
     name: str = (body.get("name") or "").strip()
     plan: str = (body.get("plan") or "starter").strip().lower()
     custom_slug: str = (body.get("slug") or "").strip().lower()
     admin_email: str = (body.get("admin_email") or "").strip().lower()
     admin_password: str = body.get("admin_password") or ""
     admin_full_name: str = (body.get("admin_full_name") or "").strip()
+    raw_packs = body.get("agent_packs") or []
+    if not isinstance(raw_packs, list):
+        raw_packs = []
+    # Normalize + de-duplicate while preserving insertion order.
+    agent_packs = list(dict.fromkeys(str(p).strip().lower() for p in raw_packs if str(p).strip()))
+    workflow_addon_slots_raw = body.get("workflow_addon_slots", 0)
+    try:
+        workflow_addon_slots = int(workflow_addon_slots_raw)
+    except (TypeError, ValueError):
+        workflow_addon_slots = 0
     extra_metadata = body.get("metadata") or {}
-    return name, plan, custom_slug, admin_email, admin_password, admin_full_name, extra_metadata
+    return (
+        name,
+        plan,
+        custom_slug,
+        admin_email,
+        admin_password,
+        admin_full_name,
+        agent_packs,
+        workflow_addon_slots,
+        extra_metadata,
+    )
+
+
+def _plan_limits(plan: str, workflow_addon_slots: int) -> tuple[Optional[int], Optional[int], int]:
+    addon = max(0, min(5, int(workflow_addon_slots)))
+    if plan == "enterprise":
+        return None, None, addon
+    if plan == "professional":
+        return 3, 8, addon
+    return 1, 3, addon
 
 
 def _validate_tenant_input(
@@ -247,6 +278,8 @@ def _validate_tenant_input(
     plan: str,
     admin_email: str,
     admin_password: str,
+    agent_packs: list[str],
+    workflow_addon_slots: int,
     extra_metadata: dict,
 ) -> None:
     if not name:
@@ -265,6 +298,26 @@ def _validate_tenant_input(
     if len(admin_password) < 8:
         raise HTTPException(
             status_code=400, detail="'admin_password' must be at least 8 characters"
+        )
+    if not isinstance(agent_packs, list):
+        raise HTTPException(status_code=400, detail="'agent_packs' must be an array")
+    invalid_packs = [p for p in agent_packs if p not in _VALID_AGENT_PACKS]
+    if invalid_packs:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "'agent_packs' contains invalid values: "
+                + ", ".join(invalid_packs)
+            ),
+        )
+    max_agent_packs, _, _ = _plan_limits(plan, workflow_addon_slots)
+    if max_agent_packs is not None and len(agent_packs) > max_agent_packs:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Plan '{plan}' allows up to {max_agent_packs} agent pack(s), "
+                f"but received {len(agent_packs)}"
+            ),
         )
     if not isinstance(extra_metadata, dict):
         raise HTTPException(status_code=400, detail="'metadata' must be an object")
@@ -342,7 +395,16 @@ async def _ensure_slug_available(slug: str) -> None:
         )
 
 
-async def _create_tenant_row_or_raise(slug: str, name: str, plan: str, tenant_metadata: dict) -> dict:
+async def _create_tenant_row_or_raise(
+    slug: str,
+    name: str,
+    plan: str,
+    agent_packs: list[str],
+    workflow_addon_slots: int,
+    tenant_metadata: dict,
+) -> dict:
+    max_agent_packs, max_active_models, addon = _plan_limits(plan, workflow_addon_slots)
+    workflow_slots_total = None if plan == "enterprise" else (15 + addon if plan == "professional" else 3 + addon)
     try:
         rows = await postgrest_insert(
             "tenants",
@@ -352,6 +414,11 @@ async def _create_tenant_row_or_raise(slug: str, name: str, plan: str, tenant_me
                 "is_active": True,
                 "plan": plan,
                 "tier": plan,
+                "agent_packs": agent_packs,
+                "workflow_addon_slots": addon,
+                "workflow_slots_total": workflow_slots_total,
+                "max_agent_packs": max_agent_packs,
+                "max_active_models": max_active_models,
                 "metadata": tenant_metadata,
             },
         )
@@ -371,7 +438,10 @@ async def _create_admin_auth_user_or_rollback(
     admin_password: str,
     admin_full_name: str,
     plan: str,
+    agent_packs: list[str],
+    workflow_addon_slots: int,
 ) -> dict:
+    max_agent_packs, max_active_models, addon = _plan_limits(plan, workflow_addon_slots)
     async with httpx.AsyncClient(timeout=30) as client:
         auth_resp = await client.post(
             f"{SUPABASE_URL}/auth/v1/admin/users",
@@ -384,7 +454,11 @@ async def _create_admin_auth_user_or_rollback(
                     "user_metadata": {
                         "full_name": admin_full_name or "",
                         "requested_role": "admin",
+                        "agent_packs": agent_packs,
                         "plan": plan,
+                        "workflow_addon_slots": addon,
+                        "max_agent_packs": max_agent_packs,
+                        "max_active_models": max_active_models,
                     },
                 }
             ),
@@ -421,8 +495,26 @@ async def create_tenant(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail="Request body must be valid JSON") from exc
 
-    name, plan, custom_slug, admin_email, admin_password, admin_full_name, extra_metadata = _extract_tenant_input_fields(body)
-    _validate_tenant_input(name, plan, admin_email, admin_password, extra_metadata)
+    (
+        name,
+        plan,
+        custom_slug,
+        admin_email,
+        admin_password,
+        admin_full_name,
+        agent_packs,
+        workflow_addon_slots,
+        extra_metadata,
+    ) = _extract_tenant_input_fields(body)
+    _validate_tenant_input(
+        name,
+        plan,
+        admin_email,
+        admin_password,
+        agent_packs,
+        workflow_addon_slots,
+        extra_metadata,
+    )
     idempotency_key = _extract_idempotency_key(x_idempotency_key, body, extra_metadata)
     replay = await _idempotent_replay_response_or_none(idempotency_key, requester_id)
     if replay:
@@ -437,12 +529,21 @@ async def create_tenant(
     # ── 1. Create tenant row ─────────────────────────────────────────────────
     tenant_metadata = {
         "plan": plan,
+        "agent_packs": agent_packs,
+        "workflow_addon_slots": workflow_addon_slots,
         "provisioned_by": requester_id,
         "provisioned_by_role": requester_role,
         "provisioning_idempotency_key": idempotency_key,
         **extra_metadata,
     }
-    tenant = await _create_tenant_row_or_raise(slug, name, plan, tenant_metadata)
+    tenant = await _create_tenant_row_or_raise(
+        slug,
+        name,
+        plan,
+        agent_packs,
+        workflow_addon_slots,
+        tenant_metadata,
+    )
     tenant_id: str = tenant["id"]
     admin_user_id: Optional[str] = None
 
@@ -451,7 +552,13 @@ async def create_tenant(
     # (handle_new_app_user) does NOT create a second tenant row.  We link the
     # user to the already-created tenant explicitly in step 3.
     auth_user = await _create_admin_auth_user_or_rollback(
-        tenant_id, admin_email, admin_password, admin_full_name, plan
+        tenant_id,
+        admin_email,
+        admin_password,
+        admin_full_name,
+        plan,
+        agent_packs,
+        workflow_addon_slots,
     )
     admin_user_id = auth_user["id"]
 
