@@ -11,6 +11,7 @@ from app.core.supabase import (
     postgrest_insert,
     postgrest_patch,
 )
+from app.core.ssrf_validator import SSRFBlockedError, async_validate_webhook_url
 from app.services.webhook_engine import encrypt_secret, generate_webhook_secret, hash_webhook_secret, emit_event
 
 router = APIRouter()
@@ -71,6 +72,11 @@ async def _create_webhook_impl(request: Request, authorization: Optional[str]):
     url = str(body.get("url") or "").strip()
     if not url or len(url) > 2048:
         raise HTTPException(status_code=400, detail="url is required (max 2048 chars)")
+    # SEC-01: HTTPS only. SEC-07: block RFC-1918 / loopback / link-local / IMDS.
+    try:
+        await async_validate_webhook_url(url)
+    except SSRFBlockedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     description = str(body.get("description") or "").strip()
     if len(description) > 240:
         raise HTTPException(status_code=400, detail="description must be 240 chars or fewer")
@@ -141,6 +147,10 @@ async def update_webhook(webhook_id: str, request: Request, authorization: Optio
         url = str(body.get("url") or "").strip()
         if not url or len(url) > 2048:
             raise HTTPException(status_code=400, detail="url is required (max 2048 chars)")
+        try:
+            validate_webhook_url(url)
+        except SSRFBlockedError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         patch["url"] = url
     if "description" in body:
         description = str(body.get("description") or "").strip()

@@ -4,43 +4,32 @@
 -- Run manually in Supabase SQL Editor (role: postgres) AFTER schema migrations.
 -- Do not place this file under supabase/migrations/ if you use build-all-migrations.ps1.
 --
--- Tenant seed: Audi — enterprise plan, tenant_admin role.
+-- Tenant seed: Ideas to Impacts (Tenant_2) — starter plan, global_admin role.
+-- User: Sadiya Kotwal <sadiya.kotwal@ideastoimpacts.com>
 -- ============================================================================
 --
 -- HOW TO USE THIS SEED (self-hosted / staging)
 -- ----------------------------------------------------------------------------
 -- 1) Go to Dashboard → Authentication → Users → Add user
---    Create the user with the same email and password configured below.
---    (SQL-inserted bcrypt is rejected by GoTrue on self-hosted builds.)
--- 2) Edit the CONFIG block below if needed (email, full_name, device_name).
--- 3) Paste this entire script into the SQL Editor and click Run.
+--    Email    : sadiya.kotwal@ideastoimpacts.com
+--    Password : Test@123
+-- 2) Paste this entire script into the SQL Editor and click Run.
 --    The script is fully idempotent — safe to re-run multiple times.
---
--- What this script does:
---   - Finds the auth.users row created in step 1
---   - Marks email as confirmed (no verification email needed)
---   - Creates or updates the public.tenants row for Audi
---   - Creates or updates public.app_users, public.user_roles, public.devices
---   - Updates auth.users.raw_user_meta_data to match the signup wizard shape
---
--- Idempotent: re-running updates existing rows rather than erroring.
--- Tenant lookup is by name (case-insensitive) so re-runs with the same
--- tenant name always update the same tenant row, not create a duplicate.
 -- ============================================================================
 
 DO $$
 DECLARE
-  -- ==================== CONFIG (edit before run) ====================
-  c_seed_email              TEXT    := 'admin@audi.com';              -- ← change to actual Audi admin email
-  c_tenant_display_name     TEXT    := 'Audi';
-  c_full_name               TEXT    := 'Audi Admin';                  -- ← change to actual name
-  c_plan                    TEXT    := 'enterprise';                  -- starter | professional | enterprise
-  c_workflow_addon_slots    INTEGER := 0;                             -- 0–5 (enterprise has unlimited slots)
-  c_agent_packs             TEXT[]  := ARRAY['underwriting', 'claims', 'distribution', 'compliance', 'agentic-rag']; -- enterprise: all packs
-  c_device_name             TEXT    := 'Audi Admin primary device';
+  -- ==================== CONFIG ====================
+  c_seed_email              TEXT    := 'sadiya.kotwal@ideastoimpacts.com';
+  c_tenant_display_name     TEXT    := 'Tenant_2';
+  c_full_name               TEXT    := 'Sadiya Kotwal';
+  c_plan                    TEXT    := 'starter';              -- starter | professional | enterprise
+  c_workflow_addon_slots    INTEGER := 0;                      -- 0–5
+  c_agent_packs             TEXT[]  := ARRAY['compliance'];    -- Compliance Pack
+  c_device_name             TEXT    := 'Sadiya primary device';
   c_signup_wizard_version   TEXT    := 'v1';
   c_device_profile          JSONB   := jsonb_build_object(
-    'device_name',                'Audi Admin primary device',
+    'device_name',                'Sadiya primary device',
     'device_type',                'desktop',
     'os_name',                    'Windows',
     'os_version',                 '11',
@@ -55,7 +44,7 @@ DECLARE
     'captured_at',                to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
     'source',                     'seed_migration'
   );
-  -- ==================================================================
+  -- ================================================
 
   v_user_id        UUID;
   v_email          TEXT;
@@ -71,7 +60,7 @@ DECLARE
 BEGIN
   c_seed_email := lower(trim(c_seed_email));
 
-  -- ── 1. Resolve the auth.users row (must exist — create via Dashboard first) ──
+  -- ── 1. Resolve the auth.users row ────────────────────────────────────────
   SELECT id, COALESCE(email, '')
   INTO v_user_id, v_email
   FROM auth.users
@@ -87,7 +76,7 @@ BEGIN
 
   RAISE NOTICE 'Found auth.users row: id=%', v_user_id;
 
-  -- ── 2. Mark email as confirmed (skip verification email) ──────────────────
+  -- ── 2. Mark email as confirmed ───────────────────────────────────────────
   UPDATE auth.users
   SET
     email_confirmed_at   = COALESCE(email_confirmed_at, v_now),
@@ -111,12 +100,12 @@ BEGIN
   FROM public.plan_limits(c_plan) pl;
 
   v_slots_total := CASE c_plan
-    WHEN 'enterprise'   THEN NULL   -- unlimited
+    WHEN 'enterprise'   THEN NULL
     WHEN 'professional' THEN 15 + v_addon
-    ELSE                     3  + v_addon
+    ELSE                     3  + v_addon   -- starter
   END;
 
-  -- ── 4. Upsert tenant — lookup by name so re-runs never duplicate ──────────
+  -- ── 4. Upsert tenant ─────────────────────────────────────────────────────
   SELECT id, slug
   INTO v_tenant_id, v_slug
   FROM public.tenants
@@ -124,7 +113,6 @@ BEGIN
   LIMIT 1;
 
   IF v_tenant_id IS NOT NULL THEN
-    -- Tenant exists: update it in place
     UPDATE public.tenants SET
       is_active            = true,
       plan                 = COALESCE(c_plan, 'starter'),
@@ -143,7 +131,6 @@ BEGIN
     WHERE id = v_tenant_id;
     RAISE NOTICE 'Updated existing tenant: id=%, slug=%', v_tenant_id, v_slug;
   ELSE
-    -- No tenant yet: build slug from name + first 8 chars of user_id
     v_slug_norm := lower(regexp_replace(c_tenant_display_name, '[^a-zA-Z0-9]+', '-', 'g'));
     v_slug_norm := trim(both '-' FROM v_slug_norm);
     IF v_slug_norm = '' THEN v_slug_norm := 'tenant'; END IF;
@@ -215,7 +202,7 @@ BEGIN
 
   RAISE NOTICE 'user_roles set to global_admin for user_id=%', v_user_id;
 
-  -- ── 7. Sync raw_user_meta_data on auth.users ──────────────────────────────
+  -- ── 7. Sync raw_user_meta_data ────────────────────────────────────────────
   UPDATE auth.users
   SET raw_user_meta_data = COALESCE(raw_user_meta_data, '{}'::jsonb)
     || jsonb_strip_nulls(jsonb_build_object(
@@ -235,7 +222,7 @@ BEGIN
     ))
   WHERE id = v_user_id;
 
-  -- ── 8. Upsert device (skip if already registered) ────────────────────────
+  -- ── 8. Upsert device ─────────────────────────────────────────────────────
   IF c_device_name IS NOT NULL AND length(trim(c_device_name)) > 0 THEN
     IF NOT EXISTS (
       SELECT 1 FROM public.devices
