@@ -30,6 +30,39 @@ let tray: Tray | null = null;
 let isQuitting = false;
 let deviceHeartbeatStopper: (() => void) | null = null;
 
+function electronApiBase(): string {
+  const raw = process.env.ELECTRON_API_BASE_URL?.replace(/\/+$/, "") ?? "http://localhost:8000";
+  return raw.replace(/\/+$/, "");
+}
+
+async function readJsonSafe(res: Response): Promise<any> {
+  try {
+    return await res.json();
+  } catch {
+    return {};
+  }
+}
+
+async function callBackendApi(opts: {
+  path: string;
+  method: "GET" | "POST" | "PATCH" | "DELETE";
+  accessToken: string;
+  body?: any;
+}): Promise<{ ok: true; status: number; payload: any } | { ok: false; status: number; payload: any }> {
+  const url = `${electronApiBase()}${opts.path.startsWith("/") ? "" : "/"}${opts.path}`;
+  const res = await fetch(url, {
+    method: opts.method,
+    headers: {
+      Authorization: `Bearer ${opts.accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+  });
+  const payload = await readJsonSafe(res);
+  if (res.ok) return { ok: true, status: res.status, payload };
+  return { ok: false, status: res.status, payload };
+}
+
 const logPath = path.join(app.getPath("userData"), "fideon-main.log");
 function log(msg: string) {
   try {
@@ -470,6 +503,86 @@ ipcMain.handle("device:getDeviceInfo", async () => {
   }
 });
 
+// IPC: outbound webhooks management (calls backend with the user's Supabase access token)
+ipcMain.handle("webhooks:list", async (_event, accessToken: string) => {
+  try {
+    const r = await callBackendApi({ path: "/api/v1/webhooks", method: "GET", accessToken });
+    if (!r.ok) return { success: false, status: r.status, payload: r.payload };
+    return { success: true, webhooks: r.payload?.webhooks ?? [] };
+  } catch (err) {
+    return { success: false, error: String(err) };
+  }
+});
+
+ipcMain.handle(
+  "webhooks:create",
+  async (_event, accessToken: string, input: { url: string; description?: string; events?: string[] }) => {
+    try {
+      const r = await callBackendApi({
+        path: "/api/v1/webhooks",
+        method: "POST",
+        accessToken,
+        body: { url: input.url, description: input.description ?? "", events: input.events ?? [] },
+      });
+      if (!r.ok) return { success: false, status: r.status, payload: r.payload };
+      return { success: true, ...r.payload };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  },
+);
+
+ipcMain.handle(
+  "webhooks:update",
+  async (
+    _event,
+    accessToken: string,
+    id: string,
+    patch: Partial<{ url: string; description: string; events: string[]; is_active: boolean }>,
+  ) => {
+    try {
+      const r = await callBackendApi({
+        path: `/api/v1/webhooks/${encodeURIComponent(id)}`,
+        method: "PATCH",
+        accessToken,
+        body: patch,
+      });
+      if (!r.ok) return { success: false, status: r.status, payload: r.payload };
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  },
+);
+
+ipcMain.handle("webhooks:delete", async (_event, accessToken: string, id: string) => {
+  try {
+    const r = await callBackendApi({
+      path: `/api/v1/webhooks/${encodeURIComponent(id)}`,
+      method: "DELETE",
+      accessToken,
+    });
+    if (!r.ok) return { success: false, status: r.status, payload: r.payload };
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: String(err) };
+  }
+});
+
+ipcMain.handle("webhooks:rotateSecret", async (_event, accessToken: string, id: string) => {
+  try {
+    const r = await callBackendApi({
+      path: `/api/v1/webhooks/${encodeURIComponent(id)}/rotate-secret`,
+      method: "POST",
+      accessToken,
+    });
+    if (!r.ok) return { success: false, status: r.status, payload: r.payload };
+    return { success: true, ...r.payload };
+  } catch (err) {
+    return { success: false, error: String(err) };
+  }
+});
+
 // IPC: auto-launch placeholder using OS login items (where supported)
 ipcMain.handle("settings:getAutoLaunch", async () => {
   try {
@@ -503,7 +616,7 @@ ipcMain.handle("model:checkUpdate", async (_event, domain: string) => {
   try {
     const auth = await ensureDeviceAuthAsync({ log });
     const { device_id: deviceId, device_jwt: deviceJwt } = auth;
-    const apiBase = process.env.ELECTRON_API_BASE_URL?.replace(/\/+$/, "") ?? "http://localhost:8000";
+    const apiBase = electronApiBase();
     const result = await checkForModelUpdate({ domain, deviceId, deviceJwt, apiBase });
     return { success: true, ...result };
   } catch (err) {
@@ -524,7 +637,7 @@ ipcMain.handle(
       if (!deviceJwt) {
         return { success: false, error: "Device not registered" };
       }
-      const apiBase = process.env.ELECTRON_API_BASE_URL?.replace(/\/+$/, "") ?? "http://localhost:8000";
+      const apiBase = electronApiBase();
       const result = await downloadAndInstall({
         ...opts,
         deviceJwt,

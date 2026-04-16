@@ -37,18 +37,33 @@ import {
 } from "@/lib/ollama";
 import { linkDeviceById } from "@/lib/deviceLinkApi";
 
+function tryExtractDeviceIdFromJwt(token: string): string | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length < 2) return null;
+    const payloadB64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = payloadB64 + "===".slice((payloadB64.length + 3) % 4);
+    const json = atob(padded);
+    const payload = JSON.parse(json) as any;
+    const id = payload?.device_id ?? payload?.sub;
+    return typeof id === "string" && id.trim() ? id.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 export default function DeviceSetup() {
   const { toast } = useToast();
   const [isConnected, setIsConnected] = useState(false);
   const [allocatedModels, setAllocatedModels] = useState<DeviceModel[]>([]);
   const [localModels, setLocalModels] = useState<OllamaModel[]>([]);
   const [loading, setLoading] = useState(false);
+  const [connecting, setConnecting] = useState(false);
   const [ollamaRunning, setOllamaRunning] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState<Record<string, PullProgress>>({});
   const [isElectronApp, setIsElectronApp] = useState(false);
   const [deviceJwt, setDeviceJwt] = useState("");
   const [deviceId, setDeviceId] = useState<string | null>(null);
-  const [manualDisconnected, setManualDisconnected] = useState(false);
   /** From Electron main: os.hostname + node-machine-id (registration fingerprint). */
   const [localMachine, setLocalMachine] = useState<{
     machineName: string;
@@ -103,11 +118,26 @@ export default function DeviceSetup() {
     const storedJwt = getStoredDeviceJwt();
     if (storedJwt) {
       void (async () => {
-        const ok = await verifyCloudSession(storedJwt);
-        if (ok) {
-          setDeviceJwt(storedJwt);
-          setIsConnected(true);
-          void loadDeviceModels(storedJwt);
+        setConnecting(true);
+        try {
+          const ok = await verifyCloudSession(storedJwt);
+          if (ok) {
+            setDeviceJwt(storedJwt);
+            setIsConnected(true);
+            // Ensure Cloud device ID renders even if Electron store is slow/unavailable.
+            setDeviceId((prev) => prev ?? tryExtractDeviceIdFromJwt(storedJwt));
+            if (window.electron?.device?.getDeviceId) {
+              try {
+                const res = await window.electron.device.getDeviceId();
+                if (res?.success && res.device_id) setDeviceId(res.device_id);
+              } catch {
+                // ignore
+              }
+            }
+            void loadDeviceModels(storedJwt);
+          }
+        } finally {
+          setConnecting(false);
         }
       })();
     }
@@ -157,9 +187,9 @@ export default function DeviceSetup() {
   const checkElectron = async () => {
     const result = await isElectron();
     setIsElectronApp(result);
-    if (manualDisconnected) return;
     if (result && window.electron?.device?.getAuth) {
       try {
+        setConnecting(true);
         const res = await window.electron.device.getAuth();
         if (res?.success) {
           setDeviceId(res.device_id ?? null);
@@ -174,6 +204,8 @@ export default function DeviceSetup() {
         }
       } catch {
         // ignore
+      } finally {
+        setConnecting(false);
       }
     }
     if (result && window.electron?.device?.getDeviceId && !deviceId) {
@@ -195,22 +227,6 @@ export default function DeviceSetup() {
     }
   };
 
-  const handleDisconnect = () => {
-    clearStoredDeviceJwt();
-    setDeviceJwt("");
-    setDeviceId(null);
-    setIsConnected(false);
-    setAllocatedModels([]);
-    setManualDisconnected(true);
-    if (window.electron?.device?.clearAuth) {
-      void window.electron.device.clearAuth();
-    }
-    toast({
-      title: "Disconnected",
-      description: "Device auth cleared. Click Refresh to re-connect.",
-    });
-  };
-
   const loadDeviceModels = async (jwt: string) => {
     const response = await fetchDeviceModels(jwt);
     setAllocatedModels(response.models);
@@ -218,9 +234,9 @@ export default function DeviceSetup() {
 
   const handleRefresh = async () => {
     if (!deviceJwt) {
-      setManualDisconnected(false);
       if (window.electron?.device?.ensureAuth) {
         try {
+          setConnecting(true);
           setLoading(true);
           toast({ title: "Refreshing…", description: "Registering/reconnecting this device." });
           const res = await window.electron.device.ensureAuth();
@@ -230,7 +246,7 @@ export default function DeviceSetup() {
             setStoredDeviceJwt(res.device_jwt);
             setDeviceJwt(res.device_jwt);
             setIsConnected(true);
-            if (res.device_id) setDeviceId(res.device_id);
+            setDeviceId(res.device_id ?? tryExtractDeviceIdFromJwt(res.device_jwt));
             await loadDeviceModels(res.device_jwt);
           } else {
             throw new Error(res?.error || "Could not register device");
@@ -248,6 +264,7 @@ export default function DeviceSetup() {
           });
         } finally {
           setLoading(false);
+          setConnecting(false);
         }
         return;
       }
@@ -268,7 +285,7 @@ export default function DeviceSetup() {
             setStoredDeviceJwt(res.device_jwt);
             setDeviceJwt(res.device_jwt);
             setIsConnected(true);
-            if (res.device_id) setDeviceId(res.device_id);
+            setDeviceId(res.device_id ?? tryExtractDeviceIdFromJwt(res.device_jwt));
             await loadDeviceModels(res.device_jwt);
           } else {
             throw new Error(res?.error || "Could not re-register device");
@@ -521,10 +538,15 @@ export default function DeviceSetup() {
                     <CheckCircle2 className="mr-1 h-3 w-3" />
                     Connected
                   </Badge>
-                ) : (
+                ) : (loading || connecting) ? (
                   <Badge variant="secondary">
                     <Loader2 className="mr-1 h-3 w-3 animate-spin" />
                     Connecting…
+                  </Badge>
+                ) : (
+                  <Badge variant="secondary">
+                    <WifiOff className="mr-1 h-3 w-3" />
+                    Disconnected
                   </Badge>
                 )}
                 <span className="text-sm text-muted-foreground">
@@ -537,14 +559,6 @@ export default function DeviceSetup() {
                 </Button>
                 <Button variant="outline" size="sm" onClick={handleSync} disabled={loading || !deviceJwt}>
                   Sync Status
-                </Button>
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  onClick={handleDisconnect}
-                  disabled={!deviceJwt}
-                >
-                  Disconnect
                 </Button>
               </div>
             </div>
