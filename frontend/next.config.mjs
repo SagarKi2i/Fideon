@@ -1,14 +1,15 @@
 const isWindows = process.platform === "win32";
-// Standalone needs outputFileTracing; on Windows tracing often hits EPERM on `trace`.
-// Docker/Linux/CI use standalone. Set NEXT_STANDALONE=1 on Windows only if your
-// environment can write trace files (needed for packaged Electron builds).
+// Docker/Linux/CI use standalone by default. On Windows, set NEXT_STANDALONE=1 for
+// packaged Electron builds (standalone + outputFileTracing: false — see below).
 const useStandalone =
   !isWindows || process.env.NEXT_STANDALONE === "1";
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   ...(useStandalone ? { output: "standalone" } : {}),
-  ...(isWindows && !useStandalone ? { outputFileTracing: false } : {}),
+  // Windows: disable tracing (EPERM / missing .nft.json during standalone collect-build-traces).
+  // Linux/Docker keep default tracing for smaller standalone images.
+  ...(isWindows ? { outputFileTracing: false } : {}),
   webpack: (config) => {
     // Treat the PDF.js worker as a file asset so it isn't parsed/minified as JS.
     config.module.rules.push({

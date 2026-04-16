@@ -45,6 +45,19 @@ contextBridge.exposeInMainWorld("electron", {
     ensureAuth: () => ipcRenderer.invoke("device:ensureAuth"),
   },
 
+  webhooks: {
+    list: (accessToken: string) => ipcRenderer.invoke("webhooks:list", accessToken),
+    create: (accessToken: string, input: { url: string; description?: string; events?: string[] }) =>
+      ipcRenderer.invoke("webhooks:create", accessToken, input),
+    update: (
+      accessToken: string,
+      id: string,
+      patch: Partial<{ url: string; description: string; events: string[]; is_active: boolean }>,
+    ) => ipcRenderer.invoke("webhooks:update", accessToken, id, patch),
+    delete: (accessToken: string, id: string) => ipcRenderer.invoke("webhooks:delete", accessToken, id),
+    rotateSecret: (accessToken: string, id: string) => ipcRenderer.invoke("webhooks:rotateSecret", accessToken, id),
+  },
+
   model: {
     checkUpdate: (domain: string) =>
       ipcRenderer.invoke("model:checkUpdate", domain),

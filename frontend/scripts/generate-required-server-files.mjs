@@ -12,7 +12,7 @@ async function fileExists(p) {
 
 async function main() {
   const projectRoot = path.resolve(process.cwd());
-  const nextDir = path.join(projectRoot, ".next-build");
+  const nextDir = path.join(projectRoot, ".next");
   const target = path.join(nextDir, "required-server-files.json");
 
   // Next should generate this when output=standalone, but some builds/configs
