@@ -440,7 +440,9 @@ ipcMain.handle("device:clearAuth", async () => {
 
 ipcMain.handle("device:ensureAuth", async () => {
   try {
+    log(`[ipc] device:ensureAuth called`);
     const auth = await ensureDeviceAuthAsync({ log });
+    log(`[ipc] device:ensureAuth success device_id=${String(auth.device_id || "")}`);
     // Ensure heartbeat loop is running after an explicit reconnect.
     try {
       const runner = await ensureDeviceAuthAndStartHeartbeat({ log, heartbeatSeconds: 60 });
@@ -450,7 +452,8 @@ ipcMain.handle("device:ensureAuth", async () => {
     }
     return { success: true, device_id: auth.device_id, device_jwt: auth.device_jwt };
   } catch (err) {
-    return { success: false, error: String(err) };
+    log(`[ipc] device:ensureAuth failed: ${formatUnknownError(err)}`);
+    return { success: false, error: formatUnknownError(err) };
   }
 });
 
@@ -498,13 +501,8 @@ ipcMain.handle("settings:setAutoLaunch", async (_event, enabled: boolean) => {
 // IPC: model update check (canary-gated via backend)
 ipcMain.handle("model:checkUpdate", async (_event, domain: string) => {
   try {
-    const [deviceId, deviceJwt] = await Promise.all([
-      getStoredDeviceIdAsync(),
-      getStoredDeviceJwtAsync(),
-    ]);
-    if (!deviceId || !deviceJwt) {
-      return { success: false, error: "Device not registered" };
-    }
+    const auth = await ensureDeviceAuthAsync({ log });
+    const { device_id: deviceId, device_jwt: deviceJwt } = auth;
     const apiBase = process.env.ELECTRON_API_BASE_URL?.replace(/\/+$/, "") ?? "http://localhost:8000";
     const result = await checkForModelUpdate({ domain, deviceId, deviceJwt, apiBase });
     return { success: true, ...result };

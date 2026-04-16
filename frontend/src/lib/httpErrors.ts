@@ -40,6 +40,10 @@ export function buildApiRequestError(
     return new ApiRequestError("Your session has expired. Please sign in again.", 401, payload);
   }
   if (response.status === 403) {
+    const detail = payload?.detail || payload?.error || payload?.message;
+    if (typeof detail === "string" && detail.trim()) {
+      return new ApiRequestError(detail, 403, payload);
+    }
     return new ApiRequestError("You do not have permission to perform this action.", 403, payload);
   }
 

@@ -27,6 +27,16 @@ type DeviceRow = {
   created_at?: string | null;
 };
 
+/** Label for breadcrumbs / device details header (same as Linked user column when possible). */
+function linkedUserNavState(d: DeviceRow): { linkedUserLabel: string } | undefined {
+  const name = d.registered_by_name || undefined;
+  const email = d.registered_by_email || undefined;
+  if (name && email) return { linkedUserLabel: `${name} (${email})` };
+  if (name) return { linkedUserLabel: name };
+  if (email) return { linkedUserLabel: email };
+  return undefined;
+}
+
 export default function Devices() {
   const { toast } = useToast();
   const navigate = useNavigate();
@@ -210,8 +220,12 @@ export default function Devices() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filtered.map((d: any) => (
-                  <TableRow key={d.id} className="cursor-pointer" onClick={() => navigate(`/devices/${d.id}`)}>
+                {filtered.map((d) => (
+                  <TableRow
+                    key={d.id}
+                    className="cursor-pointer"
+                    onClick={() => navigate(`/devices/${d.id}`, { state: linkedUserNavState(d) })}
+                  >
                     <TableCell>{statusBadge(d.status)}</TableCell>
                     <TableCell className="min-w-[260px]">
                       <div className="font-medium">{d.device_name || "Unnamed device"}</div>
@@ -239,7 +253,14 @@ export default function Devices() {
                       {d.os_type || "—"} {d.app_version ? `• v${d.app_version}` : ""}
                     </TableCell>
                     <TableCell className="text-right">
-                      <Button variant="outline" size="sm" onClick={(e) => { e.stopPropagation(); navigate(`/devices/${d.id}`); }}>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          navigate(`/devices/${d.id}`, { state: linkedUserNavState(d) });
+                        }}
+                      >
                         <ExternalLink className="h-4 w-4 mr-2" />
                         Details
                       </Button>

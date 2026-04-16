@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useLocation } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -12,6 +12,15 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Label } from "@/components/ui/label";
 import {
   Table,
@@ -32,6 +41,8 @@ import {
   Activity,
   History,
   Package,
+  PowerOff,
+  Power,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
@@ -48,6 +59,9 @@ interface Device {
   last_seen_at: string | null;
   registered_at: string;
   is_active: boolean;
+  registered_by?: string | null;
+  registered_by_email?: string | null;
+  registered_by_name?: string | null;
 }
 
 interface DeviceModel {
@@ -85,9 +99,25 @@ interface AvailableModel {
   domain: string;
 }
 
+/** Same display rules as the Devices list "Linked user" column. */
+function formatLinkedUserLabel(d: {
+  registered_by?: string | null;
+  registered_by_name?: string | null;
+  registered_by_email?: string | null;
+}): string | null {
+  const name = d.registered_by_name || undefined;
+  const email = d.registered_by_email || undefined;
+  if (name && email) return `${name} (${email})`;
+  if (name) return name;
+  if (email) return email;
+  if (d.registered_by) return null;
+  return null;
+}
+
 export default function DeviceDetails() {
   const { toast } = useToast();
   const navigate = useNavigate();
+  const location = useLocation();
   const { id } = useParams();
   const [device, setDevice] = useState<Device | null>(null);
   const [allocatedModels, setAllocatedModels] = useState<DeviceModel[]>([]);
@@ -99,6 +129,9 @@ export default function DeviceDetails() {
   const [isAllocateOpen, setIsAllocateOpen] = useState(false);
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [allocating, setAllocating] = useState(false);
+  const [disableDeviceOpen, setDisableDeviceOpen] = useState(false);
+  const [disablingDevice, setDisablingDevice] = useState(false);
+  const [enablingDevice, setEnablingDevice] = useState(false);
 
   useEffect(() => {
     checkAccess();
@@ -198,11 +231,18 @@ export default function DeviceDetails() {
         throw new Error(msg);
       }
 
-      setDevice(((payload as any)?.device || null) as Device | null);
+      const dev = ((payload as any)?.device || null) as Device | null;
+      setDevice(dev);
       setAllocatedModels((((payload as any)?.device_models || []) as DeviceModel[]) || []);
       setSyncLogs((((payload as any)?.sync_logs || []) as SyncLog[]) || []);
       setUsageLogs((((payload as any)?.usage_logs || []) as UsageLog[]) || []);
       setAvailableModels((((payload as any)?.available_models || []) as AvailableModel[]) || []);
+
+      const linkedLabel = dev ? formatLinkedUserLabel(dev) : null;
+      const nextState = { ...(location.state as Record<string, unknown> | null) };
+      if (linkedLabel) nextState.linkedUserLabel = linkedLabel;
+      else delete nextState.linkedUserLabel;
+      navigate(".", { replace: true, state: nextState });
     } catch (error: any) {
       console.error("Error loading device data:", error);
       toast({
@@ -295,6 +335,65 @@ export default function DeviceDetails() {
         description: error.message || "Failed to remove model",
         variant: "destructive",
       });
+    }
+  };
+
+  const callDeviceAdminMutation = async (path: "revoke" | "enable") => {
+    if (!id) throw new Error("Device ID is missing");
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) throw new Error("Not authenticated");
+    const resp = await fetch(
+      apiUrl(`/api/v1/devices/${encodeURIComponent(id)}/${path}`),
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      },
+    );
+    const payload = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const msg = (payload as any)?.detail || (payload as any)?.error || `HTTP ${resp.status}`;
+      throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+    }
+  };
+
+  const handleDisableDevice = async () => {
+    setDisablingDevice(true);
+    try {
+      await callDeviceAdminMutation("revoke");
+      toast({
+        title: "Device disabled",
+        description: "Device JWTs are revoked and the device is inactive until re-enabled and re-registered.",
+      });
+      setDisableDeviceOpen(false);
+      loadDeviceData();
+    } catch (error: any) {
+      toast({
+        title: "Could not disable device",
+        description: error?.message || "Request failed",
+        variant: "destructive",
+      });
+    } finally {
+      setDisablingDevice(false);
+    }
+  };
+
+  const handleEnableDevice = async () => {
+    setEnablingDevice(true);
+    try {
+      await callDeviceAdminMutation("enable");
+      toast({
+        title: "Device re-enabled",
+        description: "The device must call register again (Electron: reconnect) to obtain a new JWT.",
+      });
+      loadDeviceData();
+    } catch (error: any) {
+      toast({
+        title: "Could not enable device",
+        description: error?.message || "Request failed",
+        variant: "destructive",
+      });
+    } finally {
+      setEnablingDevice(false);
     }
   };
 
@@ -398,6 +497,8 @@ export default function DeviceDetails() {
     (m) => !alreadyAllocated.includes(m.model_id)
   );
 
+  const linkedUserLine = formatLinkedUserLabel(device);
+
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
       <div className="flex items-center gap-4">
@@ -414,9 +515,50 @@ export default function DeviceDetails() {
           <h1 className="text-3xl font-bold tracking-tight text-foreground">
             {device.device_name}
           </h1>
-          <p className="text-muted-foreground mt-1">Device ID: {device.id}</p>
+          <div className="mt-1 space-y-1">
+            {linkedUserLine ? (
+              <p className="text-muted-foreground">
+                <span className="font-medium text-foreground/90">Linked user: </span>
+                {linkedUserLine}
+              </p>
+            ) : (
+              <p className="text-muted-foreground">No linked user</p>
+            )}
+            <p className="text-xs text-muted-foreground font-mono break-all">Device ID: {device.id}</p>
+          </div>
         </div>
-        <div>{getStatusBadge(device.status)}</div>
+        <div className="flex flex-col items-end gap-2 sm:flex-row sm:items-center">
+          {device.is_active ? (
+            <Badge variant="outline" className="bg-success/10 text-success border-success/20">
+              Active
+            </Badge>
+          ) : (
+            <Badge variant="destructive">Disabled</Badge>
+          )}
+          {getStatusBadge(device.is_active ? device.status : "offline")}
+          {device.is_active ? (
+            <Button
+              variant="destructive"
+              size="sm"
+              className="gap-2"
+              onClick={() => setDisableDeviceOpen(true)}
+            >
+              <PowerOff className="h-4 w-4" />
+              Disable device
+            </Button>
+          ) : (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-2"
+              onClick={() => void handleEnableDevice()}
+              disabled={enablingDevice}
+            >
+              <Power className="h-4 w-4" />
+              {enablingDevice ? "Enabling…" : "Re-enable device"}
+            </Button>
+          )}
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -799,6 +941,28 @@ export default function DeviceDetails() {
           </Card>
         </TabsContent>
       </Tabs>
+
+      <AlertDialog open={disableDeviceOpen} onOpenChange={setDisableDeviceOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Disable this device?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This revokes all device JWTs and sets the device inactive. The user&apos;s Electron app will fail
+              heartbeats until you re-enable the device and they register again.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={disablingDevice}>Cancel</AlertDialogCancel>
+            <Button
+              variant="destructive"
+              disabled={disablingDevice}
+              onClick={() => void handleDisableDevice()}
+            >
+              {disablingDevice ? "Disabling…" : "Disable device"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

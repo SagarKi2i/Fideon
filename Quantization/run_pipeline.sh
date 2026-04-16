@@ -33,8 +33,17 @@ if ! gpg --list-secret-keys 2>/dev/null | grep -q "sec"; then
 fi
 echo "✓ GPG key present"
 
-echo "[1/2] Running quantize.py..."
-python3 quantize.py
+Q5_FILE="$OUTPUT_DIR/model-q5_k_m.gguf"
+Q4_FILE="$OUTPUT_DIR/model-q4_k_m.gguf"
+MANIFEST="$OUTPUT_DIR/manifest.json"
+
+if [[ -f "$Q5_FILE" && -f "$Q4_FILE" && -f "$MANIFEST" ]]; then
+    echo "[1/2] GGUF artifacts already exist — skipping quantization"
+    echo "      Delete $OUTPUT_DIR to force re-quantization"
+else
+    echo "[1/2] Running quantize.py..."
+    python3 quantize.py
+fi
 
 echo "[2/2] Running upload.py..."
 python3 upload.py

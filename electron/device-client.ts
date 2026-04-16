@@ -82,8 +82,24 @@ export async function ensureDeviceAuthAsync(opts?: { log?: (msg: string) => void
   const store = await getStore();
   const existingJwt = await getStoredDeviceJwtAsync();
   const existingId = await getStoredDeviceIdAsync();
+
+  // Validate stored JWT against the backend before trusting it
   if (existingJwt && existingId) {
-    return { device_id: existingId, device_jwt: existingJwt };
+    try {
+      // Prefer heartbeat: validates JWT without adapter_registry domain setup.
+      // 401 = invalid/expired JWT → re-register; otherwise token is accepted.
+      const res = await fetch(`${apiBaseUrl()}/api/v1/devices/heartbeat`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${existingJwt}` },
+      });
+      if (res.status !== 401) {
+        return { device_id: existingId, device_jwt: existingJwt };
+      }
+      opts?.log?.("[device] stored JWT rejected by backend — re-registering");
+    } catch {
+      // Network error — use stored JWT so brief outages do not force re-register.
+      return { device_id: existingId, device_jwt: existingJwt };
+    }
   }
 
   opts?.log?.(`[device] ensureDeviceAuthAsync registering... base=${apiBaseUrl()}`);

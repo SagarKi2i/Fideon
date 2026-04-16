@@ -1,6 +1,6 @@
 /**
  * Browser → FastAPI base URL.
- * - Local backend: leave NEXT_PUBLIC_API_URL unset or `http://localhost:8001`
+ * - Local backend: set NEXT_PUBLIC_API_URL to match uvicorn (commonly `http://127.0.0.1:8080`)
  * - Backend on RunPod: set NEXT_PUBLIC_API_URL to the pod HTTPS proxy root, e.g.
  *   `https://<pod-id>-<port>.proxy.runpod.net` (no trailing slash)
  */
@@ -21,7 +21,7 @@ export function getApiBaseUrl(): string {
   }
 
   if (configured) return stripTrailingSlashes(configured);
-  return "http://localhost:8001";
+  return "http://127.0.0.1:8080";
 }
 
 export function apiUrl(path: string): string {

@@ -213,7 +213,7 @@ PERSONAL_API_KEY_PEPPER = os.getenv("PERSONAL_API_KEY_PEPPER", "")
 # Must be a stable, high-entropy secret (recommended: 32 urlsafe base64 bytes).
 WEBHOOK_SECRET_ENCRYPTION_KEY = os.getenv("WEBHOOK_SECRET_ENCRYPTION_KEY", "").strip()
 WEBHOOK_WORKER_ENABLED = _env_bool("WEBHOOK_WORKER_ENABLED", default=True)
-WEBHOOK_MAX_ATTEMPTS = _env_int("WEBHOOK_MAX_ATTEMPTS", 3)
+WEBHOOK_MAX_ATTEMPTS = _env_int("WEBHOOK_MAX_ATTEMPTS", 4)  # SRS FR-13: 3 retries = 4 total attempts
 WEBHOOK_RETRY_BASE_SECONDS = _env_float("WEBHOOK_RETRY_BASE_SECONDS", 2.0)
 WEBHOOK_RETRY_MAX_SECONDS = _env_float("WEBHOOK_RETRY_MAX_SECONDS", 60.0)
 

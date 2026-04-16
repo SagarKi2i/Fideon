@@ -2,6 +2,7 @@
 **/.env
 **/.env.local
 Quantization/config.env
+Quantization/config.env.local
 
 # Node/Next artifacts
 **/node_modules/
@@ -21,3 +22,12 @@ supabase/supabase/.temp/
 
 # OS/editor
 .DS_Store
+
+# Cursor/AI local settings
+.claude/
+
+# Local scratch files
+Untitled
+
+# Electron frontend build outputs (local)
+electron/frontend-staging/
