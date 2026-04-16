@@ -81,6 +81,34 @@ async def get_user_context(authorization: Optional[str]) -> Dict[str, Any]:
     )
     tenant_id = profile_rows[0].get("tenant_id") if profile_rows else None
 
+    # Fallback 1: user metadata can carry tenant_id in some environments.
+    if tenant_id is None:
+        try:
+            md = user.get("user_metadata") if isinstance(user, dict) else None
+            if isinstance(md, dict):
+                md_tid = md.get("tenant_id") or md.get("tenantId")
+                if md_tid:
+                    tenant_id = str(md_tid)
+        except Exception:
+            tenant_id = tenant_id
+
+    # Fallback: some global_admin/admin accounts can have tenant_id NULL in app_users.
+    # Derive tenant_id from the JWT claim if present so tenant-scoped routes remain safe.
+    if tenant_id is None and authorization and authorization.lower().startswith("bearer "):
+        try:
+            token = authorization.split(" ", 1)[1]
+            parts = token.split(".")
+            if len(parts) >= 2:
+                payload_b64 = parts[1]
+                payload_b64 += "=" * (-len(payload_b64) % 4)
+                payload_raw = __import__("base64").urlsafe_b64decode(payload_b64.encode("utf-8")).decode("utf-8")
+                payload = json.loads(payload_raw)
+                claim_tenant_id = payload.get("tenant_id")
+                if claim_tenant_id:
+                    tenant_id = str(claim_tenant_id)
+        except Exception:
+            tenant_id = tenant_id
+
     return {
         "user": user,
         "user_id": user_id,

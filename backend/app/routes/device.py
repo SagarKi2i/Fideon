@@ -10,7 +10,7 @@ import jwt
 import structlog
 from fastapi import APIRouter, Header, HTTPException, Path, Request
 
-from app.core.config import DEVICE_JWT_SECRET, LEGACY_DEVICE_TOKEN_APIS_ENABLED, SUPABASE_URL
+from app.core.config import DEVICE_JWT_SECRET, DEVICE_OFFLINE_AFTER_SECONDS, LEGACY_DEVICE_TOKEN_APIS_ENABLED, SUPABASE_URL
 from app.services.webhook_engine import try_emit_device_online
 from app.core.limiter import limiter
 from app.core.supabase import (
@@ -60,6 +60,28 @@ def _extract_magic_link_payload(body: dict, user_email: str) -> tuple[Optional[s
 
 def _parse_utc_iso(raw: Any) -> datetime:
     return datetime.fromisoformat(str(raw).replace("Z", UTC_OFFSET_SUFFIX))
+
+def _normalize_device_status_row(row: dict[str, Any], *, now: datetime) -> None:
+    """
+    Ensure the returned device status reflects reality even if background sweeps
+    are disabled/delayed in a given environment.
+    """
+    try:
+        status = str(row.get("status") or "").strip().lower()
+        last_seen_raw = row.get("last_seen_at")
+        if not last_seen_raw:
+            # Unseen devices are explicitly "never_checked_in" for UI clarity.
+            if status == "online":
+                row["status"] = "never_checked_in"
+            return
+
+        last_seen = _parse_utc_iso(last_seen_raw)
+        cutoff = now - timedelta(seconds=float(DEVICE_OFFLINE_AFTER_SECONDS))
+        if status == "online" and last_seen < cutoff:
+            row["status"] = "offline"
+    except Exception:
+        # Best-effort only; never block admin APIs.
+        return
 
 
 async def _generate_magic_login_link(
@@ -472,7 +494,7 @@ async def device_models_v1(authorization: Optional[str] = Header(default=None)):
 
 
 @router.put("/api/v1/devices/heartbeat")
-@limiter.limit("5/minute")
+@limiter.limit("60/minute")
 async def device_heartbeat(request: Request, authorization: Optional[str] = Header(default=None)):
     """
     Heartbeat endpoint. Devices call this every 60 s to stay marked online.
@@ -480,8 +502,8 @@ async def device_heartbeat(request: Request, authorization: Optional[str] = Head
     A device that misses 3 consecutive beats (180 s) is marked offline by the
     background offline-detector task.
 
-    Rate limit: 5/minute per IP (a healthy device sends 1/minute; 5x headroom
-    for retries while still blocking floods).
+    Rate limit: 60/minute per IP (devices normally send ~1/minute but the Electron
+    shell can burst/retry during startup or when multiple renderers race).
     """
     device_id, claims = await _resolve_device_from_bearer(authorization)
     device_row = await _load_active_device_row(device_id)
@@ -579,7 +601,9 @@ async def link_device_v1(request: Request, authorization: Optional[str] = Header
     requester_context = await get_user_context(authorization)
     requester_role = requester_context.get("role")
     requester_tenant_id = requester_context.get("tenant_id")
-    if requester_role != "global_admin" and not requester_tenant_id:
+    # Tenant scoping is required for linking devices (including global_admin) so
+    # devices are always assigned to an explicit tenant.
+    if not requester_tenant_id:
         raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
 
     body: dict[str, Any] = {}
@@ -600,9 +624,8 @@ async def link_device_v1(request: Request, authorization: Optional[str] = Header
     target = rows[0]
 
     target_tenant_id = target.get("tenant_id")
-    if requester_role != "global_admin":
-        if target_tenant_id and str(target_tenant_id) != str(requester_tenant_id):
-            raise HTTPException(status_code=403, detail="Cross-tenant device access denied")
+    if target_tenant_id and str(target_tenant_id) != str(requester_tenant_id):
+        raise HTTPException(status_code=403, detail="Cross-tenant device access denied")
 
     now = datetime.now(timezone.utc)
     existing_meta = target.get("metadata") if isinstance(target.get("metadata"), dict) else {}
@@ -617,9 +640,7 @@ async def link_device_v1(request: Request, authorization: Optional[str] = Header
         "registered_by": user["id"],
         "metadata": new_meta,
     }
-    # Only set tenant_id when available; global_admin may be unscoped.
-    if requester_tenant_id:
-        patch["tenant_id"] = requester_tenant_id
+    patch["tenant_id"] = requester_tenant_id
 
     await postgrest_patch(
         "devices",
@@ -653,10 +674,11 @@ async def list_devices_admin(authorization: Optional[str] = Header(default=None)
     requester_role = requester_context.get("role")
     requester_tenant_id = requester_context.get("tenant_id")
 
-    # Global admins can see all devices; tenant admins are tenant-scoped.
+    # Tenant scoping: even global_admin is scoped to their tenant for this API.
     filters = []
-    if requester_role != "global_admin" and requester_tenant_id:
-        filters.append(f"tenant_id=eq.{quote(str(requester_tenant_id), safe='')}")
+    if not requester_tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
+    filters.append(f"tenant_id=eq.{quote(str(requester_tenant_id), safe='')}")
 
     where = "&".join(filters)
     if where:
@@ -671,6 +693,10 @@ async def list_devices_admin(authorization: Optional[str] = Header(default=None)
             "&limit=200"
         ),
     )
+    now = datetime.now(timezone.utc)
+    for r in rows or []:
+        if isinstance(r, dict):
+            _normalize_device_status_row(r, now=now)
     user_ids = sorted({str(r.get("registered_by")) for r in (rows or []) if r.get("registered_by")})
     if user_ids:
         encoded_ids = ",".join(quote(uid, safe="") for uid in user_ids)
@@ -709,10 +735,29 @@ async def get_device_admin(device_id: str = Path(...), authorization: Optional[s
     if not device_rows:
         raise HTTPException(status_code=404, detail="Device not found")
     device = device_rows[0]
+    if isinstance(device, dict):
+        _normalize_device_status_row(device, now=datetime.now(timezone.utc))
 
-    if requester_role != "global_admin" and requester_tenant_id:
-        if str(device.get("tenant_id") or "") != str(requester_tenant_id):
-            raise HTTPException(status_code=403, detail="Cross-tenant device access denied")
+    if not requester_tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
+    if str(device.get("tenant_id") or "") != str(requester_tenant_id):
+        raise HTTPException(status_code=403, detail="Cross-tenant device access denied")
+
+    # Enrich with linked user label fields (for breadcrumb / details header).
+    try:
+        registered_by = device.get("registered_by")
+        if registered_by:
+            users = await postgrest_get(
+                "app_users",
+                f"select=user_id,email,full_name&user_id=eq.{quote(str(registered_by), safe='')}&limit=1",
+            )
+            if users:
+                u = users[0] or {}
+                device["registered_by_email"] = u.get("email")
+                device["registered_by_name"] = u.get("full_name")
+    except Exception:
+        # Best-effort enrichment; don't block admin reads.
+        pass
 
     models = await postgrest_get(
         "device_models",
