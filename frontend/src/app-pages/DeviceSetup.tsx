@@ -61,6 +61,7 @@ export default function DeviceSetup() {
     (message?: string) => {
       clearStoredDeviceJwt();
       setDeviceJwt("");
+      setDeviceId(null);
       setIsConnected(false);
       setAllocatedModels([]);
       if (window.electron?.device?.clearAuth) {
@@ -197,6 +198,7 @@ export default function DeviceSetup() {
   const handleDisconnect = () => {
     clearStoredDeviceJwt();
     setDeviceJwt("");
+    setDeviceId(null);
     setIsConnected(false);
     setAllocatedModels([]);
     setManualDisconnected(true);
@@ -220,6 +222,7 @@ export default function DeviceSetup() {
       if (window.electron?.device?.ensureAuth) {
         try {
           setLoading(true);
+          toast({ title: "Refreshing…", description: "Registering/reconnecting this device." });
           const res = await window.electron.device.ensureAuth();
           if (res?.success && res.device_jwt) {
             const ok = await verifyCloudSession(res.device_jwt);
@@ -254,7 +257,25 @@ export default function DeviceSetup() {
     setLoading(true);
     try {
       const ok = await verifyCloudSession(deviceJwt);
-      if (!ok) return;
+      if (!ok) {
+        // Token was invalid/revoked. Auto re-register in Electron so Refresh is one-click recovery.
+        if (window.electron?.device?.ensureAuth) {
+          toast({ title: "Reconnecting…", description: "Device token was invalid. Re-registering now." });
+          const res = await window.electron.device.ensureAuth();
+          if (res?.success && res.device_jwt) {
+            const ok2 = await verifyCloudSession(res.device_jwt);
+            if (!ok2) return;
+            setStoredDeviceJwt(res.device_jwt);
+            setDeviceJwt(res.device_jwt);
+            setIsConnected(true);
+            if (res.device_id) setDeviceId(res.device_id);
+            await loadDeviceModels(res.device_jwt);
+          } else {
+            throw new Error(res?.error || "Could not re-register device");
+          }
+        }
+        return;
+      }
       await loadDeviceModels(deviceJwt);
       await checkOllama();
       toast({
@@ -450,7 +471,7 @@ export default function DeviceSetup() {
             <Button
               type="button"
               className="bg-gradient-primary"
-              disabled={!deviceId || loading}
+              disabled={!deviceId || loading || !isConnected}
               onClick={async () => {
                 if (!deviceId) return;
                 try {
@@ -460,7 +481,9 @@ export default function DeviceSetup() {
                 } catch (e) {
                   toast({
                     title: "Link failed",
-                    description: e instanceof Error ? e.message : "Unknown error",
+                    description:
+                      (e instanceof Error ? e.message : "Unknown error") +
+                      (!isConnected ? " (Register/reconnect this device first using Refresh.)" : ""),
                     variant: "destructive",
                   });
                 } finally {

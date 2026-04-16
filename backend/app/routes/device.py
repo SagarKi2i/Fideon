@@ -253,6 +253,8 @@ async def _upsert_device_for_registration(
             "device_name": device_name,
             "device_token": secrets.token_urlsafe(32),
             "hardware_fingerprint_hash": fingerprint_hash,
+            # Ensure new devices are immediately usable; some DBs default is_active to false/null.
+            "is_active": True,
             "status": "online",
             "os_type": os_type,
             "app_version": app_version,

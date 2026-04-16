@@ -440,7 +440,9 @@ ipcMain.handle("device:clearAuth", async () => {
 
 ipcMain.handle("device:ensureAuth", async () => {
   try {
+    log(`[ipc] device:ensureAuth called`);
     const auth = await ensureDeviceAuthAsync({ log });
+    log(`[ipc] device:ensureAuth success device_id=${String(auth.device_id || "")}`);
     // Ensure heartbeat loop is running after an explicit reconnect.
     try {
       const runner = await ensureDeviceAuthAndStartHeartbeat({ log, heartbeatSeconds: 60 });
@@ -450,7 +452,8 @@ ipcMain.handle("device:ensureAuth", async () => {
     }
     return { success: true, device_id: auth.device_id, device_jwt: auth.device_jwt };
   } catch (err) {
-    return { success: false, error: String(err) };
+    log(`[ipc] device:ensureAuth failed: ${formatUnknownError(err)}`);
+    return { success: false, error: formatUnknownError(err) };
   }
 });
 
