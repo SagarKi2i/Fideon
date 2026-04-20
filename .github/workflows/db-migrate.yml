@@ -2,15 +2,24 @@
 # Database Migration Pipeline
 #
 # Applies supabase/migrations/*.sql files in timestamp order.
+# Connects to the self-hosted Supabase VM via SSH tunnel —
+# no direct DB port exposure needed.
 #
-# Staging  → self-hosted Supabase VM (direct DB URL via secret)
-# Production → Supabase.com (direct DB URL via secret)
+# Secrets required (repository-level):
+#   SSH_PRIVATE_KEY  — private key registered on the VM
+#   SSH_USER         — azureuser
+#   SSH_HOST         — VM IP (52.249.220.12)
 #
 # Secrets required per GitHub Environment:
+#   development:
+#     DB_PORT        — 5432
+#     DB_PASSWORD    — fideon12345
 #   staging:
-#     DATABASE_URL  — postgres connection URL to staging VM DB
+#     DB_PORT        — 5433
+#     DB_PASSWORD    — supabase@98765
 #   production:
-#     DATABASE_URL  — postgres connection URL to production DB
+#     DB_PORT        — (production DB port)
+#     DB_PASSWORD    — (production DB password)
 #
 # Trigger: manual only (Actions → Database Migrations → Run workflow)
 # Default: dry_run=true (safe — only shows pending, never applies)
@@ -49,25 +58,49 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.environment == 'production' && 'v1' || github.event.inputs.environment == 'staging' && 'v1-staging' || 'v1-dev' }}
 
-      - name: Install psql client
+      - name: Install psql client + SSH tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends postgresql-client
+          sudo apt-get install -y --no-install-recommends postgresql-client openssh-client
+
+      - name: Setup SSH tunnel
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/tunnel_key
+          chmod 600 ~/.ssh/tunnel_key
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+          # Open SSH tunnel: local 15432 → remote DB port
+          ssh -f -N -L 15432:localhost:${DB_PORT} \
+            -i ~/.ssh/tunnel_key \
+            -o StrictHostKeyChecking=no \
+            -o ServerAliveInterval=30 \
+            ${SSH_USER}@${SSH_HOST}
+
+          echo "✅ SSH tunnel established (localhost:15432 → ${SSH_HOST}:${DB_PORT})"
 
       - name: Verify DB connection
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: |
           echo "Testing connection to ${{ github.event.inputs.environment }} database..."
-          psql "$DATABASE_URL" -c "SELECT version();" -t -q
+          PGPASSWORD="$DB_PASSWORD" psql "postgresql://postgres@localhost:15432/postgres" \
+            -c "SELECT version();" -t -q
           echo "✅ Connection successful"
 
       - name: Ensure migration tracking table exists
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: |
-          psql "$DATABASE_URL" <<'SQL'
+          PGPASSWORD="$DB_PASSWORD" psql "postgresql://postgres@localhost:15432/postgres" <<'SQL'
             CREATE TABLE IF NOT EXISTS public._migration_history (
               filename    TEXT PRIMARY KEY,
               applied_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -78,8 +111,9 @@ jobs:
 
       - name: Show pending migrations
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: |
+          DB_URL="postgresql://postgres@localhost:15432/postgres"
           echo "════════════════════════════════════════════════"
           echo "  Environment : ${{ github.event.inputs.environment }}"
           echo "  Branch      : ${{ github.ref_name }}"
@@ -87,7 +121,7 @@ jobs:
           echo "════════════════════════════════════════════════"
           echo ""
           echo "Already applied migrations:"
-          psql "$DATABASE_URL" \
+          PGPASSWORD="$DB_PASSWORD" psql "$DB_URL" \
             -c "SELECT filename, applied_at FROM public._migration_history ORDER BY applied_at;" \
             2>/dev/null || echo "(none)"
 
@@ -96,7 +130,7 @@ jobs:
           PENDING=0
           for f in $(ls supabase/migrations/*.sql 2>/dev/null | sort); do
             fname=$(basename "$f")
-            EXISTS=$(psql "$DATABASE_URL" -t -c \
+            EXISTS=$(PGPASSWORD="$DB_PASSWORD" psql "$DB_URL" -t -c \
               "SELECT COUNT(*) FROM public._migration_history WHERE filename='$fname';" 2>/dev/null | tr -d ' ')
             if [ "$EXISTS" = "0" ]; then
               echo "  → $fname"
@@ -126,24 +160,47 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.environment == 'production' && 'v1' || github.event.inputs.environment == 'staging' && 'v1-staging' || 'v1-dev' }}
 
-      - name: Install psql client
+      - name: Install psql client + SSH tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends postgresql-client
+          sudo apt-get install -y --no-install-recommends postgresql-client openssh-client
+
+      - name: Setup SSH tunnel
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/tunnel_key
+          chmod 600 ~/.ssh/tunnel_key
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+          ssh -f -N -L 15432:localhost:${DB_PORT} \
+            -i ~/.ssh/tunnel_key \
+            -o StrictHostKeyChecking=no \
+            -o ServerAliveInterval=30 \
+            ${SSH_USER}@${SSH_HOST}
+
+          echo "✅ SSH tunnel established"
 
       - name: Verify DB connection
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: |
-          psql "$DATABASE_URL" -c "SELECT version();" -t -q
+          PGPASSWORD="$DB_PASSWORD" psql "postgresql://postgres@localhost:15432/postgres" \
+            -c "SELECT version();" -t -q
           echo "✅ Connection verified"
 
       - name: Ensure migration tracking table exists
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: |
-          psql "$DATABASE_URL" <<'SQL'
+          PGPASSWORD="$DB_PASSWORD" psql "postgresql://postgres@localhost:15432/postgres" <<'SQL'
             CREATE TABLE IF NOT EXISTS public._migration_history (
               filename    TEXT PRIMARY KEY,
               applied_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -153,9 +210,10 @@ jobs:
 
       - name: Apply pending migrations
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           APPLIED_BY: ${{ github.actor }}
         run: |
+          DB_URL="postgresql://postgres@localhost:15432/postgres"
           echo "Applying migrations to ${{ github.event.inputs.environment }}..."
           APPLIED=0
           FAILED=0
@@ -163,7 +221,7 @@ jobs:
           for f in $(ls supabase/migrations/*.sql 2>/dev/null | sort); do
             fname=$(basename "$f")
 
-            EXISTS=$(psql "$DATABASE_URL" -t -c \
+            EXISTS=$(PGPASSWORD="$DB_PASSWORD" psql "$DB_URL" -t -c \
               "SELECT COUNT(*) FROM public._migration_history WHERE filename='$fname';" \
               2>/dev/null | tr -d ' ')
 
@@ -173,11 +231,11 @@ jobs:
             fi
 
             echo "  → Applying: $fname"
-            if psql "$DATABASE_URL" \
+            if PGPASSWORD="$DB_PASSWORD" psql "$DB_URL" \
                 --single-transaction \
                 --set ON_ERROR_STOP=on \
                 -f "$f"; then
-              psql "$DATABASE_URL" -c \
+              PGPASSWORD="$DB_PASSWORD" psql "$DB_URL" -c \
                 "INSERT INTO public._migration_history (filename, applied_by)
                  VALUES ('$fname', '$APPLIED_BY')
                  ON CONFLICT (filename) DO NOTHING;"
@@ -207,10 +265,10 @@ jobs:
 
       - name: Verify applied migrations
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: |
           echo "Migration history after apply:"
-          psql "$DATABASE_URL" \
+          PGPASSWORD="$DB_PASSWORD" psql "postgresql://postgres@localhost:15432/postgres" \
             -c "SELECT filename, applied_at, applied_by FROM public._migration_history ORDER BY applied_at DESC LIMIT 20;"
 
       - name: Notify Slack
