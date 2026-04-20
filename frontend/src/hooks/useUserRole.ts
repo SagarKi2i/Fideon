@@ -62,6 +62,8 @@ export function useUserRole() {
       // Cancel any previous in-flight request before starting a new one.
       cancelInflight();
 
+      let controller: AbortController | null = null;
+
       try {
         const { data: { session } } = await supabase.auth.getSession();
         const sessionUser = session?.user ?? null;
@@ -73,12 +75,17 @@ export function useUserRole() {
           return;
         }
 
-        const controller = new AbortController();
+        controller = new AbortController();
         // 15 s — generous enough for cold-start staging backends / APIM overhead.
-        const timer = setTimeout(() => controller.abort(), 15_000);
+        const timer = setTimeout(() => controller!.abort(), 15_000);
         inflightRef.current = { controller, timer };
 
         const resolvedRole = await resolveUserRole(session.access_token, controller.signal);
+
+        // Staleness guard: if this call was superseded by a newer fetchUserRole
+        // invocation, inflightRef no longer points to our controller. Bail out
+        // so we don't overwrite the newer call's already-committed role value.
+        if (inflightRef.current?.controller !== controller) return;
 
         clearTimeout(timer);
         inflightRef.current = null;
