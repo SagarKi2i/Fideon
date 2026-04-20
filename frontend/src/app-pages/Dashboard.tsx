@@ -143,18 +143,19 @@ export default function Dashboard() {
     { id: string; action: string; time: string; status: "success" | "error"; podName: string }[]
   >([]);
 
-  const loadActivatedPods = useCallback(async (userId: string) => {
+  const loadActivatedPods = useCallback(async (userId: string, signal?: AbortSignal) => {
     try {
       const { data: { session: authSession } } = await supabase.auth.getSession();
       const token = authSession?.access_token;
       const fallbackName = authSession?.user?.email?.split("@")[0] ?? "User";
+      const headers = { Authorization: `Bearer ${token}` };
 
       // Fetch profile, activated models, conversations, and workflow runs via backend
       const [profRes, modelsRes, convsRes, runsRes] = await Promise.all([
-        fetch(apiUrl("/api/settings/profile"), { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(apiUrl("/api/v1/activated-models"), { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(apiUrl("/api/v1/chat-conversations"), { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(apiUrl("/api/v1/workflow-runs?limit=100"), { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(apiUrl("/api/settings/profile"), { headers, signal }),
+        fetch(apiUrl("/api/v1/activated-models"), { headers, signal }),
+        fetch(apiUrl("/api/v1/chat-conversations"), { headers, signal }),
+        fetch(apiUrl("/api/v1/workflow-runs?limit=100"), { headers, signal }),
       ]);
 
       if (profRes.ok) {
@@ -281,8 +282,8 @@ export default function Dashboard() {
         const bTime = b.time === "Just now" ? 0 : 1;
         return aTime - bTime;
       }).slice(0, 5));
-    } catch (error) {
-      console.error("Error loading pods:", error);
+    } catch (error: any) {
+      if (error?.name !== "AbortError") console.error("Error loading pods:", error);
     } finally {
       setLoading(false);
     }
@@ -290,17 +291,19 @@ export default function Dashboard() {
 
   useEffect(() => {
     let channel: RealtimeChannel | null = null;
-    let isMounted = true;
+    const controller = new AbortController();
 
     const init = async () => {
       const { data: { session } } = await supabase.auth.getSession();
       const user = session?.user;
-      if (!user || !isMounted) {
+      if (!user || controller.signal.aborted) {
         setLoading(false);
         return;
       }
 
-      await loadActivatedPods(user.id);
+      await loadActivatedPods(user.id, controller.signal);
+
+      if (controller.signal.aborted) return;
 
       channel = supabase
         .channel(`dashboard-live-${user.id}`)
@@ -330,10 +333,8 @@ export default function Dashboard() {
     void init();
 
     return () => {
-      isMounted = false;
-      if (channel) {
-        supabase.removeChannel(channel);
-      }
+      controller.abort();
+      if (channel) supabase.removeChannel(channel);
     };
   }, [loadActivatedPods]);
 

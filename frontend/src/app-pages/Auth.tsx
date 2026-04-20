@@ -80,32 +80,33 @@ function isRecoveryRoute(pathname: string, search: string, hash: string): boolea
 }
 
 async function resolveEffectiveRole(token: string): Promise<AppRole> {
+  const controller = new AbortController();
+  // 15 s — generous enough for cold-start staging backends / APIM overhead.
+  const timeout = setTimeout(() => controller.abort(), 15_000);
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
-    try {
-      const res = await fetch(apiUrl("/api/settings/profile"), {
-        headers: { Authorization: `Bearer ${token}` },
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
-      if (res.ok) {
-        const payload = await readJsonSafe(res);
-        const backendRole = payload?.profile?.role;
-        if (isAppRole(backendRole)) {
-          return backendRole;
-        }
-      } else if (res.status === 401 || res.status === 403) {
-        const payload = await readJsonSafe(res);
-        throw buildApiRequestError(res, payload, "Unable to resolve user role");
-      }
-    } finally {
-      clearTimeout(timeout);
-    }
-  } catch (backendError) {
-    safeLog.error("auth_role_backend_fallback_error", {
-      error: backendError instanceof Error ? backendError.message : String(backendError),
+    const res = await fetch(apiUrl("/api/settings/profile"), {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
     });
+    clearTimeout(timeout);
+    if (res.ok) {
+      const payload = await readJsonSafe(res);
+      const backendRole = payload?.profile?.role;
+      if (isAppRole(backendRole)) {
+        return backendRole;
+      }
+    } else if (res.status === 401 || res.status === 403) {
+      const payload = await readJsonSafe(res);
+      throw buildApiRequestError(res, payload, "Unable to resolve user role");
+    }
+  } catch (backendError: any) {
+    if (backendError?.name !== "AbortError") {
+      safeLog.error("auth_role_backend_fallback_error", {
+        error: backendError instanceof Error ? backendError.message : String(backendError),
+      });
+    }
+  } finally {
+    clearTimeout(timeout);
   }
 
   return "user";
