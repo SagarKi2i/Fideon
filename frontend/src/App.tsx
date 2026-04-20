@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Layout } from "./components/Layout";
 import { ProtectedRoute } from "./components/ProtectedRoute";
+import { UserRoleProvider } from "@/contexts/UserRoleContext";
 import { AuthRecoveryRedirector } from "./components/AuthRecoveryRedirector";
 import Dashboard from "./app-pages/Dashboard";
 import AdminDashboard from "./app-pages/AdminDashboard";
@@ -46,6 +47,7 @@ const App = () => (
       <Toaster />
       <Sonner />
       <BrowserRouter>
+        <UserRoleProvider>
         <AuthRecoveryRedirector />
         <Routes>
           <Route path="/electron-playground" element={<ElectronPlayground />} />
@@ -180,6 +182,7 @@ const App = () => (
             </ProtectedRoute>
           } />
         </Routes>
+        </UserRoleProvider>
       </BrowserRouter>
     </TooltipProvider>
   </QueryClientProvider>

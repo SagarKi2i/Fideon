@@ -6938,3 +6938,41 @@ $$;
 -- END MIGRATION: 20260416100000_seat_limit_enforcement.sql
 -- ============================================================================
 
+
+-- ============================================================================
+-- BEGIN MIGRATION: 20260420100000_custom_access_token_hook.sql
+-- ============================================================================
+
+CREATE OR REPLACE FUNCTION public.custom_access_token_hook(event jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  claims   jsonb;
+  user_role text;
+BEGIN
+  SELECT role::text INTO user_role
+  FROM public.user_roles
+  WHERE user_id = (event->>'user_id')::uuid;
+
+  claims := event->'claims';
+  claims := jsonb_set(
+    claims,
+    '{app_metadata}',
+    COALESCE(claims->'app_metadata', '{}'::jsonb)
+      || jsonb_build_object('role', COALESCE(user_role, 'user'))
+  );
+
+  RETURN jsonb_set(event, '{claims}', claims);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.custom_access_token_hook TO supabase_auth_admin;
+REVOKE EXECUTE ON FUNCTION public.custom_access_token_hook FROM authenticated, anon, public;
+
+-- ============================================================================
+-- END MIGRATION: 20260420100000_custom_access_token_hook.sql
+-- ============================================================================
