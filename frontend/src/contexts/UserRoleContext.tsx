@@ -151,9 +151,18 @@ export function UserRoleProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // Mirrors role state so we can read the current value inside async callbacks
+  // without stale closure captures.
+  const roleRef = useRef<AppRole | null>(null);
+
   // Tracks the active lifecycle controller so we can cancel it when a newer
   // fetchUserRole() call starts or when the provider unmounts.
   const inflightRef = useRef<AbortController | null>(null);
+
+  function commitRole(newRole: AppRole) {
+    roleRef.current = newRole;
+    setRole(newRole);
+  }
 
   useEffect(() => {
     function cancelInflight() {
@@ -186,7 +195,7 @@ export function UserRoleProvider({ children }: { children: ReactNode }) {
         // Read it directly — zero HTTP calls, zero latency.
         const jwtRole = sessionUser.app_metadata?.role;
         if (isAppRole(jwtRole)) {
-          setRole(jwtRole);
+          commitRole(jwtRole);
           setLoading(false);
           return;
         }
@@ -205,8 +214,21 @@ export function UserRoleProvider({ children }: { children: ReactNode }) {
         // Staleness guard: if a newer call already committed its result, bail.
         if (inflightRef.current !== lifecycle) return;
 
+        // Never downgrade from a specific role to the 'user' fallback.
+        // Guards against: fast path sets 'global_admin', then a concurrent
+        // slow-path call (triggered by SIGNED_IN) times out after its 3s
+        // retry delay and tries to overwrite with 'user'.
+        if (
+          resolvedRole === "user" &&
+          roleRef.current !== null &&
+          roleRef.current !== "user"
+        ) {
+          inflightRef.current = null;
+          return;
+        }
+
         inflightRef.current = null;
-        setRole(resolvedRole);
+        commitRole(resolvedRole);
       } catch (err: any) {
         if (err?.name !== "AbortError") {
           console.error("Error in fetchUserRole:", err);
@@ -252,8 +274,16 @@ export function UserRoleProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      // SIGNED_IN (actual login) — fetch role for the new user.
+      // SIGNED_IN (actual login) — try fast path from the event session first.
+      // Using session.user directly avoids a stale getSession() result that
+      // could miss app_metadata.role and trigger the slow path unnecessarily.
       setUser(session.user);
+      const signedInRole = session.user.app_metadata?.role;
+      if (isAppRole(signedInRole)) {
+        commitRole(signedInRole);
+        return;
+      }
+      // JWT predates the hook — fall back to HTTP.
       fetchUserRole();
     });
 
