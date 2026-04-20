@@ -208,34 +208,29 @@ export default function AdminDashboard() {
 
   const fetchPairingInsights = useCallback(async () => {
     try {
-      const { data: pairingRows, error: pairingError } = await (supabase as any)
-        .from('device_pairings')
-        .select('id,status,created_at,expires_at,consumed_at,linked_device_id,primary_device_label')
-        .order('created_at', { ascending: false })
-        .limit(12);
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) return;
+      const token = session.access_token;
 
-      if (pairingError) {
-        const missingTable = String(pairingError.message || '').toLowerCase().includes('device_pairings');
-        if (missingTable) {
-          setPairingDbReady(false);
-          return;
-        }
-        throw pairingError;
+      const [pairingsRes, devicesRes] = await Promise.all([
+        fetch(apiUrl('/api/v1/admin/device-pairings?limit=12'), { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(apiUrl('/api/v1/admin/devices'), { headers: { Authorization: `Bearer ${token}` } }),
+      ]);
+
+      if (!pairingsRes.ok) {
+        if (pairingsRes.status === 404) { setPairingDbReady(false); return; }
+        throw new Error(`HTTP ${pairingsRes.status}`);
       }
-
       setPairingDbReady(true);
-      setPairings((pairingRows ?? []) as unknown as PairingSession[]);
+      const pairingsPayload = await pairingsRes.json();
+      setPairings((pairingsPayload.device_pairings ?? []) as PairingSession[]);
 
-      const { data: allRecentDevices, error: devicesError } = await (supabase as any)
-        .from('devices')
-        .select('id,device_name,registered_at,status,os_type,app_version,metadata')
-        .order('registered_at', { ascending: false })
-        .limit(40);
-
-      if (devicesError) throw devicesError;
-
-      const linked = (allRecentDevices ?? []).filter((row: any) => row?.metadata?.linked_from_pairing === true);
-      setLinkedDevices(linked.slice(0, 12) as unknown as LinkedDevice[]);
+      if (devicesRes.ok) {
+        const devicesPayload = await devicesRes.json();
+        const allRecentDevices: LinkedDevice[] = devicesPayload.devices ?? [];
+        const linked = allRecentDevices.filter((row: any) => row?.metadata?.linked_from_pairing === true);
+        setLinkedDevices(linked.slice(0, 12));
+      }
     } catch (error) {
       console.error('Error fetching device pairing insights:', error);
     }

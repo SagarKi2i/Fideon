@@ -31,6 +31,7 @@ import {
 import { extractAcord } from "@/lib/acordWorkflowApi";
 import { extractDocumentText } from "@/lib/documentText";
 import { buildPolicyComparisonPrompt } from "@/lib/policyComparisonPrompt";
+import { apiUrl } from "@/lib/apiBaseUrl";
 
 interface ActivatedModel {
   id: string;
@@ -95,19 +96,20 @@ export default function Playground() {
 
   const checkAccess = async () => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.user) {
         navigate("/auth");
         return;
       }
+      const token = session.access_token;
 
-      const { data: roles } = await (supabase as any)
-        .from("user_roles")
-        .select("role")
-        .eq("user_id", user.id);
+      const profRes = await fetch(apiUrl("/api/settings/profile"), {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const profData = profRes.ok ? await profRes.json() : null;
+      const userRole = profData?.profile?.role;
 
-      const isAdmin = roles?.some((r: any) => r.role === "admin");
-      if (isAdmin) {
+      if (userRole === "admin" || userRole === "global_admin") {
         toast({
           title: "Access Denied",
           description: "Playground is only available for user accounts",
@@ -117,23 +119,23 @@ export default function Playground() {
         return;
       }
 
-      loadActivatedModels(user.id);
+      await loadActivatedModels(token);
     } catch (error) {
       console.error("Error checking access:", error);
       navigate("/auth");
     }
   };
 
-  const loadActivatedModels = async (userId: string) => {
+  const loadActivatedModels = async (token: string) => {
     try {
-      const { data, error } = await (supabase as any)
-        .from("activated_models")
-        .select("*")
-        .eq("user_id", userId);
-
-      if (error) throw error;
-      setModels(data || []);
-      if (data && data.length > 0) {
+      const res = await fetch(apiUrl("/api/v1/activated-models"), {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const payload = await res.json();
+      const data: ActivatedModel[] = payload.activated_models || [];
+      setModels(data);
+      if (data.length > 0) {
         const modelFromUrl = new URLSearchParams(location.search).get("model");
         const requestedModel = modelFromUrl ? decodeURIComponent(modelFromUrl) : null;
         const match = requestedModel

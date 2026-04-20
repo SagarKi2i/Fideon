@@ -18,8 +18,7 @@ type DeviceType = "desktop" | "laptop" | "mobile" | "tablet" | "other";
 type NavigatorWithUserAgentData = Navigator & { userAgentData?: { platform?: string } };
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PASSWORD_STRENGTH_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d]).+$/;
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL as string | undefined;
-const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY as string | undefined;
+
 const LIMITS = {
   tenantName: { min: 2, max: 100 },
   fullName: { min: 2, max: 80 },
@@ -554,25 +553,14 @@ export default function Signup() {
         userMetadata.default_model_id = null;
       }
 
-      if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-        throw new Error("Supabase environment variables are not configured.");
-      }
-
-      // Use GoTrue signup directly so we can access DB-trigger error codes
-      // (e.g. pack-limit concurrency failures with code `P0001`).
-      const signupRes = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
+      // Route signup through the backend — no direct Supabase connection.
+      const signupRes = await fetch(apiUrl("/api/v1/auth/signup"), {
         method: "POST",
-        headers: {
-          apikey: SUPABASE_ANON_KEY,
-          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           email: normalizedEmail,
           password,
-          data: {
-            ...userMetadata,
-          },
+          data: { ...userMetadata },
         }),
       });
 
@@ -580,7 +568,7 @@ export default function Signup() {
       if (!signupRes.ok) {
         throw {
           code: signupJson?.code,
-          message: signupJson?.message,
+          message: signupJson?.message || signupJson?.error || "Signup failed",
           status: signupRes.status,
         };
       }
@@ -593,13 +581,19 @@ export default function Signup() {
         await supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
       }
 
-      if (signedUpUserId) {
-        const { error: profileError } = await (supabase as any)
-          .from("app_users")
-          .update({ full_name: fullName })
-          .eq("user_id", signedUpUserId);
-        if (profileError) {
-          console.warn("Unable to update app_users full_name:", profileError.message);
+      // Update full_name via backend — no direct Supabase call.
+      if (signedUpUserId && accessToken && fullName.trim()) {
+        try {
+          await fetch(apiUrl("/api/v1/auth/profile/name"), {
+            method: "PATCH",
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ full_name: fullName.trim() }),
+          });
+        } catch {
+          console.warn("Unable to update profile full_name via backend");
         }
       }
 

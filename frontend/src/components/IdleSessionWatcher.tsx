@@ -6,7 +6,7 @@ import { useToast } from "@/hooks/use-toast";
 import { getIdleSessionTimeoutMs, useIdleSessionTimeout } from "@/hooks/useIdleSessionTimeout";
 import { useUserRole } from "@/hooks/useUserRole";
 import { supabase } from "@/integrations/supabase/client";
-import { computeAuditIntegrityHash } from "@/lib/auditHash";
+import { apiUrl } from "@/lib/apiBaseUrl";
 import { safeLog } from "@/logger";
 
 /**
@@ -19,45 +19,24 @@ export function IdleSessionWatcher() {
   const { role } = useUserRole();
 
   const handleIdle = useCallback(async () => {
-    const { data: { user } } = await supabase.auth.getUser();
-    const currentRole = role;
-
     try {
-      if (user) {
-        try {
-          const createdAt = new Date().toISOString();
-          const integrity_hash = await computeAuditIntegrityHash({
-            user_id: user.id,
-            role: currentRole || "user",
-            event: "session_timeout",
-            action_code: "E",
-            outcome_code: 0,
-            resource_type: "auth_session",
-            resource_id: null,
-            created_at: createdAt,
-          });
-
-          await (supabase as any).from("auth_audit").insert({
-              user_id: user.id,
-              email: user.email,
-              role: currentRole || "user",
-              event: "session_timeout",
-              action_code: "E",
-              outcome_code: 0,
-              resource_type: "auth_session",
-              resource_id: null,
-              created_at: createdAt,
-              integrity_hash,
-            });
-        } catch (auditError) {
-          safeLog.error("auth_audit_session_timeout_error", {
-            error: auditError instanceof Error ? auditError.message : String(auditError),
-          });
-        }
+      // Revoke session server-side (backend also writes the audit row).
+      const { data: sessData } = await supabase.auth.getSession();
+      const token = sessData.session?.access_token;
+      if (token) {
+        await fetch(apiUrl("/api/v1/auth/logout"), {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        });
       }
+    } catch (e) {
+      safeLog.error("idle_backend_logout_error", {
+        error: e instanceof Error ? e.message : String(e),
+      });
     } finally {
       try {
-        await supabase.auth.signOut();
+        // Clear local session only — no extra server call.
+        await supabase.auth.signOut({ scope: "local" });
       } catch (e) {
         safeLog.error("idle_sign_out_error", {
           error: e instanceof Error ? e.message : String(e),

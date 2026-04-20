@@ -27,6 +27,7 @@ import {
   User
 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { apiUrl } from "@/lib/apiBaseUrl";
 import { useToast } from "@/hooks/use-toast";
 import {
   AlertDialog,
@@ -526,20 +527,22 @@ export default function PodDashboard() {
     }
 
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { session } } = await supabase.auth.getSession();
+      const user = session?.user;
       if (!user) {
         navigate("/auth");
         return;
       }
 
-      const { data, error } = await (supabase as any)
-        .from("activated_models")
-        .select("*")
-        .eq("user_id", user.id)
-        .eq("model_id", podId)
-        .single();
+      const res = await fetch(
+        apiUrl(`/api/v1/activated-models?model_id=${encodeURIComponent(podId)}`),
+        { headers: { Authorization: `Bearer ${session.access_token}` } },
+      );
+      const payload = res.ok ? await res.json() : null;
+      const rows: ActivatedPod[] = payload?.activated_models ?? [];
+      const data = rows[0] ?? null;
 
-      if (error || !data) {
+      if (!data) {
         toast({
           title: "Pod not found",
           description: "This pod may have been deactivated",
@@ -559,16 +562,16 @@ export default function PodDashboard() {
 
   const handleDeactivate = async () => {
     if (!pod) return;
-    
+
     setDeactivating(true);
     try {
-      const { error } = await (supabase as any)
-        .from("activated_models")
-        .delete()
-        .eq("id", pod.id);
-
-      if (error) throw error;
-
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) throw new Error("Not authenticated");
+      const res = await fetch(apiUrl(`/api/v1/activated-models/${encodeURIComponent(pod.id)}`), {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       toast({
         title: "Pod deactivated",
         description: `${pod.model_name} has been deactivated successfully`,

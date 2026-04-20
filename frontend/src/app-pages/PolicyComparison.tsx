@@ -5,6 +5,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Label } from "@/components/ui/label";
 import { Shield, ArrowLeftRight, AlertCircle } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { apiUrl } from "@/lib/apiBaseUrl";
 import { useToast } from "@/hooks/use-toast";
 import { Badge } from "@/components/ui/badge";
 
@@ -40,19 +41,17 @@ export default function PolicyComparison() {
 
   const loadDocuments = async () => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
         setDocuments([]);
         return;
       }
-      const { data, error } = await (supabase as any)
-        .from("documents")
-        .select("id, filename, file_type")
-        .eq("user_id", user.id)
-        .or("file_type.eq.application/pdf,file_type.ilike.%word%");
-
-      if (error) throw error;
-      setDocuments(data ?? []);
+      const res = await fetch(apiUrl("/api/v1/documents"), {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const payload = await res.json();
+      setDocuments(payload.documents ?? []);
     } catch (error) {
       console.error("Error loading documents:", error);
     }

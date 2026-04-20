@@ -68,23 +68,22 @@ export default function MyModels() {
 
   const loadActivatedModels = async () => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { session } } = await supabase.auth.getSession();
+      const user = session?.user;
       if (!user) {
         navigate("/auth");
         return;
       }
       setCurrentUserId(user.id);
 
-      const { data, error } = await (supabase as any)
-        .from("activated_models")
-        .select("*")
-        .eq("user_id", user.id)
-        .order("activated_at", { ascending: false });
-
-      if (error) throw error;
-      const nextModels = data || [];
+      const res = await fetch(apiUrl("/api/v1/activated-models"), {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const payload = await res.json();
+      const nextModels: ActivatedModel[] = payload.activated_models || [];
       setModels(nextModels);
-      void loadModelTelemetry(user.id, nextModels.map((m: any) => m.model_id));
+      void loadModelTelemetry(session.access_token, nextModels.map((m: any) => m.model_id));
     } catch (error) {
       console.error("Error loading models:", error);
       toast({
@@ -97,22 +96,19 @@ export default function MyModels() {
     }
   };
 
-  const loadModelTelemetry = async (userId: string, modelIds: string[]) => {
+  const loadModelTelemetry = async (token: string, modelIds: string[]) => {
     if (!modelIds.length) {
       setTelemetryByModelId({});
       return;
     }
 
-    const { data, error } = await (supabase as any)
-      .from("chat_conversations")
-      .select("model_id,updated_at")
-      .eq("user_id", userId)
-      .in("model_id", modelIds);
-
-    if (error) {
-      console.error("Error loading model telemetry:", error);
-      return;
-    }
+    const ids = modelIds.map(encodeURIComponent).join(",");
+    const res = await fetch(apiUrl(`/api/v1/chat-conversations?model_ids=${ids}`), {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return;
+    const payload = await res.json();
+    const data: { model_id: string; updated_at: string }[] = payload.conversations || [];
 
     const modelStats: Record<string, { count: number; lastUpdatedAt: string | null }> = {};
     for (const row of data || []) {

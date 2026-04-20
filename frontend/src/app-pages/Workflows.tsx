@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Brain, Plus, Play, Loader2, CheckCircle2, Circle, ArrowRight, Sparkles, FileText, Trash2, MessageSquare, Send } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
+import { apiUrl } from "@/lib/apiBaseUrl";
 import { streamFromEdgeFunction } from "@/lib/streamHelper";
 import { streamChat } from "@/lib/aiChat";
 
@@ -69,7 +70,6 @@ function getStepTimelineClass(index: number, currentStep: number): string {
 
 export default function Workflows() {
   const { toast } = useToast();
-  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
@@ -110,18 +110,22 @@ export default function Workflows() {
 
   useEffect(() => {
     void (async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      setCurrentUserId(user?.id ?? null);
-      await Promise.all([loadWorkflows(user?.id ?? null), loadModels(user?.id ?? null)]);
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token ?? null;
+      await Promise.all([loadWorkflows(token), loadModels(token)]);
     })();
   }, []);
 
-  const loadModels = async (userId?: string | null) => {
+  const loadModels = async (token: string | null) => {
+    if (!token) return;
     try {
-      const uid = userId ?? currentUserId;
-      if (!uid) return;
-      const { data } = await (supabase as any).from("activated_models").select("*").eq("user_id", uid);
-      if (data && data.length > 0) {
+      const res = await fetch(apiUrl("/api/v1/activated-models"), {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return;
+      const payload = await res.json();
+      const data: ActivatedModel[] = payload.activated_models ?? [];
+      if (data.length > 0) {
         setModels(data);
         setSelectedModel(data[0].model_id);
       }
@@ -130,18 +134,15 @@ export default function Workflows() {
     }
   };
 
-
-  const loadWorkflows = async (userId?: string | null) => {
+  const loadWorkflows = async (token: string | null) => {
+    if (!token) return;
     try {
-      const uid = userId ?? currentUserId;
-      if (!uid) return;
-      const { data, error } = await (supabase as any)
-        .from("workflows")
-        .select("*")
-        .eq("user_id", uid)
-        .order("created_at", { ascending: false });
-      if (error) throw error;
-      setWorkflows((data ?? []).map((w: any) => ({
+      const res = await fetch(apiUrl("/api/v1/workflows"), {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const payload = await res.json();
+      setWorkflows((payload.workflows ?? []).map((w: any) => ({
         ...w,
         parsed_steps: Array.isArray(w.parsed_steps) ? w.parsed_steps : [],
       })));
@@ -179,19 +180,24 @@ export default function Workflows() {
         parsedSteps = JSON.parse(jsonMatch[0]);
       }
 
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error("Not authenticated");
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) throw new Error("Not authenticated");
 
-      const { error } = await (supabase as any).from("workflows").insert({
-        user_id: user.id,
-        title: newTitle,
-        description: newDescription || null,
-        sop_text: newSopText,
-        category: newCategory,
-        parsed_steps: parsedSteps as any,
+      const res = await fetch(apiUrl("/api/v1/workflows"), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          title: newTitle,
+          description: newDescription || null,
+          sop_text: newSopText,
+          category: newCategory,
+          parsed_steps: parsedSteps,
+        }),
       });
-
-      if (error) throw error;
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
       toast({ title: "Workflow Created", description: `${parsedSteps.length} steps parsed from your SOP` });
       setCreateOpen(false);
@@ -199,7 +205,7 @@ export default function Workflows() {
       setNewDescription("");
       setNewSopText("");
       setNewCategory("general");
-      await loadWorkflows();
+      await loadWorkflows(session.access_token);
     } catch (e: any) {
       console.error(e);
       toast({ title: "Error", description: e.message ?? "Failed to create workflow", variant: "destructive" });
@@ -210,18 +216,25 @@ export default function Workflows() {
 
   const startRun = async (workflow: Workflow) => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
 
-      const { data, error } = await (supabase as any).from("workflow_runs").insert({
-        workflow_id: workflow.id,
-        user_id: user.id,
-        status: "in_progress",
-        current_step: 0,
-        step_results: [] as any,
-      }).select().single();
-
-      if (error) throw error;
+      const res = await fetch(apiUrl("/api/v1/workflow-runs"), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          workflow_id: workflow.id,
+          status: "in_progress",
+          current_step: 0,
+          step_results: [],
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const payload = await res.json();
+      const data = payload.workflow_run;
 
       setActiveRun({
         workflow,
@@ -278,12 +291,21 @@ export default function Workflows() {
     const nextStep = activeRun.run.current_step + 1;
     const isComplete = nextStep >= activeRun.workflow.parsed_steps.length;
 
-    await (supabase as any).from("workflow_runs").update({
-      current_step: nextStep,
-      step_results: newResults as any,
-      status: isComplete ? "completed" : "in_progress",
-      completed_at: isComplete ? new Date().toISOString() : null,
-    }).eq("id", activeRun.run.id).eq("user_id", currentUserId ?? "");
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) return;
+    await fetch(apiUrl(`/api/v1/workflow-runs/${activeRun.run.id}`), {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${session.access_token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        current_step: nextStep,
+        step_results: newResults,
+        status: isComplete ? "completed" : "in_progress",
+        completed_at: isComplete ? new Date().toISOString() : null,
+      }),
+    });
 
     if (isComplete) {
       toast({ title: "Workflow Complete!", description: `All ${activeRun.workflow.parsed_steps.length} steps finished` });
@@ -299,8 +321,13 @@ export default function Workflows() {
   };
 
   const deleteWorkflow = async (id: string) => {
-    await (supabase as any).from("workflows").delete().eq("id", id).eq("user_id", currentUserId ?? "");
-    await loadWorkflows();
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) return;
+    await fetch(apiUrl(`/api/v1/workflows/${id}`), {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    await loadWorkflows(session.access_token);
   };
 
   const runModelPrompt = async () => {

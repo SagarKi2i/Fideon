@@ -103,17 +103,14 @@ export function AppSidebar() {
 
   const loadActivatedPods = useCallback(async () => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-
-      const { data, error } = await (supabase as any)
-        .from("activated_models")
-        .select("*")
-        .eq("user_id", user.id);
-
-      if (!error && data) {
-        setActivatedPods(data);
-      }
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) return;
+      const res = await fetch(apiUrl("/api/v1/activated-models"), {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!res.ok) return;
+      const payload = await res.json();
+      setActivatedPods(payload.activated_models || []);
     } catch (error) {
       console.error("Error loading pods:", error);
     }

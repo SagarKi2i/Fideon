@@ -29,6 +29,7 @@ import {
 import { isElectron } from "@/lib/ollama";
 import { getStoredDeviceToken } from "@/lib/deviceApi";
 import { supabase } from "@/integrations/supabase/client";
+import { apiUrl } from "@/lib/apiBaseUrl";
 import { useNavigate } from "react-router-dom";
 import {
   submitFeedback,
@@ -70,14 +71,17 @@ export default function Training() {
 
   useEffect(() => {
     const init = async () => {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { session } } = await supabase.auth.getSession();
+      const user = session?.user;
       if (!user) { navigate("/auth"); return; }
 
-      const { data: models } = await (supabase as any)
-        .from("activated_models")
-        .select("model_id, model_name")
-        .eq("user_id", user.id);
-      setActivatedModels(models ?? []);
+      const modelsRes = await fetch(apiUrl("/api/v1/activated-models"), {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (modelsRes.ok) {
+        const modelsPayload = await modelsRes.json();
+        setActivatedModels(modelsPayload.activated_models ?? []);
+      }
 
       const electron = await isElectron();
       setIsElectronApp(electron);

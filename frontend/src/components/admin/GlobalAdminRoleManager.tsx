@@ -123,58 +123,21 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
 
   const selectedRoleOption = roleOptions.find((o: any) => o.role === newUserRole) ?? roleOptions[0];
 
-  const loadUsersFromSupabaseFallback = useCallback(async () => {
-    const { data: appUsers, error: appUsersError } = await (supabase as any)
-      .from("app_users")
-      .select("user_id,email,tenants(name)")
-      .order("email", { ascending: true });
-    if (appUsersError) throw appUsersError;
-
-    const { data: roleRows, error: roleRowsError } = await (supabase as any)
-      .from("user_roles")
-      .select("user_id,role");
-    if (roleRowsError) throw roleRowsError;
-
-    const roleMap = new Map((roleRows || []).map((r: any) => [r.user_id, r.role as AppRole]));
-    setUsers(
-      (appUsers || []).map((u: any) => ({
-        id: u.user_id,
-        email: u.email,
-        role: roleMap.get(u.user_id) || "user",
-        tenant_name: (u as any)?.tenants?.name || "",
-      }))
-    );
-  }, []);
-
   const loadUsers = useCallback(async () => {
     setLoading(true);
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) return;
 
-      try {
-        const response = await fetch(apiUrl("/api/list-users"), {
-          headers: {
-            Authorization: `Bearer ${session.access_token}`,
-            "Content-Type": "application/json",
-          },
-        });
-        if (response.ok) {
-          const data = await readJsonSafe(response);
-          setUsers((data.users || []).map((u: any) => ({ ...u, role: (u.role || "user") as AppRole })));
-          return;
-        }
-        // For admin/global admin we require backend-tenant-scoped user listing.
-        // Falling back to client-side table reads can show incomplete rows under RLS.
-        if (currentUserRole === "admin" || currentUserRole === "global_admin") {
-          const payload = await readJsonSafe(response);
-          throw buildApiRequestError(response, payload, "Failed to load tenant users");
-        }
-      } catch (backendError) {
-        console.warn("Primary /api/list-users failed, using fallback:", backendError);
-      }
-
-      await loadUsersFromSupabaseFallback();
+      const response = await fetch(apiUrl("/api/list-users"), {
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          "Content-Type": "application/json",
+        },
+      });
+      const data = await readJsonSafe(response);
+      if (!response.ok) throw buildApiRequestError(response, data, "Failed to load users");
+      setUsers((data.users || []).map((u: any) => ({ ...u, role: (u.role || "user") as AppRole })));
     } catch (error) {
       console.error("Error loading users:", error);
       toast({
@@ -185,7 +148,7 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [currentUserRole, loadUsersFromSupabaseFallback, toast]);
+  }, [toast]);
 
   useEffect(() => {
     void loadUsers();
@@ -199,31 +162,17 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) return;
 
-      let updated = false;
-      try {
-        const response = await fetch(apiUrl("/api/admin-set-user-role"), {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${session.access_token}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ user_id: userId, role }),
-        });
-        if (response.ok) {
-          updated = true;
-        } else {
-          const payload = await readJsonSafe(response);
-          throw buildApiRequestError(response, payload, "Could not update role");
-        }
-      } catch (backendError) {
-        console.warn("Primary /api/admin-set-user-role failed, using fallback:", backendError);
-      }
-
-      if (!updated) {
-        const { error } = await (supabase as any)
-          .from("user_roles")
-          .upsert({ user_id: userId, role }, { onConflict: "user_id" });
-        if (error) throw error;
+      const response = await fetch(apiUrl("/api/admin-set-user-role"), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ user_id: userId, role }),
+      });
+      if (!response.ok) {
+        const payload = await readJsonSafe(response);
+        throw buildApiRequestError(response, payload, "Could not update role");
       }
 
       setUsers((prev) => prev.map((u: any) => (u.id === userId ? { ...u, role } : u)));

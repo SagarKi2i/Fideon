@@ -61,56 +61,20 @@ export function ModelAllocationSection() {
     }
   }, [selectedUserId]);
 
-  async function fetchUsersFromSupabaseFallback() {
-    const { data: appUsers, error: appUsersError } = await (supabase as any)
-      .from('app_users')
-      .select('user_id,email')
-      .order('email', { ascending: true });
-
-    if (appUsersError) throw appUsersError;
-
-    const { data: roleRows, error: rolesError } = await (supabase as any)
-      .from('user_roles')
-      .select('user_id,role');
-
-    if (rolesError) throw rolesError;
-
-    const roleMap = new Map((roleRows || []).map((r: any) => [r.user_id, r.role]));
-    const fallbackUsers: UserInfo[] = (appUsers || []).map((u: any) => ({
-      id: u.user_id,
-      email: u.email,
-      role: roleMap.get(u.user_id) || 'user',
-    }));
-
-    setUsers(fallbackUsers);
-  }
-
   async function fetchUsers() {
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) return;
 
-      try {
-        const response = await fetch(
-          apiUrl('/api/list-users'),
-          {
-            headers: {
-              Authorization: `Bearer ${session.access_token}`,
-              'Content-Type': 'application/json',
-            },
-          }
-        );
-
-        if (response.ok) {
-          const data = await response.json();
-          setUsers(data.users || []);
-          return;
-        }
-      } catch (backendError) {
-        console.warn('Primary /api/list-users failed, using fallback:', backendError);
-      }
-
-      await fetchUsersFromSupabaseFallback();
+      const response = await fetch(apiUrl('/api/list-users'), {
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+      });
+      const data = await readJsonSafe(response);
+      if (!response.ok) throw buildApiRequestError(response, data, 'Failed to load users');
+      setUsers(data.users || []);
     } catch (error) {
       console.error('Error fetching users:', error);
       toast({ title: 'Error', description: 'Failed to load users', variant: 'destructive' });

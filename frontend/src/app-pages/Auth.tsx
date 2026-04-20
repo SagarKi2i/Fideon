@@ -79,46 +79,31 @@ function isRecoveryRoute(pathname: string, search: string, hash: string): boolea
   );
 }
 
-async function resolveEffectiveRole(userId: string): Promise<AppRole> {
-  const { data: roleData, error: roleError } = await (supabase as any)
-    .from("user_roles")
-    .select("role")
-    .eq("user_id", userId)
-    .maybeSingle();
-
-  if (!roleError && isAppRole(roleData?.role)) {
-    return roleData.role;
-  }
-
+async function resolveEffectiveRole(token: string): Promise<AppRole> {
   try {
-    const { data: sessionData } = await supabase.auth.getSession();
-    const token = sessionData.session?.access_token;
-    if (token) {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3000);
-      try {
-        const res = await fetch(apiUrl("/api/settings/profile"), {
-          headers: { Authorization: `Bearer ${token}` },
-          signal: controller.signal,
-        });
-        clearTimeout(timeout);
-        if (res.ok) {
-          const payload = await readJsonSafe(res);
-          const backendRole = payload?.profile?.role;
-          if (isAppRole(backendRole)) {
-            return backendRole;
-          }
-        } else if (res.status === 401 || res.status === 403) {
-          const payload = await readJsonSafe(res);
-          throw buildApiRequestError(res, payload, "Unable to resolve user role");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    try {
+      const res = await fetch(apiUrl("/api/settings/profile"), {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (res.ok) {
+        const payload = await readJsonSafe(res);
+        const backendRole = payload?.profile?.role;
+        if (isAppRole(backendRole)) {
+          return backendRole;
         }
-      } finally {
-        clearTimeout(timeout);
+      } else if (res.status === 401 || res.status === 403) {
+        const payload = await readJsonSafe(res);
+        throw buildApiRequestError(res, payload, "Unable to resolve user role");
       }
+    } finally {
+      clearTimeout(timeout);
     }
   } catch (backendError) {
     safeLog.error("auth_role_backend_fallback_error", {
-      user_id: userId,
       error: backendError instanceof Error ? backendError.message : String(backendError),
     });
   }
@@ -272,8 +257,8 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
     if (isRecoveryCallback) setView("reset");
 
     const bootstrap = async () => {
-      const { data } = await supabase.auth.getUser();
-      setActiveUserId(data.user?.id ?? null);
+      const { data } = await supabase.auth.getSession();
+      setActiveUserId(data.session?.user?.id ?? null);
     };
     bootstrap();
 
@@ -329,54 +314,35 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
 
     try {
       safeLog.info("auth_signin_attempt", { email: normalizedEmail });
-      const { data: signInData, error } = await supabase.auth.signInWithPassword({
-        email: normalizedEmail,
-        password,
+
+      // Route login through the backend — no direct Supabase connection.
+      const loginRes = await fetch(apiUrl("/api/v1/auth/login"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: normalizedEmail, password }),
       });
 
-      if (error) throw error;
+      if (!loginRes.ok) {
+        const errPayload = await readJsonSafe(loginRes);
+        const errMsg = errPayload?.error || errPayload?.detail || "Invalid login credentials";
+        throw new Error(errMsg);
+      }
 
-      if (signInData.user) {
+      const loginData = await loginRes.json();
+      const accessToken: string | undefined = loginData.access_token;
+      const refreshToken: string | undefined = loginData.refresh_token;
+      const userId: string | undefined = loginData.user?.id;
+      const effectiveRole: AppRole = isAppRole(loginData.role) ? loginData.role : "user";
+
+      // Store session locally so the rest of the app (onAuthStateChange, getSession) works.
+      if (accessToken && refreshToken) {
+        await supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
+      }
+
+      if (userId) {
         clearLoginAttemptState(normalizedEmail);
-        const effectiveRole = await resolveEffectiveRole(signInData.user.id);
-
-        safeLog.info("auth_signin_success", {
-          user_id: signInData.user.id,
-          role: effectiveRole,
-        });
-
-        // Insert audit log row (Supabase RLS controls visibility)
-        try {
-          const createdAt = new Date().toISOString();
-          const integrity_hash = await computeAuditIntegrityHash({
-            user_id: signInData.user.id,
-            role: effectiveRole,
-            event: "login",
-            action_code: "E",
-            outcome_code: 0,
-            resource_type: "auth_session",
-            resource_id: null,
-            created_at: createdAt,
-          });
-
-          await (supabase as any).from("auth_audit").insert({
-            user_id: signInData.user.id,
-            email: normalizedEmail,
-            role: effectiveRole,
-            event: "login",
-            action_code: "E",          // Execute (auth workflow)
-            outcome_code: 0,           // Success
-            resource_type: "auth_session",
-            resource_id: null,         // null for auth_session events (no specific resource)
-            created_at: createdAt,
-            integrity_hash,
-          });
-        } catch (auditError) {
-          safeLog.error("auth_audit_insert_error", {
-            error:
-              auditError instanceof Error ? auditError.message : String(auditError),
-          });
-        }
+        safeLog.info("auth_signin_success", { user_id: userId, role: effectiveRole });
+        // Audit row is written server-side by the /api/v1/auth/login endpoint.
 
         if (effectiveRole === "admin" || effectiveRole === "global_admin") {
           navigate("/admin");
@@ -492,20 +458,17 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
 
     setLoading(true);
     try {
-      // Block reusing the current password:
-      // if signing in with the proposed password succeeds, it means the password
-      // is already active for this account and should not be reused.
+      // Block reusing the current password via backend login check.
       try {
-        const { data: currentUserData } = await supabase.auth.getUser();
-        const currentEmail = currentUserData.user?.email;
+        const { data: sessData } = await supabase.auth.getSession();
+        const currentEmail = sessData.session?.user?.email;
         if (currentEmail) {
-          const { data: existingPasswordMatch, error: existingPasswordError } =
-            await supabase.auth.signInWithPassword({
-              email: currentEmail,
-              password: newPassword,
-            });
-
-          if (!existingPasswordError && existingPasswordMatch.user) {
+          const checkRes = await fetch(apiUrl("/api/v1/auth/login"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email: currentEmail, password: newPassword }),
+          });
+          if (checkRes.ok) {
             toast({
               title: "Password already used",
               description: "Please choose a new password that you haven't used for this account.",
@@ -542,9 +505,18 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
         throw buildApiRequestError(res, payload, "Could not update password");
       }
 
-      // Recovery flow creates a temporary session. Sign out after password update
-      // so the user explicitly signs in with the new password.
-      await supabase.auth.signOut();
+      // Recovery flow creates a temporary session. Sign out (backend then local-only)
+      // after password update so the user explicitly signs in with the new password.
+      try {
+        const { data: sessData } = await supabase.auth.getSession();
+        if (sessData.session?.access_token) {
+          await fetch(apiUrl("/api/v1/auth/logout"), {
+            method: "POST",
+            headers: { Authorization: `Bearer ${sessData.session.access_token}` },
+          });
+        }
+      } catch { /* best-effort */ }
+      await supabase.auth.signOut({ scope: "local" });
 
       toast({
         title: "Password updated",

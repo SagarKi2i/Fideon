@@ -13,42 +13,28 @@ function isAppRole(value: unknown): value is AppRole {
   return typeof value === 'string' && VALID_APP_ROLES.includes(value as AppRole);
 }
 
-async function resolveUserRole(userId: string): Promise<AppRole> {
-  const { data, error } = await (supabase as any)
-    .from('user_roles')
-    .select('role')
-    .eq('user_id', userId)
-    .maybeSingle();
-
-  if (!error && isAppRole(data?.role)) {
-    return data.role;
-  }
-
+async function resolveUserRole(token: string): Promise<AppRole> {
   try {
-    const { data: sessionData } = await supabase.auth.getSession();
-    const token = sessionData.session?.access_token;
-    if (token) {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3000);
-      try {
-        const res = await fetch(apiUrl('/api/settings/profile'), {
-          headers: { Authorization: `Bearer ${token}` },
-          signal: controller.signal,
-        });
-        clearTimeout(timeout);
-        if (res.ok) {
-          const payload = await readJsonSafe(res);
-          const backendRole = payload?.profile?.role;
-          if (isAppRole(backendRole)) {
-            return backendRole;
-          }
-        } else if (res.status === 401 || res.status === 403) {
-          const payload = await readJsonSafe(res);
-          throw buildApiRequestError(res, payload, "Unable to resolve role");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const res = await fetch(apiUrl('/api/settings/profile'), {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (res.ok) {
+        const payload = await readJsonSafe(res);
+        const backendRole = payload?.profile?.role;
+        if (isAppRole(backendRole)) {
+          return backendRole;
         }
-      } finally {
-        clearTimeout(timeout);
+      } else if (res.status === 401 || res.status === 403) {
+        const payload = await readJsonSafe(res);
+        throw buildApiRequestError(res, payload, "Unable to resolve role");
       }
+    } finally {
+      clearTimeout(timeout);
     }
   } catch (backendError) {
     console.error('Error resolving role via backend:', backendError);
@@ -65,16 +51,18 @@ export function useUserRole() {
   useEffect(() => {
     async function fetchUserRole() {
       try {
-        const { data: { user } } = await supabase.auth.getUser();
-        setUser(user);
+        // Use getSession (local, no server call) to get the current user.
+        const { data: { session } } = await supabase.auth.getSession();
+        const sessionUser = session?.user ?? null;
+        setUser(sessionUser);
 
-        if (!user) {
+        if (!sessionUser || !session?.access_token) {
           setRole(null);
           setLoading(false);
           return;
         }
 
-        const resolvedRole = await resolveUserRole(user.id);
+        const resolvedRole = await resolveUserRole(session.access_token);
         setRole(resolvedRole);
       } catch (error) {
         console.error('Error in fetchUserRole:', error);

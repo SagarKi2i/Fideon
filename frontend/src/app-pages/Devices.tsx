@@ -52,18 +52,20 @@ export default function Devices() {
 
   const checkAccessAndLoad = async () => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { session } } = await supabase.auth.getSession();
+      const user = session?.user;
       if (!user) {
         navigate("/auth");
         return;
       }
 
-      const { data: roles } = await (supabase as any)
-        .from("user_roles")
-        .select("role")
-        .eq("user_id", user.id);
+      const profRes = await fetch(apiUrl("/api/settings/profile"), {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      const profData = profRes.ok ? await profRes.json() : null;
+      const userRole = profData?.profile?.role;
 
-      if (!roles?.some((r: any) => r.role === "admin" || r.role === "global_admin")) {
+      if (userRole !== "admin" && userRole !== "global_admin") {
         toast({ title: "Access Denied", description: "Admin only", variant: "destructive" });
         navigate("/");
         return;
@@ -101,12 +103,13 @@ export default function Devices() {
       const tenantIds = Array.from(new Set((devices || []).map((d: any) => d.tenant_id).filter(Boolean))) as string[];
 
       if (tenantIds.length) {
-        const { data: tenants } = await (supabase as any)
-          .from("tenants")
-          .select("id,name")
-          .in("id", tenantIds);
+        const tRes = await fetch(
+          apiUrl(`/api/v1/admin/tenants?ids=${tenantIds.map(encodeURIComponent).join(",")}`),
+          { headers: { Authorization: `Bearer ${session.access_token}` } },
+        );
+        const tData = tRes.ok ? await tRes.json() : null;
         const map: Record<string, string> = {};
-        for (const t of (tenants || []) as any[]) map[t.id] = t.name;
+        for (const t of (tData?.tenants || []) as any[]) map[t.id] = t.name;
         setTenantNameById(map);
       } else {
         setTenantNameById({});

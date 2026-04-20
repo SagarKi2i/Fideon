@@ -175,19 +175,20 @@ export default function DeviceDetails() {
 
   const checkAccess = async () => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { session } } = await supabase.auth.getSession();
+      const user = session?.user;
       if (!user) {
         navigate("/auth");
         return;
       }
 
-      const { data: roles } = await (supabase as any)
-        .from("user_roles")
-        .select("role")
-        .eq("user_id", user.id);
+      const profRes = await fetch(apiUrl("/api/settings/profile"), {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      const profData = profRes.ok ? await profRes.json() : null;
+      const userRole = profData?.profile?.role;
 
-      const isAdmin = roles?.some((r: any) => r.role === "admin" || r.role === "global_admin");
-      if (!isAdmin) {
+      if (userRole !== "admin" && userRole !== "global_admin") {
         toast({
           title: "Access Denied",
           description: "Only administrators can access device details",
@@ -276,23 +277,28 @@ export default function DeviceDetails() {
 
     setAllocating(true);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { session } } = await supabase.auth.getSession();
+      const user = session?.user;
       if (!user) throw new Error("Not authenticated");
 
       const modelsToInsert = selectedModels.map((modelId: any) => {
         const model = availableModels.find((m: any) => m.model_id === modelId);
         return {
-          device_id: id,
           model_id: modelId,
           model_name: model?.model_name ?? modelId,
           domain: model?.domain ?? "unknown",
-          allocated_by: user.id,
         };
       });
 
-      const { error } = await (supabase as any).from("device_models").insert(modelsToInsert);
-
-      if (error) throw error;
+      const allocRes = await fetch(apiUrl(`/api/v1/admin/devices/${encodeURIComponent(id)}/models`), {
+        method: "POST",
+        headers: { Authorization: `Bearer ${session.access_token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ models: modelsToInsert }),
+      });
+      if (!allocRes.ok) {
+        const errData = await allocRes.json().catch(() => ({}));
+        throw new Error((errData as any)?.error || `HTTP ${allocRes.status}`);
+      }
 
       toast({
         title: "Models Allocated",
@@ -318,15 +324,17 @@ export default function DeviceDetails() {
     if (!confirm(`Remove ${modelName} from this device?`)) return;
 
     try {
-      const { error } = await (supabase as any).from("device_models").delete().eq("id", modelId);
-
-      if (error) throw error;
-
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token || !id) throw new Error("Not authenticated");
+      const res = await fetch(
+        apiUrl(`/api/v1/admin/devices/${encodeURIComponent(id)}/models/${encodeURIComponent(modelId)}`),
+        { method: "DELETE", headers: { Authorization: `Bearer ${session.access_token}` } },
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       toast({
         title: "Model Removed",
         description: `${modelName} has been removed from this device`,
       });
-
       loadDeviceData();
     } catch (error: any) {
       console.error("Error removing model:", error);
@@ -410,23 +418,17 @@ export default function DeviceDetails() {
     if (!confirm("Are you sure you want to reset the device token? The device will need to re-register.")) return;
 
     try {
-      const { data: tokenData, error: tokenError } = await supabase.rpc(
-        "generate_device_token"
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) throw new Error("Not authenticated");
+      const res = await fetch(
+        apiUrl(`/api/v1/admin/devices/${encodeURIComponent(id)}/regenerate-token`),
+        { method: "POST", headers: { Authorization: `Bearer ${session.access_token}` } },
       );
-      if (tokenError) throw tokenError;
-
-      const { error } = await (supabase as any)
-        .from("devices")
-        .update({ device_token: tokenData, status: "never_checked_in" })
-        .eq("id", id);
-
-      if (error) throw error;
-
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       toast({
         title: "Token Reset",
         description: "Device token has been regenerated",
       });
-
       loadDeviceData();
     } catch (error: any) {
       console.error("Error resetting token:", error);
