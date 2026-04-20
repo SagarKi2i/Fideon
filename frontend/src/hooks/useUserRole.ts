@@ -101,21 +101,32 @@ export function useUserRole() {
       }
     }
 
+    // Initial load — runs once on mount.
     fetchUserRole();
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      if (!session?.user) {
-        if (event === 'SIGNED_OUT') {
-          cancelInflight();
-          setUser(null);
-          setRole(null);
-          setLoading(false);
-          return;
-        }
-        // TOKEN_REFRESH, INITIAL_SESSION with no user, etc. — re-resolve.
-        fetchUserRole();
+      // INITIAL_SESSION fires on startup with the stored session — the mount
+      // fetchUserRole() above already handles this, so skip it here.
+      if (event === 'INITIAL_SESSION') return;
+
+      // TOKEN_REFRESHED means the same user got a new access token.
+      // The role hasn't changed — just update the user object.
+      if (event === 'TOKEN_REFRESHED') {
+        if (session?.user) setUser(session.user);
         return;
       }
+
+      // SIGNED_OUT / USER_DELETED — clear everything immediately.
+      if (!session?.user) {
+        cancelInflight();
+        setUser(null);
+        setRole(null);
+        setLoading(false);
+        return;
+      }
+
+      // SIGNED_IN (actual login) or any other event with a user —
+      // re-fetch role for the (possibly new) user.
       setUser(session.user);
       fetchUserRole();
     });
