@@ -2,7 +2,7 @@
 -- GENERATED FILE - DO NOT EDIT BY HAND
 -- ============================================================================
 -- Source: supabase/migrations
--- Generated: 2026-04-10 17:19:03+05:30
+-- Generated: 2026-04-20 (updated manually — includes all migrations up to 20260416100000)
 --
 -- This file is a concatenation of all SQL files in supabase/migrations.
 -- Ordering:
@@ -6542,5 +6542,399 @@ $$;
 
 -- ============================================================================
 -- END MIGRATION: 20260409090500_plan_limits_rpc.sql
+-- ============================================================================
+
+-- ============================================================================
+-- BEGIN MIGRATION: 20260411000000_adapter_registry.sql
+-- ============================================================================
+-- Adapter registry: tracks quantized GGUF model artifacts available for
+-- download by Electron devices. Populated by the quantization pipeline
+-- (upload.py) and queried by the backend adapter_registry endpoints.
+
+create table if not exists public.adapter_registry (
+  id               uuid        primary key default gen_random_uuid(),
+
+  -- Identity
+  domain           text        not null,          -- e.g. "broker"
+  adapter_version  text        not null,          -- e.g. "1.2.0"
+  filename         text        not null,          -- e.g. "model-q5_k_m.gguf"
+  quant_level      text        not null,          -- e.g. "q5_k_m"
+
+  -- Integrity
+  sha256           text        not null,          -- "sha256:<hex>"
+  size_bytes       bigint      not null,
+
+  -- Storage — object key in SeaweedFS bucket (NOT a presigned URL)
+  blob_key         text        not null,          -- e.g. "broker/v1.2.0/model-q5_k_m.gguf"
+
+  -- Electron compatibility
+  min_electron_ver text        not null default '0.0.0',
+
+  -- Canary rollout
+  canary_pct       integer     not null default 100
+                               check (canary_pct >= 0 and canary_pct <= 100),
+  rollback_safe    boolean     not null default true,
+
+  -- Availability
+  is_available     boolean     not null default true,
+  blocked          boolean     not null default false,
+
+  created_at       timestamptz not null default now(),
+  updated_at       timestamptz not null default now()
+);
+
+-- Query patterns used by backend
+create index if not exists adapter_registry_domain_version_idx
+  on public.adapter_registry (domain, adapter_version desc);
+
+create index if not exists adapter_registry_available_idx
+  on public.adapter_registry (domain, is_available, blocked);
+
+-- Prevent duplicate artifact registrations for the same version+quant
+create unique index if not exists adapter_registry_version_quant_uidx
+  on public.adapter_registry (domain, adapter_version, quant_level);
+
+-- Keep updated_at current (reuse trigger function created by model_registry migration)
+drop trigger if exists set_adapter_registry_updated_at on public.adapter_registry;
+create trigger set_adapter_registry_updated_at
+  before update on public.adapter_registry
+  for each row
+  execute function public.set_updated_at();
+
+-- RLS: backend uses service role — no row-level security needed.
+-- Devices never query this table directly; they go through the backend API.
+alter table public.adapter_registry enable row level security;
+
+-- ============================================================================
+-- END MIGRATION: 20260411000000_adapter_registry.sql
+-- ============================================================================
+
+-- ============================================================================
+-- BEGIN MIGRATION: 20260416000000_webhook_tables.sql
+-- ============================================================================
+-- Webhook delivery engine tables (FNF-68)
+-- Tables: webhooks, webhook_events, webhook_deliveries, webhook_secrets
+-- All access goes through the backend service role.
+-- RLS is enabled on every table; the only policy grants service_role full access.
+
+-- ────────────────────────────────────────────────────────────────
+-- 1. webhooks
+--    One row per registered endpoint. Holds URL, subscribed event
+--    list, and activation flag.
+-- ────────────────────────────────────────────────────────────────
+create table if not exists public.webhooks (
+  id           uuid        primary key default gen_random_uuid(),
+  tenant_id    uuid        not null,
+  url          text        not null check (length(url) <= 2048),
+  description  text,
+  events       jsonb       not null default '[]'::jsonb,
+  is_active    boolean     not null default true,
+  created_by   uuid,
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now()
+);
+
+create index if not exists webhooks_tenant_active_idx
+  on public.webhooks (tenant_id, is_active);
+
+alter table public.webhooks enable row level security;
+
+-- Service role (backend) gets full CRUD; no other principal should touch this.
+drop policy if exists "service_role_all_webhooks" on public.webhooks;
+create policy "service_role_all_webhooks"
+  on public.webhooks
+  for all
+  to service_role
+  using (true)
+  with check (true);
+
+-- Keep updated_at in sync.
+drop trigger if exists set_webhooks_updated_at on public.webhooks;
+create trigger set_webhooks_updated_at
+  before update on public.webhooks
+  for each row
+  execute function public.set_updated_at();
+
+
+-- ────────────────────────────────────────────────────────────────
+-- 2. webhook_events
+--    Durable log of every event emitted into the system.
+--    The delivery worker fans these out to matching webhook_deliveries.
+-- ────────────────────────────────────────────────────────────────
+create table if not exists public.webhook_events (
+  id           uuid        primary key default gen_random_uuid(),
+  tenant_id    uuid        not null,
+  event_type   text        not null,
+  payload      jsonb       not null default '{}'::jsonb,
+  created_at   timestamptz not null default now()
+);
+
+create index if not exists webhook_events_tenant_type_idx
+  on public.webhook_events (tenant_id, event_type, created_at desc);
+
+alter table public.webhook_events enable row level security;
+
+drop policy if exists "service_role_all_webhook_events" on public.webhook_events;
+create policy "service_role_all_webhook_events"
+  on public.webhook_events
+  for all
+  to service_role
+  using (true)
+  with check (true);
+
+
+-- ────────────────────────────────────────────────────────────────
+-- 3. webhook_deliveries
+--    One row per (event × webhook endpoint) delivery attempt.
+--    The worker polls status='pending' rows whose next_attempt_at
+--    is in the past.
+-- ────────────────────────────────────────────────────────────────
+create table if not exists public.webhook_deliveries (
+  id               uuid        primary key default gen_random_uuid(),
+  tenant_id        uuid        not null,
+  webhook_id       uuid        not null references public.webhooks (id) on delete cascade,
+  event_id         uuid        not null references public.webhook_events (id) on delete cascade,
+  status           text        not null default 'pending'
+                               check (status in ('pending', 'delivered', 'failed', 'dead_letter')),
+  attempt_count    integer     not null default 0,
+  next_attempt_at  timestamptz not null default now(),
+  last_attempt_at  timestamptz,
+  delivered_at     timestamptz,
+  response_status  integer,
+  response_body    text,
+  last_error       text,
+  created_at       timestamptz not null default now()
+);
+
+-- Worker query: pending rows due for delivery, ordered oldest-first.
+create index if not exists webhook_deliveries_pending_due_idx
+  on public.webhook_deliveries (status, next_attempt_at asc)
+  where status = 'pending';
+
+-- Lookup by webhook for delivery history UI.
+create index if not exists webhook_deliveries_webhook_idx
+  on public.webhook_deliveries (webhook_id, created_at desc);
+
+-- Lookup by event (fan-out audit).
+create index if not exists webhook_deliveries_event_idx
+  on public.webhook_deliveries (event_id);
+
+alter table public.webhook_deliveries enable row level security;
+
+drop policy if exists "service_role_all_webhook_deliveries" on public.webhook_deliveries;
+create policy "service_role_all_webhook_deliveries"
+  on public.webhook_deliveries
+  for all
+  to service_role
+  using (true)
+  with check (true);
+
+
+-- ────────────────────────────────────────────────────────────────
+-- 4. webhook_secrets
+--    One row per active signing secret per webhook.
+--    Only one row should have is_active=true per webhook at any time
+--    (enforced by application logic on rotation).
+--    Secret is stored as:
+--      - encrypted_secret: Fernet-encrypted plaintext (for signing)
+--      - secret_hash: SHA-256 hex (for fast verification without decryption)
+--    The plaintext is NEVER stored or logged.
+-- ────────────────────────────────────────────────────────────────
+create table if not exists public.webhook_secrets (
+  id                uuid        primary key default gen_random_uuid(),
+  tenant_id         uuid        not null,
+  webhook_id        uuid        not null references public.webhooks (id) on delete cascade,
+  secret_hash       text        not null,
+  encrypted_secret  text        not null,
+  is_active         boolean     not null default true,
+  created_at        timestamptz not null default now()
+);
+
+create index if not exists webhook_secrets_webhook_active_idx
+  on public.webhook_secrets (webhook_id, is_active)
+  where is_active = true;
+
+alter table public.webhook_secrets enable row level security;
+
+drop policy if exists "service_role_all_webhook_secrets" on public.webhook_secrets;
+create policy "service_role_all_webhook_secrets"
+  on public.webhook_secrets
+  for all
+  to service_role
+  using (true)
+  with check (true);
+
+-- ============================================================================
+-- END MIGRATION: 20260416000000_webhook_tables.sql
+-- ============================================================================
+
+-- ============================================================================
+-- BEGIN MIGRATION: 20260416100000_seat_limit_enforcement.sql
+-- ============================================================================
+-- =============================================================================
+-- Migration: 20260416100000_seat_limit_enforcement.sql
+--
+-- Enforces per-plan user seat limits end-to-end:
+--   - Adds max_users column to tenants (NULL = unlimited / enterprise)
+--   - Backfills max_users from existing plan values
+--   - Auto-syncs max_users whenever a tenant's plan changes (INSERT or UPDATE)
+--   - Updates plan_limits() RPC to return max_users
+--   - Adds a BEFORE INSERT trigger on app_users that raises
+--     FIDEON_OS_LIMIT:SEATS when the tenant is at its seat limit
+-- =============================================================================
+
+-- ---------------------------------------------------------------------------
+-- 1. Add max_users column to tenants
+-- ---------------------------------------------------------------------------
+ALTER TABLE public.tenants
+  ADD COLUMN IF NOT EXISTS max_users INTEGER; -- NULL = unlimited (enterprise)
+
+-- ---------------------------------------------------------------------------
+-- 2. Backfill max_users from existing plan column for all current tenants
+-- ---------------------------------------------------------------------------
+UPDATE public.tenants
+SET max_users = CASE
+  WHEN lower(trim(COALESCE(plan, 'starter'))) = 'enterprise'    THEN NULL
+  WHEN lower(trim(COALESCE(plan, 'starter'))) = 'professional'  THEN 25
+  ELSE 5  -- starter, free, or any unrecognised legacy plan
+END
+WHERE max_users IS NULL;
+
+-- ---------------------------------------------------------------------------
+-- 3. Trigger: keep max_users in sync whenever plan is set or changed
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.sync_tenant_max_users()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  -- On INSERT: always derive max_users from the plan being inserted.
+  -- On UPDATE: only recalculate when plan actually changes.
+  IF TG_OP = 'INSERT' OR (TG_OP = 'UPDATE' AND NEW.plan IS DISTINCT FROM OLD.plan) THEN
+    NEW.max_users := CASE
+      WHEN lower(trim(COALESCE(NEW.plan, 'starter'))) = 'enterprise'   THEN NULL
+      WHEN lower(trim(COALESCE(NEW.plan, 'starter'))) = 'professional' THEN 25
+      ELSE 5
+    END;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_sync_tenant_max_users ON public.tenants;
+CREATE TRIGGER trg_sync_tenant_max_users
+  BEFORE INSERT OR UPDATE OF plan ON public.tenants
+  FOR EACH ROW
+  EXECUTE FUNCTION public.sync_tenant_max_users();
+
+-- ---------------------------------------------------------------------------
+-- 4. Update plan_limits() RPC to expose max_users
+--    Must DROP first because the return type (OUT columns) is changing.
+-- ---------------------------------------------------------------------------
+DROP FUNCTION IF EXISTS public.plan_limits(TEXT);
+
+CREATE OR REPLACE FUNCTION public.plan_limits(p_plan TEXT)
+RETURNS TABLE (
+  max_agent_packs  INTEGER,
+  max_active_models INTEGER,
+  max_users        INTEGER
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_plan TEXT := lower(trim(COALESCE(p_plan, 'starter')));
+BEGIN
+  IF v_plan = 'professional' THEN
+    max_agent_packs   := 3;
+    max_active_models := 8;
+    max_users         := 25;
+  ELSIF v_plan = 'enterprise' THEN
+    max_agent_packs   := NULL; -- unlimited
+    max_active_models := NULL; -- unlimited
+    max_users         := NULL; -- unlimited
+  ELSE
+    -- starter (default for all unrecognised plans)
+    max_agent_packs   := 1;
+    max_active_models := 3;
+    max_users         := 5;
+  END IF;
+
+  RETURN NEXT;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- 5. BEFORE INSERT trigger on app_users: enforce seat limit
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.enforce_tenant_seat_limit()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_max_users     INTEGER;
+  v_current_count INTEGER;
+BEGIN
+  -- No tenant assigned: no limit to enforce.
+  IF NEW.tenant_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  -- If this user_id already exists in app_users this is an upsert / re-assignment,
+  -- not a net-new seat — skip the limit check so existing users are never blocked.
+  IF EXISTS (
+    SELECT 1 FROM public.app_users WHERE user_id = NEW.user_id
+  ) THEN
+    RETURN NEW;
+  END IF;
+
+  -- Look up the tenant's seat limit (NULL = unlimited).
+  SELECT t.max_users
+    INTO v_max_users
+    FROM public.tenants t
+   WHERE t.id = NEW.tenant_id
+   LIMIT 1;
+
+  IF v_max_users IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  -- Count active seats already consumed by this tenant.
+  SELECT COUNT(*)
+    INTO v_current_count
+    FROM public.app_users au
+   WHERE au.tenant_id = NEW.tenant_id
+     AND au.status != 'deleted';
+
+  IF v_current_count >= v_max_users THEN
+    RAISE EXCEPTION
+      'FIDEON_OS_LIMIT:SEATS Seat limit reached (%/%). Upgrade your plan to add more users.',
+      v_current_count, v_max_users
+    USING ERRCODE = 'P0001';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_enforce_tenant_seat_limit ON public.app_users;
+CREATE TRIGGER trg_enforce_tenant_seat_limit
+  BEFORE INSERT ON public.app_users
+  FOR EACH ROW
+  EXECUTE FUNCTION public.enforce_tenant_seat_limit();
+
+DO $$
+BEGIN
+  RAISE NOTICE '✓ seat_limit_enforcement migration complete.';
+END;
+$$;
+
+-- ============================================================================
+-- END MIGRATION: 20260416100000_seat_limit_enforcement.sql
 -- ============================================================================
 

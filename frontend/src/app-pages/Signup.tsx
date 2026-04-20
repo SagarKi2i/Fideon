@@ -568,7 +568,7 @@ export default function Signup() {
       if (!signupRes.ok) {
         throw {
           code: signupJson?.code,
-          message: signupJson?.message || signupJson?.error || "Signup failed",
+          message: signupJson?.message || signupJson?.detail || signupJson?.error || "Signup failed",
           status: signupRes.status,
         };
       }
