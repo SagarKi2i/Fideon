@@ -76,16 +76,18 @@ export function Layout({ children }: LayoutProps) {
   };
 
   useEffect(() => {
+    if (!user) return;
+    const controller = new AbortController();
+
     const loadHeaderProfile = async () => {
-      if (!user) return;
       setHeaderReady(false);
       try {
-        // Fetch profile via backend — no direct Supabase connection.
         const { data: { session } } = await supabase.auth.getSession();
         const token = session?.access_token;
         if (!token) return;
         const res = await fetch(apiUrl("/api/settings/profile"), {
           headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
         });
         if (res.ok) {
           const payload = await res.json();
@@ -93,13 +95,15 @@ export function Layout({ children }: LayoutProps) {
           setDisplayName(p?.full_name || user.user_metadata?.full_name || "");
           setTenantName(p?.tenant_name || "");
         }
-      } catch {
-        setTenantName("");
+      } catch (err: any) {
+        if (err?.name !== "AbortError") setTenantName("");
       } finally {
-        setHeaderReady(true);
+        if (!controller.signal.aborted) setHeaderReady(true);
       }
     };
+
     void loadHeaderProfile();
+    return () => controller.abort();
   }, [user]);
 
   useEffect(() => {

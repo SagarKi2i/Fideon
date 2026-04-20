@@ -46,11 +46,13 @@ export default function Devices() {
   const [tenantNameById, setTenantNameById] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    void checkAccessAndLoad();
+    const controller = new AbortController();
+    void checkAccessAndLoad(controller.signal);
+    return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const checkAccessAndLoad = async () => {
+  const checkAccessAndLoad = async (signal?: AbortSignal) => {
     try {
       const { data: { session } } = await supabase.auth.getSession();
       const user = session?.user;
@@ -61,6 +63,7 @@ export default function Devices() {
 
       const profRes = await fetch(apiUrl("/api/settings/profile"), {
         headers: { Authorization: `Bearer ${session.access_token}` },
+        signal,
       });
       const profData = profRes.ok ? await profRes.json() : null;
       const userRole = profData?.profile?.role;
@@ -71,13 +74,13 @@ export default function Devices() {
         return;
       }
 
-      await loadDevices();
-    } catch {
-      navigate("/auth");
+      await loadDevices(signal);
+    } catch (err: any) {
+      if (err?.name !== "AbortError") navigate("/auth");
     }
   };
 
-  const loadDevices = async () => {
+  const loadDevices = async (signal?: AbortSignal) => {
     setLoading(true);
     try {
       const { data: { session } } = await supabase.auth.getSession();
@@ -91,6 +94,7 @@ export default function Devices() {
         headers: {
           Authorization: `Bearer ${session.access_token}`,
         },
+        signal,
       });
       const payload = await resp.json().catch(() => ({}));
       if (!resp.ok) {
@@ -105,7 +109,7 @@ export default function Devices() {
       if (tenantIds.length) {
         const tRes = await fetch(
           apiUrl(`/api/v1/admin/tenants?ids=${tenantIds.map(encodeURIComponent).join(",")}`),
-          { headers: { Authorization: `Bearer ${session.access_token}` } },
+          { headers: { Authorization: `Bearer ${session.access_token}` }, signal },
         );
         const tData = tRes.ok ? await tRes.json() : null;
         const map: Record<string, string> = {};
@@ -114,9 +118,11 @@ export default function Devices() {
       } else {
         setTenantNameById({});
       }
-    } catch (e) {
-      console.error("Failed to load devices:", e);
-      toast({ title: "Error", description: "Failed to load devices", variant: "destructive" });
+    } catch (e: any) {
+      if (e?.name !== "AbortError") {
+        console.error("Failed to load devices:", e);
+        toast({ title: "Error", description: "Failed to load devices", variant: "destructive" });
+      }
     } finally {
       setLoading(false);
     }

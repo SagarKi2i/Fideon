@@ -55,16 +55,20 @@ export default function Playground() {
   const [ollamaReady, setOllamaReady] = useState(false);
 
   useEffect(() => {
-    checkAccess();
+    const controller = new AbortController();
+    void checkAccess(controller.signal);
     checkElectronAndOllama();
-    
+
     // Check online status periodically
     const interval = setInterval(async () => {
       const online = await checkNetworkStatus();
       setIsOnline(online);
     }, 10000);
-    
-    return () => clearInterval(interval);
+
+    return () => {
+      controller.abort();
+      clearInterval(interval);
+    };
   }, []);
 
   useEffect(() => {
@@ -94,7 +98,7 @@ export default function Playground() {
     }
   };
 
-  const checkAccess = async () => {
+  const checkAccess = async (signal?: AbortSignal) => {
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session?.user) {
@@ -105,6 +109,7 @@ export default function Playground() {
 
       const profRes = await fetch(apiUrl("/api/settings/profile"), {
         headers: { Authorization: `Bearer ${token}` },
+        signal,
       });
       const profData = profRes.ok ? await profRes.json() : null;
       const userRole = profData?.profile?.role;
@@ -119,17 +124,20 @@ export default function Playground() {
         return;
       }
 
-      await loadActivatedModels(token);
-    } catch (error) {
-      console.error("Error checking access:", error);
-      navigate("/auth");
+      await loadActivatedModels(token, signal);
+    } catch (error: any) {
+      if (error?.name !== "AbortError") {
+        console.error("Error checking access:", error);
+        navigate("/auth");
+      }
     }
   };
 
-  const loadActivatedModels = async (token: string) => {
+  const loadActivatedModels = async (token: string, signal?: AbortSignal) => {
     try {
       const res = await fetch(apiUrl("/api/v1/activated-models"), {
         headers: { Authorization: `Bearer ${token}` },
+        signal,
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const payload = await res.json();
@@ -143,13 +151,15 @@ export default function Playground() {
           : null;
         setSelectedModel(match?.model_id ?? data[0].model_id);
       }
-    } catch (error) {
-      console.error("Error loading models:", error);
-      toast({
-        title: "Error",
-        description: "Failed to load activated models",
-        variant: "destructive",
-      });
+    } catch (error: any) {
+      if (error?.name !== "AbortError") {
+        console.error("Error loading models:", error);
+        toast({
+          title: "Error",
+          description: "Failed to load activated models",
+          variant: "destructive",
+        });
+      }
     } finally {
       setLoading(false);
     }

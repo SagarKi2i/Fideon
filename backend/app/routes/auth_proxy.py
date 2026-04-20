@@ -221,7 +221,7 @@ async def signup(request: Request):
     if not resp.ok:
         raise HTTPException(
             status_code=resp.status_code,
-            detail=result.get("message") or result.get("error") or "Signup failed",
+            detail=result.get("message") or result.get("error_description") or result.get("error") or "Signup failed",
         )
 
     return result

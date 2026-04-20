@@ -149,7 +149,7 @@ export default function AdminDashboard() {
   const [pairingDbReady, setPairingDbReady] = useState(true);
   const refreshTimerRef = useRef<number | null>(null);
 
-  const fetchDashboardStats = useCallback(async () => {
+  const fetchDashboardStats = useCallback(async (signal?: AbortSignal) => {
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session?.access_token) throw new Error('Missing auth session');
@@ -159,6 +159,7 @@ export default function AdminDashboard() {
         headers: {
           Authorization: `Bearer ${session.access_token}`,
         },
+        signal,
       });
       if (!resp.ok) {
         const msg = await resp.text();
@@ -201,20 +202,20 @@ export default function AdminDashboard() {
         usageTrend,
         systemHealthText,
       });
-    } catch (error) {
-      console.error('Error fetching dashboard stats:', error);
+    } catch (error: any) {
+      if (error?.name !== 'AbortError') console.error('Error fetching dashboard stats:', error);
     }
   }, []);
 
-  const fetchPairingInsights = useCallback(async () => {
+  const fetchPairingInsights = useCallback(async (signal?: AbortSignal) => {
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session?.access_token) return;
       const token = session.access_token;
 
       const [pairingsRes, devicesRes] = await Promise.all([
-        fetch(apiUrl('/api/v1/admin/device-pairings?limit=12'), { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(apiUrl('/api/v1/admin/devices'), { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(apiUrl('/api/v1/admin/device-pairings?limit=12'), { headers: { Authorization: `Bearer ${token}` }, signal }),
+        fetch(apiUrl('/api/v1/admin/devices'), { headers: { Authorization: `Bearer ${token}` }, signal }),
       ]);
 
       if (!pairingsRes.ok) {
@@ -231,20 +232,23 @@ export default function AdminDashboard() {
         const linked = allRecentDevices.filter((row: any) => row?.metadata?.linked_from_pairing === true);
         setLinkedDevices(linked.slice(0, 12));
       }
-    } catch (error) {
-      console.error('Error fetching device pairing insights:', error);
+    } catch (error: any) {
+      if (error?.name !== 'AbortError') console.error('Error fetching device pairing insights:', error);
     }
   }, []);
 
   useEffect(() => {
+    const controller = new AbortController();
+    const { signal } = controller;
+
     const bootstrap = async () => {
       setIsLoading(true);
       if (showQrPairingInsights) {
-        await Promise.all([fetchDashboardStats(), fetchPairingInsights()]);
+        await Promise.all([fetchDashboardStats(signal), fetchPairingInsights(signal)]);
       } else {
-        await fetchDashboardStats();
+        await fetchDashboardStats(signal);
       }
-      setIsLoading(false);
+      if (!signal.aborted) setIsLoading(false);
     };
     void bootstrap();
 
@@ -306,6 +310,7 @@ export default function AdminDashboard() {
       .subscribe();
 
     return () => {
+      controller.abort();
       if (refreshTimerRef.current !== null) {
         window.clearTimeout(refreshTimerRef.current);
       }
