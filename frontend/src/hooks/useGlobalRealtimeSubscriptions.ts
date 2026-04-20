@@ -5,6 +5,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { emitDeviceRealtime, emitNotificationRealtime } from "@/lib/realtimeEvents";
 import { safeLog } from "@/logger";
 import { pushRealtimeNotification } from "@/lib/realtimeNotificationStore";
+import { apiUrl } from "@/lib/apiBaseUrl";
 
 const REALTIME_BACKOFF_BASE_MS = 1_000;
 const REALTIME_BACKOFF_MAX_MS = 30_000;
@@ -16,6 +17,40 @@ type RealtimeChannelStatus =
   | "CHANNEL_ERROR"
   | "CLOSED"
   | string;
+
+// ─── Backend API helpers ───────────────────────────────────────────────────
+
+async function getToken(): Promise<string | null> {
+  const { data } = await supabase.auth.getSession();
+  return data.session?.access_token ?? null;
+}
+
+async function backendGet(path: string): Promise<any> {
+  const token = await getToken();
+  if (!token) return null;
+  const res = await fetch(apiUrl(path), {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+async function backendPost(path: string, body: object): Promise<any> {
+  const token = await getToken();
+  if (!token) return null;
+  const res = await fetch(apiUrl(path), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+// ─── Message builders ──────────────────────────────────────────────────────
 
 function getPodRequestMessage(eventType: string, payload: any, requesterLabel?: string): string {
   const modelName = payload?.new?.model_name || "pod request";
@@ -50,7 +85,6 @@ function isAdminRole(role: string | null): boolean {
 function shouldEmitPodRequestEvent(payload: any, currentUserId: string, currentRole: string | null): boolean {
   const ownerId = payload?.new?.user_id || payload?.old?.user_id;
   if (payload.eventType === "INSERT") {
-    // New requests should notify admin/global_admin reviewers.
     return isAdminRole(currentRole);
   }
   if (payload.eventType !== "UPDATE") return false;
@@ -58,7 +92,6 @@ function shouldEmitPodRequestEvent(payload: any, currentUserId: string, currentR
   const nextStatus = payload.new?.status;
   if (prevStatus === nextStatus) return false;
   if (!(nextStatus === "approved" || nextStatus === "rejected")) return false;
-  // Outcomes should notify only the requester.
   return ownerId === currentUserId;
 }
 
@@ -69,7 +102,6 @@ function shouldReceivePodRequestNotification(payload: any, currentUserId: string
 function shouldEmitDecisionReviewEvent(payload: any, currentUserId: string, currentRole: string | null): boolean {
   const ownerId = payload?.new?.user_id || payload?.old?.user_id;
   if (payload.eventType === "INSERT") {
-    // New review requests should notify admin/global_admin reviewers.
     return isAdminRole(currentRole);
   }
   if (payload.eventType !== "UPDATE") return false;
@@ -77,7 +109,6 @@ function shouldEmitDecisionReviewEvent(payload: any, currentUserId: string, curr
   const nextStatus = payload.new?.status;
   if (prevStatus === nextStatus) return false;
   if (!(nextStatus === "approved" || nextStatus === "rejected")) return false;
-  // Outcomes should notify only the requester.
   return ownerId === currentUserId;
 }
 
@@ -112,54 +143,21 @@ type BacklogNotificationDetail = {
   targetPath: string;
 };
 
-async function fetchRecentAdminBacklog(recentIso: string) {
-  return Promise.all([
-    (supabase as any)
-      .from("pod_activation_requests")
-      .select("id,user_id,model_name,status,requested_at")
-      .gte("requested_at", recentIso)
-      .order("requested_at", { ascending: false })
-      .limit(20),
-    (supabase as any)
-      .from("decision_reviews")
-      .select("id,user_id,title,status,created_at")
-      .gte("created_at", recentIso)
-      .order("created_at", { ascending: false })
-      .limit(20),
-  ]);
-}
+// ─── Backend-based backlog builders ───────────────────────────────────────
 
-async function fetchRecentUserOutcomes(userId: string) {
-  return Promise.all([
-    (supabase as any)
-      .from("pod_activation_requests")
-      .select("id,user_id,model_name,status,reviewed_at")
-      .eq("user_id", userId)
-      .in("status", ["approved", "rejected"])
-      .order("reviewed_at", { ascending: false })
-      .limit(20),
-    (supabase as any)
-      .from("decision_reviews")
-      .select("id,user_id,title,status,reviewed_at")
-      .eq("user_id", userId)
-      .in("status", ["approved", "rejected"])
-      .order("reviewed_at", { ascending: false })
-      .limit(20),
-  ]);
-}
-
-async function buildAdminBacklogNotifications(
+async function buildBacklogNotifications(
   userId: string,
   role: string | null,
   resolveRequesterLabel: (userId: string | null | undefined) => Promise<string>
 ): Promise<BacklogNotificationDetail[]> {
-  const recentIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const [{ data: recentPodRequests, error: podError }, { data: recentReviews, error: reviewError }] =
-    await fetchRecentAdminBacklog(recentIso);
+  const data = await backendGet("/api/v1/notifications/backlog");
+  if (!data) return [];
 
   const notifications: BacklogNotificationDetail[] = [];
-  if (!podError && Array.isArray(recentPodRequests)) {
-    for (const row of recentPodRequests) {
+  const isAdmin = data.is_admin as boolean;
+
+  if (isAdmin) {
+    for (const row of (data.pods ?? []) as any[]) {
       const requesterLabel = await resolveRequesterLabel(row.user_id);
       const payload = { eventType: "INSERT", new: row, old: null };
       notifications.push({
@@ -170,9 +168,7 @@ async function buildAdminBacklogNotifications(
         targetPath: getPodRequestTargetPath(payload, userId, role),
       });
     }
-  }
-  if (!reviewError && Array.isArray(recentReviews)) {
-    for (const row of recentReviews) {
+    for (const row of (data.reviews ?? []) as any[]) {
       const requesterLabel = await resolveRequesterLabel(row.user_id);
       const payload = { eventType: "INSERT", new: row, old: null };
       notifications.push({
@@ -183,16 +179,8 @@ async function buildAdminBacklogNotifications(
         targetPath: getDecisionReviewTargetPath(payload),
       });
     }
-  }
-  return notifications;
-}
-
-async function buildUserOutcomeNotifications(userId: string): Promise<BacklogNotificationDetail[]> {
-  const [{ data: myPodOutcomes, error: myPodError }, { data: myReviewOutcomes, error: myReviewError }] =
-    await fetchRecentUserOutcomes(userId);
-  const notifications: BacklogNotificationDetail[] = [];
-  if (!myPodError && Array.isArray(myPodOutcomes)) {
-    for (const row of myPodOutcomes) {
+  } else {
+    for (const row of (data.pods ?? []) as any[]) {
       const payload = { eventType: "UPDATE", new: row, old: { status: "pending", user_id: userId } };
       notifications.push({
         eventType: "UPDATE",
@@ -202,9 +190,7 @@ async function buildUserOutcomeNotifications(userId: string): Promise<BacklogNot
         targetPath: getPodRequestTargetPath(payload, userId, null),
       });
     }
-  }
-  if (!myReviewError && Array.isArray(myReviewOutcomes)) {
-    for (const row of myReviewOutcomes) {
+    for (const row of (data.reviews ?? []) as any[]) {
       const payload = { eventType: "UPDATE", new: row, old: { status: "pending", user_id: userId } };
       notifications.push({
         eventType: "UPDATE",
@@ -215,6 +201,7 @@ async function buildUserOutcomeNotifications(userId: string): Promise<BacklogNot
       });
     }
   }
+
   return notifications;
 }
 
@@ -237,26 +224,14 @@ export function useGlobalRealtimeSubscriptions() {
     targetPath?: string;
     fingerprint: string;
   }) => {
-    const dedupeSince = new Date(Date.now() - 20_000).toISOString();
-    const { data: existing } = await (supabase as any)
-      .from("user_notifications")
-      .select("id")
-      .eq("user_id", userId)
-      .eq("source_fingerprint", detail.fingerprint)
-      .gte("created_at", dedupeSince)
-      .limit(1);
-    if (Array.isArray(existing) && existing.length > 0) return;
-
-    await (supabase as any)
-      .from("user_notifications")
-      .insert({
-        user_id: userId,
-        table_name: detail.table,
-        event_type: detail.eventType,
-        message: detail.message,
-        target_path: detail.targetPath ?? null,
-        source_fingerprint: detail.fingerprint,
-      });
+    await backendPost("/api/v1/notifications", {
+      user_id: userId,
+      table_name: detail.table,
+      event_type: detail.eventType,
+      message: detail.message,
+      target_path: detail.targetPath ?? null,
+      source_fingerprint: detail.fingerprint,
+    });
   }, []);
 
   const clearReconnectTimer = useCallback(() => {
@@ -279,25 +254,15 @@ export function useGlobalRealtimeSubscriptions() {
     channelsRef.current = [];
   }, []);
 
+  // Resolve requester display label via backend (admin endpoint).
   const resolveRequesterLabel = useCallback(async (userId: string | null | undefined): Promise<string> => {
     if (!userId) return "a user";
     const cached = requesterLabelCacheRef.current[userId];
     if (cached) return cached;
     const fallback = `user ${String(userId).slice(0, 8)}`;
     try {
-      const { data, error } = await (supabase as any)
-        .from("app_users")
-        .select("full_name,email")
-        .eq("user_id", userId)
-        .maybeSingle();
-      if (error) throw error;
-      const fullName =
-        typeof data?.full_name === "string" && data.full_name.trim().length > 0
-          ? data.full_name.trim()
-          : "";
-      const email =
-        typeof data?.email === "string" && data.email.trim().length > 0 ? data.email.trim() : "";
-      const label = fullName || email || fallback;
+      const data = await backendGet(`/api/v1/users/${encodeURIComponent(userId)}/label`);
+      const label = (data?.label as string) || fallback;
       requesterLabelCacheRef.current[userId] = label;
       return label;
     } catch {
@@ -305,24 +270,6 @@ export function useGlobalRealtimeSubscriptions() {
       return fallback;
     }
   }, []);
-
-  const syncNotificationBacklog = useCallback(async (userId: string, role: string | null) => {
-    if (typeof window === "undefined") return;
-    const markerKey = `nb:notifications-backlog-synced:${userId}:${role ?? "none"}`;
-    if (window.sessionStorage.getItem(markerKey) === "1") return;
-
-    try {
-      const backlogNotifications = isAdminRole(role)
-        ? await buildAdminBacklogNotifications(userId, role, resolveRequesterLabel)
-        : await buildUserOutcomeNotifications(userId);
-      for (const notification of backlogNotifications) {
-        pushRealtimeNotification(notification);
-      }
-    } finally {
-      // Avoid duplicating backlog notifications on every refresh in the same session.
-      window.sessionStorage.setItem(markerKey, "1");
-    }
-  }, [resolveRequesterLabel]);
 
   const startRealtimeForUser = useCallback(async (
     userId: string,
@@ -333,44 +280,17 @@ export function useGlobalRealtimeSubscriptions() {
 
     cleanupChannels();
     currentUserIdRef.current = userId;
+
+    // Resolve role and tenant_id via backend profile endpoint.
     try {
-      const { data: roleRows, error } = await (supabase as any)
-        .from("user_roles")
-        .select("role")
-        .eq("user_id", userId);
-      if (error) throw error;
-
-      const roles: string[] = Array.isArray(roleRows)
-        ? roleRows.flatMap((row: any) => (row?.role ? [row.role] : []))
-        : [];
-
-      // Resolve deterministic role priority for notification routing.
-      if (roles.includes("global_admin")) {
-        currentRoleRef.current = "global_admin";
-      } else if (roles.includes("admin")) {
-        currentRoleRef.current = "admin";
-      } else {
-        currentRoleRef.current = roles[0] ?? null;
-      }
+      const profileData = await backendGet("/api/settings/profile");
+      const profile = profileData?.profile;
+      currentRoleRef.current = profile?.role ?? null;
+      currentTenantIdRef.current = profile?.tenant_id ?? null;
     } catch {
       currentRoleRef.current = null;
-    }
-    try {
-      const { data: profileRows, error } = await (supabase as any)
-        .from("app_users")
-        .select("tenant_id")
-        .eq("user_id", userId)
-        .limit(1);
-      if (error) throw error;
-      currentTenantIdRef.current =
-        Array.isArray(profileRows) && profileRows.length > 0
-          ? (profileRows[0] as any)?.tenant_id ?? null
-          : null;
-    } catch {
       currentTenantIdRef.current = null;
     }
-
-    // Notifications are now persisted in DB per user, so we avoid synthetic backlog replay.
 
     const handleRealtimeStatus = (channelName: string, status: RealtimeChannelStatus, err?: Error) => {
       safeLog.info("realtime_channel_status", {
@@ -415,7 +335,6 @@ export function useGlobalRealtimeSubscriptions() {
           return;
         }
         void startRealtimeForUser(uid, { force: true }).finally(() => {
-          // If subscription is not healthy, channel callbacks will schedule next attempt.
           reconnectInFlightRef.current = false;
         });
       }, delayMs);
@@ -567,7 +486,6 @@ export function useGlobalRealtimeSubscriptions() {
     const recoverRealtimeConnection = () => {
       const uid = currentUserIdRef.current;
       if (!uid) return;
-      // Trigger immediate reconnect attempt for browser online/visibility recovery.
       reconnectAttemptRef.current = 0;
       clearReconnectTimer();
       void startRealtimeForUser(uid, { force: true });

@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { Building2, FolderOpen, CheckCircle2, FileCheck, File, FileBadge, ScrollText, Receipt, FileSpreadsheet, ClipboardList, BarChart3, Workflow, Loader2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { apiUrl } from "@/lib/apiBaseUrl";
 
 import appliedEpicLogo from "@/assets/logos/applied-epic-logo.png";
 import hawksoftLogo from "@/assets/logos/hawksoft-logo.png";
@@ -365,18 +366,21 @@ function CustomWorkflowConfig({ config, onChange }: AgentSectionProps) {
   useEffect(() => {
     const load = async () => {
       try {
-        const { data: { user } } = await supabase.auth.getUser();
-        if (!user) return;
-        const { data } = await (supabase as any).from("workflows").select("id, title, description, category, parsed_steps").eq("user_id", user.id).order("created_at", { ascending: false });
-        if (data) {
-          setWorkflows(data.map((w: any) => ({
-            id: w.id,
-            title: w.title,
-            description: w.description,
-            category: w.category,
-            steps_count: Array.isArray(w.parsed_steps) ? (w.parsed_steps as any[]).length : 0,
-          })));
-        }
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session) return;
+        const res = await fetch(apiUrl("/api/v1/workflows"), {
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        });
+        if (!res.ok) return;
+        const payload = await res.json();
+        const data = payload.workflows ?? [];
+        setWorkflows(data.map((w: any) => ({
+          id: w.id,
+          title: w.title,
+          description: w.description,
+          category: w.category,
+          steps_count: Array.isArray(w.parsed_steps) ? (w.parsed_steps as any[]).length : 0,
+        })));
       } catch (e) { console.error(e); }
       finally { setLoading(false); }
     };

@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
+import { apiUrl } from "@/lib/apiBaseUrl";
 import { format } from "date-fns";
 import AgentConfigForm, { AGENT_REGISTRY, type AgentConfig } from "@/components/pipeline/AgentConfigForm";
 
@@ -72,7 +73,8 @@ export default function AgentWorkflows() {
 
   useEffect(() => {
     void (async () => {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { session } } = await supabase.auth.getSession();
+      const user = session?.user;
       setCurrentUserId(user?.id ?? null);
       await loadData(user?.id ?? null);
     })();
@@ -82,14 +84,17 @@ export default function AgentWorkflows() {
     try {
       const uid = userId ?? currentUserId;
       if (!uid) return;
-      const { data } = await (supabase as any)
-        .from("agent_pipelines")
-        .select("*")
-        .eq("user_id", uid)
-        .order("created_at", { ascending: false });
-      if (data) setPipelines(data.map((p: any) => ({
-        ...p, steps: Array.isArray(p.steps) ? p.steps : [], schedule_config: p.schedule_config || null,
-      })));
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) return;
+      const res = await fetch(apiUrl("/api/v1/agent-pipelines"), {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (res.ok) {
+        const payload = await res.json();
+        setPipelines((payload.agent_pipelines || []).map((p: any) => ({
+          ...p, steps: Array.isArray(p.steps) ? p.steps : [], schedule_config: p.schedule_config || null,
+        })));
+      }
     } catch (e) { console.error(e); }
     finally { setLoading(false); }
   };
@@ -142,29 +147,37 @@ export default function AgentWorkflows() {
   };
 
   const savePipeline = async (schedConfig: ScheduleConfig | null, userId: string) => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) throw new Error("Not authenticated");
+    const token = session.access_token;
+
     if (editingPipeline) {
-      const { error } = await (supabase as any).from("agent_pipelines")
-        .update({
+      const res = await fetch(apiUrl(`/api/v1/agent-pipelines/${encodeURIComponent(editingPipeline.id)}`), {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
           name: pipelineName,
           description: pipelineDesc || null,
-          steps: steps as any,
-          schedule_config: schedConfig as any,
-        } as any)
-        .eq("id", editingPipeline.id)
-        .eq("user_id", userId);
-      if (error) throw error;
+          steps,
+          schedule_config: schedConfig,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       toast({ title: "Pipeline Updated" });
       return;
     }
 
-    const { error } = await (supabase as any).from("agent_pipelines").insert({
-      user_id: userId,
-      name: pipelineName,
-      description: pipelineDesc || null,
-      steps: steps as any,
-      schedule_config: schedConfig as any,
-    } as any);
-    if (error) throw error;
+    const res = await fetch(apiUrl("/api/v1/agent-pipelines"), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: pipelineName,
+        description: pipelineDesc || null,
+        steps,
+        schedule_config: schedConfig,
+      }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     toast({ title: "Pipeline Created", description: `${steps.length} agent${steps.length > 1 ? "s" : ""} connected` });
   };
 
@@ -179,7 +192,8 @@ export default function AgentWorkflows() {
     }
     setSaving(true);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { session } } = await supabase.auth.getSession();
+      const user = session?.user;
       if (!user) throw new Error("Not authenticated");
 
       const schedConfig = getScheduleConfigPayload();
@@ -191,17 +205,26 @@ export default function AgentWorkflows() {
   };
 
   const deletePipeline = async (id: string) => {
-    await (supabase as any).from("agent_pipelines").delete().eq("id", id).eq("user_id", currentUserId ?? "");
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) return;
+    await fetch(apiUrl(`/api/v1/agent-pipelines/${encodeURIComponent(id)}`), {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
     await loadData();
   };
 
   const togglePipeline = async (id: string, current: boolean) => {
-    await (supabase as any)
-      .from("agent_pipelines")
-      .update({ is_active: !current })
-      .eq("id", id)
-      .eq("user_id", currentUserId ?? "");
-    setPipelines(prev => prev.map((p: any) => p.id === id ? { ...p, is_active: !current } : p));
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) return;
+    const res = await fetch(apiUrl(`/api/v1/agent-pipelines/${encodeURIComponent(id)}`), {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${session.access_token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ is_active: !current }),
+    });
+    if (res.ok) {
+      setPipelines(prev => prev.map((p: any) => p.id === id ? { ...p, is_active: !current } : p));
+    }
   };
 
   const openEdit = (pipeline: Pipeline) => {

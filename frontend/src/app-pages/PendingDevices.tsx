@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '@/integrations/supabase/client';
+import { apiUrl } from '@/lib/apiBaseUrl';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -39,14 +40,14 @@ export default function PendingDevices() {
   async function fetchPendingDevices() {
     try {
       setLoading(true);
-      const { data, error } = await (supabase as any)
-        .from('devices')
-        .select('id,device_name,device_token,os_type,registered_at,metadata')
-        .eq('status', 'never_checked_in')
-        .order('registered_at', { ascending: false });
-
-      if (error) throw error;
-      setDevices(data ?? []);
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) return;
+      const res = await fetch(apiUrl('/api/v1/admin/pending-devices'), {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const payload = await res.json();
+      setDevices(payload.devices ?? []);
     } catch (error) {
       console.error('Error fetching pending devices:', error);
       toast({
@@ -61,64 +62,35 @@ export default function PendingDevices() {
 
   async function handleApprove(deviceId: string) {
     try {
-      const { error: deviceError } = await (supabase as any)
-        .from('devices')
-        .update({ status: 'offline', is_active: true })
-        .eq('id', deviceId);
-
-      if (deviceError) throw deviceError;
-
-      // Create default license
-      const { error: licenseError } = await (supabase as any)
-        .from('device_licenses')
-        .insert([
-          {
-            device_id: deviceId,
-            license_type: 'standard',
-            status: 'active',
-          },
-        ]);
-
-      if (licenseError) throw licenseError;
-
-      toast({
-        title: 'Success',
-        description: 'Device approved successfully',
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) return;
+      const res = await fetch(apiUrl(`/api/v1/admin/pending-devices/${encodeURIComponent(deviceId)}/approve`), {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${session.access_token}` },
       });
-
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      toast({ title: 'Success', description: 'Device approved successfully' });
       fetchPendingDevices();
     } catch (error) {
       console.error('Error approving device:', error);
-      toast({
-        title: 'Error',
-        description: 'Failed to approve device',
-        variant: 'destructive',
-      });
+      toast({ title: 'Error', description: 'Failed to approve device', variant: 'destructive' });
     }
   }
 
   async function handleReject(deviceId: string) {
     try {
-      const { error } = await (supabase as any)
-        .from('devices')
-        .update({ is_active: false })
-        .eq('id', deviceId);
-
-      if (error) throw error;
-
-      toast({
-        title: 'Success',
-        description: 'Device rejected',
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) return;
+      const res = await fetch(apiUrl(`/api/v1/admin/pending-devices/${encodeURIComponent(deviceId)}/reject`), {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${session.access_token}` },
       });
-
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      toast({ title: 'Success', description: 'Device rejected' });
       fetchPendingDevices();
     } catch (error) {
       console.error('Error rejecting device:', error);
-      toast({
-        title: 'Error',
-        description: 'Failed to reject device',
-        variant: 'destructive',
-      });
+      toast({ title: 'Error', description: 'Failed to reject device', variant: 'destructive' });
     }
   }
 

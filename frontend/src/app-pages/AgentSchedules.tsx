@@ -12,6 +12,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Calendar, Clock, Plus, Trash2, Loader2, CalendarClock, Repeat } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
+import { apiUrl } from "@/lib/apiBaseUrl";
 import { format } from "date-fns";
 
 interface ActivatedModel {
@@ -64,7 +65,8 @@ export default function AgentSchedules() {
 
   useEffect(() => {
     void (async () => {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { session } } = await supabase.auth.getSession();
+      const user = session?.user;
       setCurrentUserId(user?.id ?? null);
       await loadData(user?.id ?? null);
     })();
@@ -74,17 +76,24 @@ export default function AgentSchedules() {
     try {
       const uid = userId ?? currentUserId;
       if (!uid) return;
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) return;
+      const token = session.access_token;
 
       const [modelsRes, schedulesRes] = await Promise.all([
-        (supabase as any).from("activated_models").select("*").eq("user_id", uid),
-        (supabase as any).from("agent_schedules").select("*").eq("user_id", uid).order("created_at", { ascending: false }),
+        fetch(apiUrl("/api/v1/activated-models"), { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(apiUrl("/api/v1/agent-schedules"), { headers: { Authorization: `Bearer ${token}` } }),
       ]);
 
-      if (modelsRes.data) {
-        setModels(modelsRes.data);
-        if (modelsRes.data.length > 0) setSelectedModel(modelsRes.data[0].model_id);
+      if (modelsRes.ok) {
+        const modelsData: ActivatedModel[] = (await modelsRes.json()).activated_models || [];
+        setModels(modelsData);
+        if (modelsData.length > 0) setSelectedModel(modelsData[0].model_id);
       }
-      if (schedulesRes.data) setSchedules(schedulesRes.data as AgentSchedule[]);
+      if (schedulesRes.ok) {
+        const schedulesData: AgentSchedule[] = (await schedulesRes.json()).agent_schedules || [];
+        setSchedules(schedulesData);
+      }
     } catch (e) {
       console.error("Error loading data:", e);
     } finally {
@@ -103,7 +112,8 @@ export default function AgentSchedules() {
 
     setSaving(true);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { session } } = await supabase.auth.getSession();
+      const user = session?.user;
       if (!user) throw new Error("Not authenticated");
 
       const cronValue = cronPreset === "custom" ? customCron : cronPreset;
@@ -115,18 +125,23 @@ export default function AgentSchedules() {
         nextRunAt = scheduledAt;
       }
 
-      const { error } = await (supabase as any).from("agent_schedules").insert({
-        user_id: user.id,
-        model_id: model.model_id,
-        model_name: model.model_name,
-        schedule_type: scheduleType,
-        cron_expression: scheduleType === "recurring" ? cronValue : null,
-        scheduled_at: scheduledAt,
-        prompt: prompt.trim(),
-        next_run_at: nextRunAt,
-      } as any);
-
-      if (error) throw error;
+      const res = await fetch(apiUrl("/api/v1/agent-schedules"), {
+        method: "POST",
+        headers: { Authorization: `Bearer ${session.access_token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model_id: model.model_id,
+          model_name: model.model_name,
+          schedule_type: scheduleType,
+          cron_expression: scheduleType === "recurring" ? cronValue : null,
+          scheduled_at: scheduledAt,
+          prompt: prompt.trim(),
+          next_run_at: nextRunAt,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error((err as any)?.error || `HTTP ${res.status}`);
+      }
 
       toast({ title: "Schedule Created", description: `Agent "${model.model_name}" has been scheduled` });
       setCreateOpen(false);
@@ -140,23 +155,26 @@ export default function AgentSchedules() {
   };
 
   const toggleSchedule = async (id: string, currentState: boolean) => {
-    const { error } = await (supabase as any)
-      .from("agent_schedules")
-      .update({ is_active: !currentState })
-      .eq("id", id)
-      .eq("user_id", currentUserId ?? "");
-    if (!error) {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) return;
+    const res = await fetch(apiUrl(`/api/v1/agent-schedules/${encodeURIComponent(id)}`), {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${session.access_token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ is_active: !currentState }),
+    });
+    if (res.ok) {
       setSchedules(prev => prev.map((s: any) => s.id === id ? { ...s, is_active: !currentState } : s));
     }
   };
 
   const deleteSchedule = async (id: string) => {
-    const { error } = await (supabase as any)
-      .from("agent_schedules")
-      .delete()
-      .eq("id", id)
-      .eq("user_id", currentUserId ?? "");
-    if (!error) {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) return;
+    const res = await fetch(apiUrl(`/api/v1/agent-schedules/${encodeURIComponent(id)}`), {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    if (res.ok) {
       setSchedules(prev => prev.filter((s: any) => s.id !== id));
       toast({ title: "Deleted", description: "Schedule removed" });
     }

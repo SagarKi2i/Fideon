@@ -9,7 +9,7 @@ import { useToast } from "@/hooks/use-toast";
 import type { User as SupabaseUser } from "@supabase/supabase-js";
 import { useUserRole } from "@/hooks/useUserRole";
 import { safeLog } from "@/logger";
-import { computeAuditIntegrityHash } from "@/lib/auditHash";
+import { apiUrl } from "@/lib/apiBaseUrl";
 import { useGlobalRealtimeSubscriptions } from "@/hooks/useGlobalRealtimeSubscriptions";
 import { RealtimeNotificationBell } from "@/components/RealtimeNotificationBell";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -80,24 +80,18 @@ export function Layout({ children }: LayoutProps) {
       if (!user) return;
       setHeaderReady(false);
       try {
-        const { data: profile } = await (supabase as any)
-          .from("app_users")
-          .select("full_name,tenant_id")
-          .eq("user_id", user.id)
-          .maybeSingle();
-
-        const resolvedName = profile?.full_name || user.user_metadata?.full_name || "";
-        setDisplayName(resolvedName);
-
-        if (profile?.tenant_id) {
-          const { data: tenant } = await (supabase as any)
-            .from("tenants")
-            .select("name")
-            .eq("id", profile.tenant_id)
-            .maybeSingle();
-          setTenantName(tenant?.name || "");
-        } else {
-          setTenantName("");
+        // Fetch profile via backend — no direct Supabase connection.
+        const { data: { session } } = await supabase.auth.getSession();
+        const token = session?.access_token;
+        if (!token) return;
+        const res = await fetch(apiUrl("/api/settings/profile"), {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          const payload = await res.json();
+          const p = payload?.profile;
+          setDisplayName(p?.full_name || user.user_metadata?.full_name || "");
+          setTenantName(p?.tenant_name || "");
         }
       } catch {
         setTenantName("");
@@ -145,46 +139,23 @@ export function Layout({ children }: LayoutProps) {
   }, [navigate]);
 
   const handleLogout = async () => {
-    const currentUser = user;
-    const currentRole = role;
-
     try {
-      // Attempt to write a logout audit entry before signing out
-      if (currentUser) {
-        try {
-          const createdAt = new Date().toISOString();
-          const integrity_hash = await computeAuditIntegrityHash({
-            user_id: currentUser.id,
-            role: currentRole || "user",
-            event: "logout",
-            action_code: "E",
-            outcome_code: 0,
-            resource_type: "auth_session",
-            resource_id: null,
-            created_at: createdAt,
-          });
-
-          await (supabase as any).from("auth_audit").insert({
-            user_id: currentUser.id,
-            email: currentUser.email,
-            role: currentRole || "user",
-            event: "logout",
-            action_code: "E",           // Execute (end auth session)
-            outcome_code: 0,
-            resource_type: "auth_session",
-            resource_id: null,          // null for auth_session events (no specific resource)
-            created_at: createdAt,
-            integrity_hash,
-          });
-        } catch (auditError) {
-          safeLog.error("auth_audit_logout_error", {
-            error:
-              auditError instanceof Error ? auditError.message : String(auditError),
-          });
-        }
+      // Revoke session server-side through the backend (which also writes the audit row).
+      const { data: sessData } = await supabase.auth.getSession();
+      const token = sessData.session?.access_token;
+      if (token) {
+        await fetch(apiUrl("/api/v1/auth/logout"), {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        });
       }
+    } catch (err) {
+      safeLog.error("backend_logout_error", {
+        error: err instanceof Error ? err.message : String(err),
+      });
     } finally {
-      await supabase.auth.signOut();
+      // Clear the local session without making another server call.
+      await supabase.auth.signOut({ scope: "local" });
     }
     toast({
       title: "Signed out",

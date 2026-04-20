@@ -110,8 +110,9 @@ export function PodActivationRequests() {
       // Audit: admin/global_admin approving a pod request (best-effort, non-blocking).
       void (async () => {
         try {
-          const { data: { user } } = await supabase.auth.getUser();
-          if (!user) return;
+          const { data: { session } } = await supabase.auth.getSession();
+          const user = session?.user;
+          if (!user || !session?.access_token) return;
 
           const createdAt = new Date().toISOString();
           const integrity_hash = await computeAuditIntegrityHash({
@@ -125,17 +126,19 @@ export function PodActivationRequests() {
             created_at: createdAt,
           });
 
-          await (supabase as any).from("auth_audit").insert({
-            user_id: user.id,
-            email: user.email,
-            role: role ?? "admin",
-            event: `approve_pod:${request.model_id}`,
-            action_code: "U",
-            outcome_code: 0,
-            resource_type: "pod_activation",
-            resource_id: request.id,
-            created_at: createdAt,
-            integrity_hash,
+          await fetch(apiUrl("/api/v1/admin/auth-audit"), {
+            method: "POST",
+            headers: { Authorization: `Bearer ${session.access_token}`, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              user_id: user.id,
+              email: user.email,
+              role: role ?? "admin",
+              event: `approve_pod:${request.model_id}`,
+              action_code: "U",
+              outcome_code: 0,
+              resource_type: "pod_activation",
+              resource_id: request.id,
+            }),
           });
         } catch (auditError) {
           safeLog.error("auth_audit_pod_approve_error", {
@@ -189,8 +192,9 @@ export function PodActivationRequests() {
       // Audit: admin/global_admin rejecting a pod request (best-effort, non-blocking).
       void (async () => {
         try {
-          const { data: { user } } = await supabase.auth.getUser();
-          if (!user) return;
+          const { data: { session } } = await supabase.auth.getSession();
+          const user = session?.user;
+          if (!user || !session?.access_token) return;
 
           const createdAt = new Date().toISOString();
           const integrity_hash = await computeAuditIntegrityHash({
@@ -204,17 +208,19 @@ export function PodActivationRequests() {
             created_at: createdAt,
           });
 
-          await (supabase as any).from("auth_audit").insert({
-            user_id: user.id,
-            email: user.email,
-            role: role ?? "admin",
-            event: `reject_pod:${request.model_id}`,
-            action_code: "U",
-            outcome_code: 0,
-            resource_type: "pod_activation",
-            resource_id: request.id,
-            created_at: createdAt,
-            integrity_hash,
+          await fetch(apiUrl("/api/v1/admin/auth-audit"), {
+            method: "POST",
+            headers: { Authorization: `Bearer ${session.access_token}`, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              user_id: user.id,
+              email: user.email,
+              role: role ?? "admin",
+              event: `reject_pod:${request.model_id}`,
+              action_code: "U",
+              outcome_code: 0,
+              resource_type: "pod_activation",
+              resource_id: request.id,
+            }),
           });
         } catch (auditError) {
           safeLog.error("auth_audit_pod_reject_error", {
@@ -256,30 +262,20 @@ export function PodActivationRequests() {
         return;
       }
 
-      const { data: appUser, error } = await (supabase as any)
-        .from("app_users")
-        .select("full_name,email,tenant_id")
-        .eq("user_id", request.user_id)
-        .maybeSingle();
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) return;
 
-      if (error) throw error;
-
-      let tenantName: string | null = null;
-      if (appUser?.tenant_id) {
-        const { data: tenant, error: tenantError } = await (supabase as any)
-          .from("tenants")
-          .select("name")
-          .eq("id", appUser.tenant_id)
-          .maybeSingle();
-        if (tenantError) throw tenantError;
-        tenantName = tenant?.name ?? null;
-      }
+      const res = await fetch(apiUrl(`/api/v1/admin/pod-request-user/${encodeURIComponent(request.user_id)}`), {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      const payload = res.ok ? await res.json() : null;
+      const appUser = payload?.user ?? null;
 
       setReviewContext({
         fullName: appUser?.full_name ?? null,
         email: appUser?.email ?? null,
         tenantId: appUser?.tenant_id ?? null,
-        tenantName,
+        tenantName: payload?.tenant_name ?? null,
       });
     } catch (error) {
       console.error("Error loading request context:", error);

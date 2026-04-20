@@ -1,3 +1,21 @@
+# ─────────────────────────────────────────────────────────────
+# Database Migration Pipeline
+#
+# Applies supabase/migrations/*.sql files in timestamp order.
+#
+# Staging  → self-hosted Supabase VM (direct DB URL via secret)
+# Production → Supabase.com (direct DB URL via secret)
+#
+# Secrets required per GitHub Environment:
+#   staging:
+#     DATABASE_URL  — postgres connection URL to staging VM DB
+#   production:
+#     DATABASE_URL  — postgres connection URL to production DB
+#
+# Trigger: manual only (Actions → Database Migrations → Run workflow)
+# Default: dry_run=true (safe — only shows pending, never applies)
+# ─────────────────────────────────────────────────────────────
+
 name: Database Migrations
 
 on:
@@ -8,9 +26,9 @@ on:
         required: true
         default: "staging"
         type: choice
-        options: [staging, production]
+        options: [development, staging, production]
       dry_run:
-        description: "Dry run only (show pending migrations, don't apply)"
+        description: "Dry run only — show pending migrations, don't apply"
         required: false
         default: "true"
         type: boolean
@@ -21,88 +39,179 @@ concurrency:
 
 jobs:
   # ══════════════════════════════════════════════════════════════
-  # DRY RUN – always show what will be applied
+  # DRY RUN — always runs first, shows what will be applied
   # ══════════════════════════════════════════════════════════════
   dry-run:
-    name: Dry run – ${{ github.event.inputs.environment }}
+    name: Dry run — ${{ github.event.inputs.environment }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: ${{ github.event.inputs.environment }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Supabase CLI
-        uses: supabase/setup-cli@v1
-        with:
-          version: latest
-
-      - name: Link to ${{ github.event.inputs.environment }} project
+      - name: Install psql client
         run: |
-          supabase link \
-            --project-ref "$SUPABASE_PROJECT_REF" \
-            --password "$SUPABASE_DB_PASSWORD"
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - name: Verify DB connection
         env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          SUPABASE_PROJECT_REF: ${{ github.event.inputs.environment == 'production' && secrets.PROD_SUPABASE_PROJECT_REF || secrets.STAGING_SUPABASE_PROJECT_REF }}
-          SUPABASE_DB_PASSWORD: ${{ github.event.inputs.environment == 'production' && secrets.PROD_SUPABASE_DB_PASSWORD || secrets.STAGING_SUPABASE_DB_PASSWORD }}
-
-      - name: Show pending migrations (dry run)
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          echo "════════════════════════════════════"
-          echo "  Pending migrations for: ${{ github.event.inputs.environment }}"
-          echo "════════════════════════════════════"
-          supabase db diff --schema public || true
-          supabase migration list
+          echo "Testing connection to ${{ github.event.inputs.environment }} database..."
+          psql "$DATABASE_URL" -c "SELECT version();" -t -q
+          echo "✅ Connection successful"
+
+      - name: Ensure migration tracking table exists
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          psql "$DATABASE_URL" <<'SQL'
+            CREATE TABLE IF NOT EXISTS public._migration_history (
+              filename    TEXT PRIMARY KEY,
+              applied_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+              applied_by  TEXT
+            );
+          SQL
+          echo "✅ Migration tracking table ready"
+
+      - name: Show pending migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          echo "════════════════════════════════════════════════"
+          echo "  Environment : ${{ github.event.inputs.environment }}"
+          echo "  Branch      : ${{ github.ref_name }}"
+          echo "  Triggered by: ${{ github.actor }}"
+          echo "════════════════════════════════════════════════"
+          echo ""
+          echo "Already applied migrations:"
+          psql "$DATABASE_URL" \
+            -c "SELECT filename, applied_at FROM public._migration_history ORDER BY applied_at;" \
+            2>/dev/null || echo "(none)"
+
+          echo ""
+          echo "Pending migrations (not yet applied):"
+          PENDING=0
+          for f in $(ls supabase/migrations/*.sql 2>/dev/null | sort); do
+            fname=$(basename "$f")
+            EXISTS=$(psql "$DATABASE_URL" -t -c \
+              "SELECT COUNT(*) FROM public._migration_history WHERE filename='$fname';" 2>/dev/null | tr -d ' ')
+            if [ "$EXISTS" = "0" ]; then
+              echo "  → $fname"
+              PENDING=$((PENDING + 1))
+            fi
+          done
+
+          if [ "$PENDING" -eq 0 ]; then
+            echo "  (none — database is up to date)"
+          else
+            echo ""
+            echo "Total pending: $PENDING"
+          fi
+
 
   # ══════════════════════════════════════════════════════════════
-  # APPLY – only if dry_run=false and manual approval for prod
+  # APPLY — only runs when dry_run=false
+  # Production requires manual approval via GitHub Environment
   # ══════════════════════════════════════════════════════════════
   apply-migrations:
-    name: Apply migrations – ${{ github.event.inputs.environment }}
+    name: Apply migrations — ${{ github.event.inputs.environment }}
     runs-on: ubuntu-latest
     needs: dry-run
-    timeout-minutes: 20
+    timeout-minutes: 30
     if: ${{ github.event.inputs.dry_run == 'false' }}
-    environment:
-      name: ${{ github.event.inputs.environment == 'production' && 'production-approval' || 'staging' }}
+    environment: ${{ github.event.inputs.environment == 'production' && 'production-approval' || github.event.inputs.environment == 'staging' && 'staging' || 'development' }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Supabase CLI
-        uses: supabase/setup-cli@v1
-        with:
-          version: latest
-
-      - name: Link project
+      - name: Install psql client
         run: |
-          supabase link \
-            --project-ref "$SUPABASE_PROJECT_REF" \
-            --password "$SUPABASE_DB_PASSWORD"
-        env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          SUPABASE_PROJECT_REF: ${{ github.event.inputs.environment == 'production' && secrets.PROD_SUPABASE_PROJECT_REF || secrets.STAGING_SUPABASE_PROJECT_REF }}
-          SUPABASE_DB_PASSWORD: ${{ github.event.inputs.environment == 'production' && secrets.PROD_SUPABASE_DB_PASSWORD || secrets.STAGING_SUPABASE_DB_PASSWORD }}
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-client
 
-      - name: Apply migrations
+      - name: Verify DB connection
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          psql "$DATABASE_URL" -c "SELECT version();" -t -q
+          echo "✅ Connection verified"
+
+      - name: Ensure migration tracking table exists
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          psql "$DATABASE_URL" <<'SQL'
+            CREATE TABLE IF NOT EXISTS public._migration_history (
+              filename    TEXT PRIMARY KEY,
+              applied_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+              applied_by  TEXT
+            );
+          SQL
+
+      - name: Apply pending migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          APPLIED_BY: ${{ github.actor }}
         run: |
           echo "Applying migrations to ${{ github.event.inputs.environment }}..."
-          supabase db push
-          echo "✅ Migrations applied successfully"
-        env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          APPLIED=0
+          FAILED=0
 
-      - name: Run schema tests post-migration
-        run: |
-          if [ -f supabase/seed/schema_tests.sql ]; then
-            supabase db execute --file supabase/seed/schema_tests.sql \
-              2>&1 | tee schema_test_output.txt
-            if grep -q "0 rows" schema_test_output.txt; then
-              echo "✅ Schema tests passed"
+          for f in $(ls supabase/migrations/*.sql 2>/dev/null | sort); do
+            fname=$(basename "$f")
+
+            EXISTS=$(psql "$DATABASE_URL" -t -c \
+              "SELECT COUNT(*) FROM public._migration_history WHERE filename='$fname';" \
+              2>/dev/null | tr -d ' ')
+
+            if [ "$EXISTS" != "0" ]; then
+              echo "  ✓ skip (already applied): $fname"
+              continue
             fi
-          else
-            echo "⚠ supabase/seed/schema_tests.sql not found — skipping schema tests"
+
+            echo "  → Applying: $fname"
+            if psql "$DATABASE_URL" \
+                --single-transaction \
+                --set ON_ERROR_STOP=on \
+                -f "$f"; then
+              psql "$DATABASE_URL" -c \
+                "INSERT INTO public._migration_history (filename, applied_by)
+                 VALUES ('$fname', '$APPLIED_BY')
+                 ON CONFLICT (filename) DO NOTHING;"
+              echo "  ✅ Applied: $fname"
+              APPLIED=$((APPLIED + 1))
+            else
+              echo "  ❌ FAILED: $fname"
+              FAILED=$((FAILED + 1))
+              break
+            fi
+          done
+
+          echo ""
+          echo "════════════════════════════════════════════════"
+          echo "  Applied : $APPLIED"
+          echo "  Failed  : $FAILED"
+          echo "════════════════════════════════════════════════"
+
+          if [ "$FAILED" -gt 0 ]; then
+            echo "::error::Migration failed — see logs above."
+            exit 1
           fi
+
+          if [ "$APPLIED" -eq 0 ]; then
+            echo "Nothing to apply — database is already up to date."
+          fi
+
+      - name: Verify applied migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          echo "Migration history after apply:"
+          psql "$DATABASE_URL" \
+            -c "SELECT filename, applied_at, applied_by FROM public._migration_history ORDER BY applied_at DESC LIMIT 20;"
 
       - name: Notify Slack
         uses: slackapi/slack-github-action@v1
@@ -116,11 +225,11 @@ jobs:
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "${{ job.status == 'success' && '✅' || '❌' }} *Database migration — ${{ job.status }}*\n*Environment:* `${{ github.event.inputs.environment }}`\n*Applied by:* ${{ github.actor }}\n*<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>*"
+                    "text": "${{ job.status == 'success' && '✅' || '❌' }} *Database migration — ${{ job.status }}*\n*Environment:* `${{ github.event.inputs.environment }}`\n*Applied by:* ${{ github.actor }}\n*Branch:* `${{ github.ref_name }}`\n*<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>*"
                   }
                 }
               ]
             }
         env:
-          SLACK_WEBHOOK_URL:  ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

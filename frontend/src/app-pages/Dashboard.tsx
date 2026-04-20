@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { supabase } from "@/integrations/supabase/client";
+import { apiUrl } from "@/lib/apiBaseUrl";
 import { InfoTooltip } from "@/components/ui/info-tooltip";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
@@ -144,29 +145,30 @@ export default function Dashboard() {
 
   const loadActivatedPods = useCallback(async (userId: string) => {
     try {
-      const { data: profile } = await (supabase as any)
-        .from("app_users")
-        .select("full_name,email")
-        .eq("user_id", userId)
-        .maybeSingle();
-      const { data: authData } = await supabase.auth.getUser();
-      const fallbackName = authData.user?.email?.split("@")[0] ?? "User";
-      setDisplayName(profile?.full_name ?? profile?.email?.split("@")[0] ?? fallbackName);
+      const { data: { session: authSession } } = await supabase.auth.getSession();
+      const token = authSession?.access_token;
+      const fallbackName = authSession?.user?.email?.split("@")[0] ?? "User";
 
-      const { data, error } = await (supabase as any)
-        .from("activated_models")
-        .select("*")
-        .eq("user_id", userId)
-        .order("activated_at", { ascending: false });
+      // Fetch profile, activated models, conversations, and workflow runs via backend
+      const [profRes, modelsRes, convsRes, runsRes] = await Promise.all([
+        fetch(apiUrl("/api/settings/profile"), { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(apiUrl("/api/v1/activated-models"), { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(apiUrl("/api/v1/chat-conversations"), { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(apiUrl("/api/v1/workflow-runs?limit=100"), { headers: { Authorization: `Bearer ${token}` } }),
+      ]);
 
-      if (error) throw error;
-      const podsData = data ?? [];
+      if (profRes.ok) {
+        const profData = await profRes.json();
+        const p = profData?.profile;
+        setDisplayName(p?.full_name ?? p?.email?.split("@")[0] ?? fallbackName);
+      } else {
+        setDisplayName(fallbackName);
+      }
+
+      const podsData: ActivatedPod[] = modelsRes.ok ? (await modelsRes.json()).activated_models ?? [] : [];
       setPods(podsData);
 
-      const { data: conversations } = await (supabase as any)
-        .from("chat_conversations")
-        .select("id, model_id, updated_at, title, chat_messages(id,created_at)")
-        .eq("user_id", userId);
+      const conversations: any[] = convsRes.ok ? (await convsRes.json()).conversations ?? [] : [];
 
       const queryCountByModel: Record<string, number> = {};
       const lastActivityByModel: Record<string, string> = {};
@@ -214,14 +216,7 @@ export default function Dashboard() {
       setTotalQueries(conversationQueryTotal);
       setQueryTrendPct(calculateQueryTrend(currentMonthQueries, previousMonthQueries));
 
-      const { data: runs } = await (supabase as any)
-        .from("workflow_runs")
-        .select("id,status,started_at,completed_at")
-        .eq("user_id", userId)
-        .order("started_at", { ascending: false })
-        .limit(100);
-
-      const runRows: any[] = runs ?? [];
+      const runRows: any[] = runsRes.ok ? (await runsRes.json()).workflow_runs ?? [] : [];
       const completedRuns = runRows.filter((r: any) => r.status === "completed");
       const failedRuns = runRows.filter((r: any) => r.status === "failed");
       const consideredRuns = completedRuns.length + failedRuns.length;
@@ -298,7 +293,8 @@ export default function Dashboard() {
     let isMounted = true;
 
     const init = async () => {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { session } } = await supabase.auth.getSession();
+      const user = session?.user;
       if (!user || !isMounted) {
         setLoading(false);
         return;

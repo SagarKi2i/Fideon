@@ -1,5 +1,6 @@
 import { supabase } from "@/integrations/supabase/client";
 import { notAuthenticatedError } from "@/lib/httpErrors";
+import { apiUrl } from "@/lib/apiBaseUrl";
 
 let _refreshInFlight: Promise<string | null> | null = null;
 
@@ -12,6 +13,27 @@ function isTokenExpired(accessToken: string): boolean {
   }
 }
 
+async function refreshViaBackend(refreshToken: string): Promise<string | null> {
+  try {
+    const res = await fetch(apiUrl("/api/v1/auth/refresh"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const accessToken: string | null = data.access_token ?? null;
+    const newRefresh: string | null = data.refresh_token ?? null;
+    if (accessToken && newRefresh) {
+      // Update the local Supabase session so the rest of the app sees the new tokens.
+      await supabase.auth.setSession({ access_token: accessToken, refresh_token: newRefresh });
+    }
+    return accessToken;
+  } catch {
+    return null;
+  }
+}
+
 async function getAccessTokenFresh(): Promise<string> {
   const { data } = await supabase.auth.getSession();
   const session = data.session;
@@ -20,11 +42,11 @@ async function getAccessTokenFresh(): Promise<string> {
   if (!isTokenExpired(session.access_token)) return session.access_token;
 
   if (!_refreshInFlight) {
+    const refreshToken = session.refresh_token;
     _refreshInFlight = (async () => {
       try {
-        const { data: refreshed, error } = await supabase.auth.refreshSession();
-        if (error || !refreshed.session?.access_token) return null;
-        return refreshed.session.access_token;
+        if (!refreshToken) return null;
+        return await refreshViaBackend(refreshToken);
       } catch (e: any) {
         const msg = String(e?.message || e || "");
         if (/lock broken|AbortError/i.test(msg)) return null;
@@ -54,4 +76,3 @@ export async function authHeadersJson(): Promise<Record<string, string>> {
   const base = await authHeader();
   return { ...base, "Content-Type": "application/json" };
 }
-

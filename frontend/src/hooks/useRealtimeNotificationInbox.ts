@@ -4,42 +4,59 @@ import {
 } from "@/lib/realtimeNotificationStore";
 import type { StoredRealtimeNotification } from "@/lib/realtimeNotificationStore";
 import { supabase } from "@/integrations/supabase/client";
+import { apiUrl } from "@/lib/apiBaseUrl";
+
+async function getToken(): Promise<string | null> {
+  const { data } = await supabase.auth.getSession();
+  return data.session?.access_token ?? null;
+}
+
+async function apiFetch(path: string, options: RequestInit = {}): Promise<Response> {
+  const token = await getToken();
+  return fetch(apiUrl(path), {
+    ...options,
+    headers: {
+      ...(options.headers ?? {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
+    },
+  });
+}
 
 export function useRealtimeNotificationInbox() {
   const [items, setItems] = useState<StoredRealtimeNotification[]>([]);
 
   const refresh = useCallback(() => {
     void (async () => {
-      const { data: userData } = await supabase.auth.getUser();
-      const user = userData.user;
-      if (!user) {
+      const token = await getToken();
+      if (!token) {
         setItems([]);
         return;
       }
 
-      const { data, error } = await (supabase as any)
-        .from("user_notifications")
-        .select("id, table_name, event_type, message, target_path, created_at, read_at, source_fingerprint")
-        .eq("user_id", user.id)
-        .order("created_at", { ascending: false })
-        .limit(50);
+      try {
+        const res = await apiFetch("/api/v1/notifications");
+        if (!res.ok) {
+          setItems([]);
+          return;
+        }
+        const payload = await res.json();
+        const rows: any[] = payload.notifications ?? [];
 
-      if (error) {
+        const mapped: StoredRealtimeNotification[] = rows.map((row: any) => ({
+          id: row.id,
+          table: row.table_name as StoredRealtimeNotification["table"],
+          eventType: row.event_type as StoredRealtimeNotification["eventType"],
+          message: row.message,
+          targetPath: row.target_path ?? undefined,
+          createdAt: row.created_at,
+          read: Boolean(row.read_at),
+          fingerprint: row.source_fingerprint,
+        }));
+        setItems(mapped);
+      } catch {
         setItems([]);
-        return;
       }
-
-      const mapped: StoredRealtimeNotification[] = (data || []).map((row: any) => ({
-        id: row.id,
-        table: row.table_name as StoredRealtimeNotification["table"],
-        eventType: row.event_type as StoredRealtimeNotification["eventType"],
-        message: row.message,
-        targetPath: row.target_path ?? undefined,
-        createdAt: row.created_at,
-        read: Boolean(row.read_at),
-        fingerprint: row.source_fingerprint,
-      }));
-      setItems(mapped);
     })();
   }, []);
 
@@ -56,38 +73,21 @@ export function useRealtimeNotificationInbox() {
 
   const markAllRead = useCallback(() => {
     void (async () => {
-      const { data: userData } = await supabase.auth.getUser();
-      const user = userData.user;
-      if (!user) return;
-      await (supabase as any)
-        .from("user_notifications")
-        .update({ read_at: new Date().toISOString() })
-        .eq("user_id", user.id)
-        .is("read_at", null);
+      await apiFetch("/api/v1/notifications/mark-all-read", { method: "POST" });
       refresh();
     })();
   }, [refresh]);
 
   const clearAll = useCallback(() => {
     void (async () => {
-      const { data: userData } = await supabase.auth.getUser();
-      const user = userData.user;
-      if (!user) return;
-      await (supabase as any)
-        .from("user_notifications")
-        .delete()
-        .eq("user_id", user.id);
+      await apiFetch("/api/v1/notifications", { method: "DELETE" });
       refresh();
     })();
   }, [refresh]);
 
   const markRead = useCallback((id: string) => {
     void (async () => {
-      await (supabase as any)
-        .from("user_notifications")
-        .update({ read_at: new Date().toISOString() })
-        .eq("id", id)
-        .is("read_at", null);
+      await apiFetch(`/api/v1/notifications/${encodeURIComponent(id)}/mark-read`, { method: "PATCH" });
       refresh();
     })();
   }, [refresh]);
