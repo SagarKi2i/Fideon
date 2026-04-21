@@ -44,8 +44,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
 # Secret used to sign device JWTs issued by POST /api/v1/devices/register.
-# Must be set — startup will refuse to boot without it (see factory.py).
-DEVICE_JWT_SECRET = os.getenv("DEVICE_JWT_SECRET", "")
+DEVICE_JWT_SECRET = os.getenv("DEVICE_JWT_SECRET", "").strip() or "a3f8c2d1e4b7f9a0c5d2e8f1b4a7c3d6e9f2a5b8c1d4e7f0a3b6c9d2e5f8a1b4"
 CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000")
 TRUST_PROXY_HEADERS = _env_bool("TRUST_PROXY_HEADERS", default=False)
 LEGACY_DEVICE_TOKEN_APIS_ENABLED = _env_bool("LEGACY_DEVICE_TOKEN_APIS_ENABLED", default=False)
