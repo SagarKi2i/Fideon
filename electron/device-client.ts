@@ -92,10 +92,10 @@ export async function ensureDeviceAuthAsync(opts?: { log?: (msg: string) => void
         method: "PUT",
         headers: { Authorization: `Bearer ${existingJwt}` },
       });
-      if (res.status !== 401) {
+      if (res.ok) {
         return { device_id: existingId, device_jwt: existingJwt };
       }
-      opts?.log?.("[device] stored JWT rejected by backend — re-registering");
+      opts?.log?.(`[device] stored JWT rejected by backend (status=${res.status}) — re-registering`);
     } catch {
       // Network error — use stored JWT so brief outages do not force re-register.
       return { device_id: existingId, device_jwt: existingJwt };
@@ -153,7 +153,6 @@ export async function ensureDeviceAuthAndStartHeartbeat(opts: {
   log: (msg: string) => void;
   heartbeatSeconds?: number;
 }): Promise<{ stop: () => void }> {
-  const store = await getStore();
   const hbSeconds = Math.max(10, Math.floor(opts.heartbeatSeconds ?? 60));
   let stopped = false;
   let timer: NodeJS.Timeout | null = null;
