@@ -219,10 +219,48 @@ async def signup(request: Request):
 
     result = resp.json() if resp.content else {}
     if not resp.ok:
-        raise HTTPException(
-            status_code=resp.status_code,
-            detail=result.get("message") or result.get("error_description") or result.get("error") or "Signup failed",
+        # GoTrue uses different keys depending on version: "msg", "message", "error_description", "error".
+        raw_msg: str = (
+            result.get("msg")
+            or result.get("message")
+            or result.get("error_description")
+            or result.get("error")
+            or ""
         )
+        raw_lower = raw_msg.lower()
+
+        # DB trigger failures surface as GoTrue 500 with generic "Database error saving new user".
+        # Map the known structured errors to readable messages.
+        if resp.status_code == 500:
+            if "fideon_os_limit:seats" in raw_lower or "seat limit reached" in raw_lower:
+                raise HTTPException(status_code=422, detail="FIDEON_OS_LIMIT:SEATS This tenant has reached its user seat limit. Contact your administrator to upgrade the plan.")
+            if "fideon_os_limit:packs" in raw_lower or "pack limit reached" in raw_lower:
+                raise HTTPException(status_code=422, detail="FIDEON_OS_LIMIT:PACKS Agent pack limit reached for this tenant. Select fewer packs or upgrade the plan.")
+
+            # GoTrue sometimes commits the auth.users row but fails during post-commit
+            # token issuance (e.g. custom access token hook error). In that case the
+            # user IS created but the signup call returns 500. Attempt a silent login to
+            # recover a valid session — if it succeeds the user was created successfully.
+            try:
+                async with httpx.AsyncClient(timeout=5) as recovery_client:
+                    login_resp = await recovery_client.post(
+                        f"{SUPABASE_URL}/auth/v1/token?grant_type=password",
+                        headers=_anon_headers(),
+                        content=json.dumps({"email": email, "password": password}),
+                    )
+                if login_resp.status_code == 200:
+                    return login_resp.json()
+            except Exception:
+                pass  # Recovery failed; fall through to the original error.
+
+            raise HTTPException(status_code=500, detail=raw_msg or "Signup failed due to an internal error. Please try again.")
+
+        # GoTrue 422 / 400 for duplicate email — normalise to a clear message.
+        if resp.status_code in (400, 422):
+            if any(k in raw_lower for k in ("already registered", "already been registered", "already exists", "email_exists", "user already")):
+                raise HTTPException(status_code=409, detail="This email is already registered. Please sign in or use a different email address.")
+
+        raise HTTPException(status_code=resp.status_code, detail=raw_msg or "Signup failed")
 
     return result
 

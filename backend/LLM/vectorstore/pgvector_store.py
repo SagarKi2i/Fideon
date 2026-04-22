@@ -125,7 +125,7 @@ def _connect() -> psycopg.Connection:
 def ensure_schema(vector_dim: int = 1024) -> None:
     """
     Ensure pgvector extension + storage table exist.
-
+    Adds tenant_id column if missing (safe to run on existing tables).
     We store normalized embeddings for cosine distance queries.
     """
     table = _table_name()
@@ -137,6 +137,7 @@ def ensure_schema(vector_dim: int = 1024) -> None:
                 CREATE TABLE IF NOT EXISTS {table} (
                     id TEXT PRIMARY KEY,
                     collection_name TEXT NOT NULL,
+                    tenant_id TEXT,
                     doc_id TEXT,
                     chunk_index INTEGER,
                     text TEXT NOT NULL,
@@ -147,8 +148,20 @@ def ensure_schema(vector_dim: int = 1024) -> None:
                 );
                 """
             )
+            # C2: Add tenant_id to existing tables that pre-date this migration.
+            cur.execute(
+                f"""
+                ALTER TABLE {table}
+                ADD COLUMN IF NOT EXISTS tenant_id TEXT;
+                """
+            )
             cur.execute(
                 f"CREATE INDEX IF NOT EXISTS {table}_collection_idx ON {table} (collection_name);"
+            )
+            # C2: Composite index for tenant-scoped similarity searches.
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS {table}_tenant_collection_idx "
+                f"ON {table} (tenant_id, collection_name);"
             )
 
 
@@ -166,16 +179,30 @@ def upsert_chunks(
     collection_name: str,
     chunks: Iterable[Chunk],
     embedding_model: str = "BAAI/bge-large-en",
+    tenant_id: Optional[str] = None,   # C2: required for multi-tenant safety
 ) -> int:
     """
     Compute embeddings and upsert chunks into pgvector store.
+
+    C2 — tenant_id:
+        Always pass tenant_id when calling from a request context.
+        Rows without tenant_id are only acceptable for system-level ingestion
+        (e.g., seed data, shared catalogs).
+        Logged to comply with pgvector audit requirements.
     """
+    if not tenant_id:
+        logger.warning(
+            "upsert_chunks called WITHOUT tenant_id for collection '%s'. "
+            "All rows will have tenant_id=NULL — ensure this is intentional "
+            "(e.g., shared catalog ingestion).",
+            collection_name,
+        )
+
     chunk_list = list(chunks)
     if not chunk_list:
         return 0
 
     # Fail fast on DB connectivity before loading/downloading embedding weights.
-    # For bge-large-en, embeddings are 1024 dims.
     ensure_schema(vector_dim=1024)
     table = _table_name()
 
@@ -186,12 +213,12 @@ def upsert_chunks(
     rows: List[tuple] = []
     for i, c in enumerate(chunk_list):
         md = c.metadata or {}
-        # Keep collection/doc_id/chunk_index duplicated for easy filtering.
         md = {"collection_name": collection_name, **md}
         rows.append(
             (
                 c.id,
                 collection_name,
+                tenant_id,          # C2: stored per-row
                 c.doc_id,
                 c.chunk_index,
                 c.text,
@@ -205,21 +232,30 @@ def upsert_chunks(
             cur.executemany(
                 f"""
                 INSERT INTO {table}
-                    (id, collection_name, doc_id, chunk_index, text, embedding, metadata)
+                    (id, collection_name, tenant_id, doc_id, chunk_index, text, embedding, metadata)
                 VALUES
-                    (%s, %s, %s, %s, %s, %s, %s::jsonb)
+                    (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
                 ON CONFLICT (id) DO UPDATE SET
                     collection_name = EXCLUDED.collection_name,
-                    doc_id = EXCLUDED.doc_id,
-                    chunk_index = EXCLUDED.chunk_index,
-                    text = EXCLUDED.text,
-                    embedding = EXCLUDED.embedding,
-                    metadata = EXCLUDED.metadata,
-                    updated_at = now()
+                    tenant_id       = EXCLUDED.tenant_id,
+                    doc_id          = EXCLUDED.doc_id,
+                    chunk_index     = EXCLUDED.chunk_index,
+                    text            = EXCLUDED.text,
+                    embedding       = EXCLUDED.embedding,
+                    metadata        = EXCLUDED.metadata,
+                    updated_at      = now()
                 ;
                 """,
                 rows,
             )
+
+    # C2: Audit log for compliance trail on vector writes.
+    logger.info(
+        "pgvector.upsert tenant=%s collection=%s chunks=%d",
+        tenant_id or "NULL",
+        collection_name,
+        len(rows),
+    )
     return len(rows)
 
 
@@ -229,15 +265,38 @@ def query_similar(
     query: str,
     k: int = 10,
     embedding_model: str = "BAAI/bge-large-en",
+    tenant_id: Optional[str] = None,   # C2: required for multi-tenant safety
 ) -> List[Dict[str, Any]]:
     """
     Return top-k chunks ordered by cosine distance (lower is better).
+
+    C2 — tenant_id:
+        Always pass tenant_id when calling from a request context.
+        Without it, the query searches ALL tenants' chunks — a security risk.
+        A warning is emitted and results are filtered to tenant_id IS NULL
+        (shared/system chunks only) when tenant_id is not provided.
     """
+    if not tenant_id:
+        logger.warning(
+            "query_similar called WITHOUT tenant_id for collection '%s'. "
+            "Restricting to tenant_id IS NULL rows only.",
+            collection_name,
+        )
+
     embedder = _get_embedder(embedding_model)
     qvec = embedder.encode([query], convert_to_numpy=True, normalize_embeddings=True)[0]
 
     ensure_schema(vector_dim=int(qvec.shape[0]))
     table = _table_name()
+
+    # C2: Always scope by tenant_id. When tenant_id is provided, return only
+    # that tenant's chunks. When absent, return only shared (NULL) chunks.
+    if tenant_id:
+        tenant_filter = "AND (tenant_id = %s OR tenant_id IS NULL)"
+        filter_params = (qvec.tolist(), collection_name, tenant_id, qvec.tolist(), k)
+    else:
+        tenant_filter = "AND tenant_id IS NULL"
+        filter_params = (qvec.tolist(), collection_name, qvec.tolist(), k)
 
     with _connect() as conn:
         with conn.cursor() as cur:
@@ -246,12 +305,21 @@ def query_similar(
                 SELECT id, doc_id, chunk_index, text, metadata, (embedding <=> %s) AS distance
                 FROM {table}
                 WHERE collection_name = %s
+                {tenant_filter}
                 ORDER BY embedding <=> %s
                 LIMIT %s;
                 """,
-                (qvec.tolist(), collection_name, qvec.tolist(), k),
+                filter_params,
             )
             rows = cur.fetchall()
+
+    # C2: Audit log for compliance trail on vector reads.
+    logger.info(
+        "pgvector.query tenant=%s collection=%s results=%d",
+        tenant_id or "NULL",
+        collection_name,
+        len(rows),
+    )
 
     out: List[Dict[str, Any]] = []
     for (cid, doc_id, chunk_index, text, metadata, distance) in rows:

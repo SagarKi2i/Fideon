@@ -5,6 +5,7 @@ from typing import Any, AsyncGenerator
 import httpx
 from fastapi import HTTPException
 
+from app.core.resilience import runpod_retry, runpod_circuit_breaker
 from app.core.config import (
     ANTHROPIC_API_KEY,
     ANTHROPIC_MESSAGES_URL,
@@ -180,6 +181,7 @@ def _extract_runpod_text(data: dict[str, Any]) -> str:
     raise RuntimeError("RunPod returned empty content")
 
 
+@runpod_retry
 async def _runpod_generate_text(payload: dict[str, Any], model_name: str) -> str:
     runpod_token = _clean_bearer_token(FIDEON_SECRET_KEY or RUNPOD_API_KEY)
     if not runpod_token:
@@ -226,7 +228,10 @@ async def _runpod_generate_text(payload: dict[str, Any], model_name: str) -> str
     raise RuntimeError(f"RunPod /generate failed across request formats: {' | '.join(errors)}")
 
 
+@runpod_retry
 async def _offline_fallback_stream(payload: dict[str, Any]) -> tuple[int, dict[str, str], AsyncGenerator[bytes, None]]:
+    # W2: Check circuit breaker before hitting RunPod.
+    runpod_circuit_breaker.before_call()
     prompt = str(payload.get("prompt") or "").strip()
     if not prompt:
         prompt = _collect_text_from_messages(payload.get("messages", []))

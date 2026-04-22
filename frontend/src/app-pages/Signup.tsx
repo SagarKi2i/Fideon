@@ -606,39 +606,47 @@ export default function Signup() {
       console.error("Onboarding error:", error);
       const errCode = String(error?.code || "").toLowerCase();
       const rawMessage = String(error?.message || "").toLowerCase();
+      const errStatus = Number(error?.status || 0);
 
-      let friendlyMessage =
-        rawMessage.includes("already registered")
+      // Duplicate email — backend now returns 409 with a clear message.
+      const isDuplicateEmail =
+        errStatus === 409
+        || rawMessage.includes("already registered")
         || rawMessage.includes("already been registered")
         || rawMessage.includes("already exists")
-          ? "This email is already registered. Try signing in or using password reset."
-          : rawMessage.includes("password")
-          ? `Password does not meet security requirements. Use ${LIMITS.password.min}-${LIMITS.password.max} characters with uppercase, lowercase, number, and special character.`
-          : error?.message ?? "Something went wrong while creating your tenant.";
+        || rawMessage.includes("email_exists")
+        || rawMessage.includes("user already");
 
-      // GoTrue / DB trigger failures propagate as code `P0001` with messages like:
-      //   FIDEON_OS_LIMIT:PACKS Agent pack limit reached (2/1). Upgrade plan to add more packs.
-      //   FIDEON_OS_LIMIT:SEATS Seat limit reached (5/5). Upgrade your plan to add more users.
-      if (
-        errCode === "p0001"
-        && (rawMessage.includes("pack limit reached") || rawMessage.includes("fideon_os_limit:packs"))
-      ) {
-        if (tenantConfig?.max_agent_packs === null || tenantConfig?.max_agent_packs === undefined) {
-          friendlyMessage = "Pack limit reached for this tenant. Please select fewer packs and try again.";
-        } else if (tenantConfig?.remaining_pack_slots === 0) {
-          friendlyMessage = "This tenant has no remaining pack slots. Please select fewer packs or upgrade the plan.";
-        } else {
-          friendlyMessage = `Pack limit reached for this tenant. Please select up to ${tenantConfig?.remaining_pack_slots} more pack(s).`;
-        }
-      }
-      if (
-        errCode === "p0001"
-        && (rawMessage.includes("seat limit reached") || rawMessage.includes("fideon_os_limit:seats"))
-      ) {
+      // Seat / pack limit — backend now returns 422 with FIDEON_OS_LIMIT prefix.
+      const isSeatLimit =
+        rawMessage.includes("seat limit") || rawMessage.includes("fideon_os_limit:seats");
+      const isPackLimit =
+        rawMessage.includes("pack limit") || rawMessage.includes("fideon_os_limit:packs");
+
+      let friendlyMessage: string;
+
+      if (isDuplicateEmail) {
+        friendlyMessage = "This email is already registered. Please sign in or use a different email address.";
+      } else if (isSeatLimit || (errCode === "p0001" && rawMessage.includes("seat"))) {
         friendlyMessage = "This tenant has reached its user seat limit. Contact your administrator to upgrade the plan.";
+      } else if (isPackLimit || (errCode === "p0001" && rawMessage.includes("pack"))) {
+        if (tenantConfig?.remaining_pack_slots === 0) {
+          friendlyMessage = "This tenant has no remaining pack slots. Please select fewer packs or upgrade the plan.";
+        } else if (tenantConfig?.remaining_pack_slots != null) {
+          friendlyMessage = `Pack limit reached. You can add up to ${tenantConfig.remaining_pack_slots} more pack(s).`;
+        } else {
+          friendlyMessage = "Pack limit reached for this tenant. Please select fewer packs and try again.";
+        }
+      } else if (rawMessage.includes("password")) {
+        friendlyMessage = `Password does not meet security requirements. Use ${LIMITS.password.min}-${LIMITS.password.max} characters with uppercase, lowercase, number, and special character.`;
+      } else if (errStatus === 500 || rawMessage.includes("internal error") || rawMessage.includes("database error")) {
+        friendlyMessage = "Signup failed due to a server error. Please try again in a moment.";
+      } else {
+        friendlyMessage = error?.message ?? "Something went wrong while creating your tenant.";
       }
+
       toast({
-        title: "Onboarding failed",
+        title: isDuplicateEmail ? "Email already in use" : "Onboarding failed",
         description: friendlyMessage,
         variant: "destructive",
       });

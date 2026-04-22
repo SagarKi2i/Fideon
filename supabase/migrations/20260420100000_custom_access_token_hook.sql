@@ -44,8 +44,19 @@ BEGIN
 END;
 $$;
 
--- Required: supabase_auth_admin must be able to call the hook.
+-- Required: supabase_auth_admin must be able to reach the public schema and call the hook.
+-- GoTrue connects as supabase_auth_admin (not postgres). In self-hosted Supabase, postgres is
+-- NOT a superuser — supabase_admin owns the public schema and must issue schema-level grants.
+SET ROLE supabase_admin;
+GRANT USAGE ON SCHEMA public TO supabase_auth_admin;
+RESET ROLE;
+
 GRANT EXECUTE ON FUNCTION public.custom_access_token_hook TO supabase_auth_admin;
+
+-- The hook body reads user_roles to embed the role claim.
+-- Grant SELECT so the lookup succeeds even when the function owner is not a superuser
+-- (e.g. self-hosted Supabase where postgres != superuser, or when RLS is active).
+GRANT SELECT ON public.user_roles TO supabase_auth_admin;
 
 -- Prevent regular users from calling it directly.
 REVOKE EXECUTE ON FUNCTION public.custom_access_token_hook FROM authenticated, anon, public;

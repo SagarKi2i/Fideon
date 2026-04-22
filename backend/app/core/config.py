@@ -40,6 +40,11 @@ DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
 # Prefer the chat model env if provided, otherwise fall back to Groq default.
 DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "") or os.getenv("GROQ_MODEL_CHAT", "") or DEFAULT_GROQ_MODEL
 
+# ── Database backend selector ─────────────────────────────────────────────────
+# Change this to switch the entire DB layer. Supported: supabase | mongodb | postgres
+# See backend/app/core/db/ for implementations.
+DB_BACKEND = os.getenv("DB_BACKEND", "supabase").strip().lower()
+
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
