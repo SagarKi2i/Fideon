@@ -58,6 +58,7 @@ LEGACY_DEVICE_TOKEN_APIS_ENABLED = _env_bool("LEGACY_DEVICE_TOKEN_APIS_ENABLED",
 ENABLE_LOCAL_GENERATE = _env_bool("ENABLE_LOCAL_GENERATE", default=False)
 # If True, block startup until the local model is loaded (RunPod cold start; avoids first-request timeout).
 ENABLE_LOCAL_GENERATE_WARMUP = _env_bool("ENABLE_LOCAL_GENERATE_WARMUP", default=False)
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_OPENAI_COMPAT_URL = os.getenv("GROQ_OPENAI_COMPAT_URL", "https://api.groq.com/openai/v1/chat/completions")
 GROQ_MODEL_CHAT = os.getenv("GROQ_MODEL_CHAT", DEFAULT_GROQ_MODEL)

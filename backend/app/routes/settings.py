@@ -1,7 +1,9 @@
+import asyncio
 import hashlib
 import secrets
+import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Dict, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -18,6 +20,33 @@ from app.services.tenant_activation_limits import distinct_tenant_activated_mode
 
 router = APIRouter()
 USER_PROFILE_NOT_FOUND = "User profile not found"
+
+# ── Profile cache (30 s TTL per user) ────────────────────────────────────────
+# Prevents redundant DB hits when the frontend calls /api/settings/profile
+# multiple times in quick succession (realtime events, Strict Mode, etc.).
+_PROFILE_CACHE: Dict[str, tuple[Dict[str, Any], float]] = {}
+_PROFILE_TTL = 30.0
+
+
+def _pcache_get(user_id: str) -> Optional[Dict[str, Any]]:
+    entry = _PROFILE_CACHE.get(user_id)
+    if entry and time.monotonic() < entry[1]:
+        return entry[0]
+    _PROFILE_CACHE.pop(user_id, None)
+    return None
+
+
+def _pcache_set(user_id: str, data: Dict[str, Any]) -> None:
+    if len(_PROFILE_CACHE) > 1000:
+        now = time.monotonic()
+        stale = [k for k, (_, exp) in _PROFILE_CACHE.items() if exp < now]
+        for k in stale:
+            _PROFILE_CACHE.pop(k, None)
+    _PROFILE_CACHE[user_id] = (data, time.monotonic() + _PROFILE_TTL)
+
+
+def _pcache_invalidate(user_id: str) -> None:
+    _PROFILE_CACHE.pop(user_id, None)
 
 
 def _normalize_preferences(metadata: dict) -> dict:
@@ -50,17 +79,26 @@ async def get_profile(authorization: Optional[str] = Header(default=None)):
     if not user_id:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    rows = await postgrest_get(
+    cached = _pcache_get(user_id)
+    if cached is not None:
+        return cached
+
+    # Fetch app_users row and role in parallel — role from JWT fast path if available.
+    jwt_role = (user.get("app_metadata") or {}).get("role")
+    rows_task = asyncio.create_task(postgrest_get(
         "app_users",
         f"select=user_id,email,full_name,metadata,tenant_id&user_id=eq.{quote(user_id, safe='')}&limit=1",
-    )
+    ))
+    role_task = asyncio.create_task(_get_user_role(user_id)) if not jwt_role else None
+
+    rows = await rows_task
     if not rows:
         raise HTTPException(status_code=404, detail=USER_PROFILE_NOT_FOUND)
 
     profile = rows[0]
     metadata = profile.get("metadata") if isinstance(profile.get("metadata"), dict) else {}
     preferences = _normalize_preferences(metadata)
-    role = await _get_user_role(user_id)
+    role = jwt_role or (await role_task if role_task else "user")
     tenant_name = None
     tenant_plan = None
     tenant_id = profile.get("tenant_id")
@@ -68,10 +106,15 @@ async def get_profile(authorization: Optional[str] = Header(default=None)):
     tenant_max_active_models: Optional[int] = None
     tenant_distinct_activated_model_ids: list[str] = []
     if tenant_id:
-        tenant_rows = await postgrest_get(
-            "tenants",
-            f"select=id,name,metadata,agent_packs,max_active_models&id=eq.{quote(str(tenant_id), safe='')}&limit=1",
+        # Fetch tenant info and activated model IDs in parallel.
+        tenant_rows, distinct_ids = await asyncio.gather(
+            postgrest_get(
+                "tenants",
+                f"select=id,name,metadata,agent_packs,max_active_models&id=eq.{quote(str(tenant_id), safe='')}&limit=1",
+            ),
+            distinct_tenant_activated_model_ids(str(tenant_id)),
         )
+        tenant_distinct_activated_model_ids = sorted(distinct_ids)
         if tenant_rows:
             tenant_row = tenant_rows[0]
             tenant_name = tenant_row.get("name")
@@ -87,10 +130,7 @@ async def get_profile(authorization: Optional[str] = Header(default=None)):
                     tenant_max_active_models = None
             else:
                 tenant_max_active_models = None
-        tenant_distinct_activated_model_ids = sorted(
-            await distinct_tenant_activated_model_ids(str(tenant_id))
-        )
-    return {
+    response = {
         "profile": {
             "user_id": profile.get("user_id"),
             "email": profile.get("email"),
@@ -105,6 +145,8 @@ async def get_profile(authorization: Optional[str] = Header(default=None)):
             "tenant_distinct_activated_model_ids": tenant_distinct_activated_model_ids,
         }
     }
+    _pcache_set(user_id, response)
+    return response
 
 
 @router.patch("/api/settings/profile")
@@ -149,6 +191,7 @@ async def update_profile(request: Request, authorization: Optional[str] = Header
             "metadata": new_metadata,
         },
     )
+    _pcache_invalidate(user_id)
 
     await insert_audit_log(
         request=request,

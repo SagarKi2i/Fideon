@@ -5,12 +5,13 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
 import httpx
+import jwt as pyjwt
 import structlog
 from fastapi import HTTPException, Request
 
 _audit_log = structlog.get_logger("audit_log")
 
-from .config import SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL
+from .config import SUPABASE_ANON_KEY, SUPABASE_JWT_SECRET, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL
 
 # ── C1: Multi-tenant table registry ──────────────────────────────────────────
 # Tables that hold per-tenant data. Every service-key query on these tables
@@ -58,6 +59,33 @@ async def verify_user(authorization: Optional[str]) -> Dict[str, Any]:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Unauthorized")
     token = authorization.split(" ", 1)[1]
+
+    # Fast path: verify JWT signature locally — zero network calls.
+    # Falls back to Supabase HTTP call if JWT_SECRET is not configured.
+    if SUPABASE_JWT_SECRET:
+        try:
+            payload = pyjwt.decode(
+                token,
+                SUPABASE_JWT_SECRET,
+                algorithms=["HS256"],
+                options={"verify_aud": False},
+            )
+            user_id = payload.get("sub")
+            if not user_id:
+                raise HTTPException(status_code=401, detail="Unauthorized")
+            return {
+                "id": user_id,
+                "email": payload.get("email", ""),
+                "app_metadata": payload.get("app_metadata", {}),
+                "user_metadata": payload.get("user_metadata", {}),
+                "role": payload.get("role", "authenticated"),
+            }
+        except pyjwt.ExpiredSignatureError:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        except pyjwt.InvalidTokenError:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Slow path: SUPABASE_JWT_SECRET not set — call Supabase auth server.
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
             f"{SUPABASE_URL}/auth/v1/user",

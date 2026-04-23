@@ -143,28 +143,44 @@ export default function Dashboard() {
     { id: string; action: string; time: string; status: "success" | "error"; podName: string }[]
   >([]);
 
-  const loadActivatedPods = useCallback(async (userId: string, signal?: AbortSignal) => {
+  // Fetches profile once on mount — not re-fetched on realtime events.
+  const loadProfile = useCallback(async (signal?: AbortSignal) => {
     try {
       const { data: { session: authSession } } = await supabase.auth.getSession();
       const token = authSession?.access_token;
       const fallbackName = authSession?.user?.email?.split("@")[0] ?? "User";
+
+      // Show email immediately; update with full_name when profile arrives.
+      setDisplayName(fallbackName);
+
+      if (!token) return;
+      const res = await fetch(apiUrl("/api/settings/profile"), {
+        headers: { Authorization: `Bearer ${token}` },
+        signal,
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const p = data?.profile;
+        setDisplayName(p?.full_name ?? p?.email?.split("@")[0] ?? fallbackName);
+      }
+    } catch (error: any) {
+      if (error?.name !== "AbortError") console.error("Error loading profile:", error);
+    }
+  }, []);
+
+  // Fetches live data — called on mount and on every realtime event.
+  // Does NOT fetch profile (profile data doesn't change on these events).
+  const loadActivatedPods = useCallback(async (_userId: string, signal?: AbortSignal) => {
+    try {
+      const { data: { session: authSession } } = await supabase.auth.getSession();
+      const token = authSession?.access_token;
       const headers = { Authorization: `Bearer ${token}` };
 
-      // Fetch profile, activated models, conversations, and workflow runs via backend
-      const [profRes, modelsRes, convsRes, runsRes] = await Promise.all([
-        fetch(apiUrl("/api/settings/profile"), { headers, signal }),
+      const [modelsRes, convsRes, runsRes] = await Promise.all([
         fetch(apiUrl("/api/v1/activated-models"), { headers, signal }),
         fetch(apiUrl("/api/v1/chat-conversations"), { headers, signal }),
         fetch(apiUrl("/api/v1/workflow-runs?limit=100"), { headers, signal }),
       ]);
-
-      if (profRes.ok) {
-        const profData = await profRes.json();
-        const p = profData?.profile;
-        setDisplayName(p?.full_name ?? p?.email?.split("@")[0] ?? fallbackName);
-      } else {
-        setDisplayName(fallbackName);
-      }
 
       const podsData: ActivatedPod[] = modelsRes.ok ? (await modelsRes.json()).activated_models ?? [] : [];
       setPods(podsData);
@@ -301,6 +317,8 @@ export default function Dashboard() {
         return;
       }
 
+      // Profile fetched once — independent of realtime data refreshes.
+      void loadProfile(controller.signal);
       await loadActivatedPods(user.id, controller.signal);
 
       if (controller.signal.aborted) return;
@@ -336,7 +354,7 @@ export default function Dashboard() {
       controller.abort();
       if (channel) supabase.removeChannel(channel);
     };
-  }, [loadActivatedPods]);
+  }, [loadActivatedPods, loadProfile]);
 
   if (loading) {
     return (
