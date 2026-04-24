@@ -1,15 +1,22 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Upload, FileText, Loader2, FileCheck } from "lucide-react";
+import { Upload, FileText, Loader2, FileCheck, CloudUpload, CheckCircle2, AlertCircle, RefreshCw } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { submitAcordRun } from "@/lib/acordWorkflowApi";
+import {
+  uploadPdfToRunPod,
+  triggerFullExtraction,
+  type PdfUploadRecord,
+  type AcordExtractionResult,
+  type AcordFieldValue,
+} from "@/lib/pdfUploadApi";
 import { useNavigate } from "react-router-dom";
 
 interface ACORDParserUIProps {
@@ -143,21 +150,124 @@ function JsonHighlight({ text }: { text: string }) {
   return <>{parts}</>;
 }
 
-export default function ACORDParserUI({ modelId, onRun, isRunning, result }: ACORDParserUIProps) {
+type RunPodUploadState =
+  | { phase: "idle" }
+  | { phase: "uploading" }
+  | { phase: "done"; record: PdfUploadRecord }
+  | { phase: "error"; message: string };
+
+type ExtractionState =
+  | { phase: "idle" }
+  | { phase: "extracting" }
+  | { phase: "completed"; result: AcordExtractionResult }
+  | { phase: "failed"; message: string };
+
+function serializeFieldValue(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  if (Array.isArray(v)) {
+    return v
+      .map((item) =>
+        item === null || item === undefined
+          ? ""
+          : typeof item === "object"
+          ? JSON.stringify(item)
+          : String(item)
+      )
+      .filter(Boolean)
+      .join(", ");
+  }
+  if (typeof v === "object") {
+    if ("value" in (v as any)) return String((v as any).value ?? "");
+    return JSON.stringify(v);
+  }
+  return String(v);
+}
+
+function flattenAcordFields(result: AcordExtractionResult): Array<{ key: string; value: string }> {
+  const raw = result.extracted_json ?? result.extracted_fields ?? result.fields ?? {};
+  return Object.entries(raw)
+    .map(([key, v]) => {
+      if (v === null || v === undefined) return null;
+      const val = serializeFieldValue(v);
+      return val ? { key, value: val } : null;
+    })
+    .filter(Boolean) as Array<{ key: string; value: string }>;
+}
+
+export default function ACORDParserUI({ modelId: _modelId, onRun, isRunning, result }: ACORDParserUIProps) {
   const navigate = useNavigate();
   const [file, setFile] = useState<File | null>(null);
   const [formType, setFormType] = useState<string>("25");
-  const [lastInput, setLastInput] = useState("");
   const { toast } = useToast();
   const [editText, setEditText] = useState<string>("");
   const [editError, setEditError] = useState<string | null>(null);
   const [trainSubmitted, setTrainSubmitted] = useState(false);
   const [activeTab, setActiveTab] = useState<"json" | "fields" | "edit" | "changes" | "split">("json");
+  const [ocrTab, setOcrTab] = useState<"fields" | "rawtext">("fields");
+
+  // RunPod upload state
+  const [runpodUpload, setRunpodUpload] = useState<RunPodUploadState>({ phase: "idle" });
+  const uploadPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Full extraction state
+  const [extractionState, setExtractionState] = useState<ExtractionState>({ phase: "idle" });
+
+  // Clear polls on unmount
+  useEffect(() => () => {
+    if (uploadPollRef.current) clearInterval(uploadPollRef.current);
+  }, []);
+
+  // Reset extraction state when a new file is selected
+  useEffect(() => {
+    setExtractionState({ phase: "idle" });
+    setRunpodUpload({ phase: "idle" });
+    if (uploadPollRef.current) clearInterval(uploadPollRef.current);
+  }, [file]);
+
+  const handleRunPodUpload = async () => {
+    if (!file) return;
+    setRunpodUpload({ phase: "uploading" });
+    setExtractionState({ phase: "idle" });
+    if (uploadPollRef.current) clearInterval(uploadPollRef.current);
+
+    try {
+      const record = await uploadPdfToRunPod(file, formType);
+      setRunpodUpload({ phase: "done", record });
+      toast({
+        title: "PDF uploaded to RunPod",
+        description: `${record.filename} (${(record.size_bytes / 1024).toFixed(1)} KB)`,
+      });
+    } catch (e: any) {
+      const msg = e?.message || "Upload failed";
+      setRunpodUpload({ phase: "error", message: msg });
+      toast({ title: "RunPod upload failed", description: msg, variant: "destructive" });
+    }
+  };
+
+  const handleExecuteExtraction = async () => {
+    if (runpodUpload.phase !== "done") return;
+    const uploadId = runpodUpload.record.upload_id;
+
+    setExtractionState({ phase: "extracting" });
+
+    try {
+      const result = await triggerFullExtraction(uploadId, formType);
+      setExtractionState({ phase: "completed", result });
+      const fieldCount = Object.keys(
+        result.extracted_json ?? result.extracted_fields ?? result.fields ?? {}
+      ).length;
+      toast({ title: "ACORD extraction completed", description: `${fieldCount} field(s) extracted` });
+    } catch (e: any) {
+      const msg = e?.message || "Extraction failed";
+      setExtractionState({ phase: "failed", message: msg });
+      toast({ title: "Extraction failed", description: msg, variant: "destructive" });
+    }
+  };
 
   const handleRun = () => {
     if (!file) return;
-    const inputDesc = `Parse ACORD ${formType}: ${file.name}`;
-    setLastInput(inputDesc);
     onRun({
       type: "acord-parser",
       file,
@@ -307,25 +417,203 @@ export default function ACORDParserUI({ modelId, onRun, isRunning, result }: ACO
             )}
           </div>
 
-          <Button
-            onClick={handleRun}
-            disabled={!file || isRunning}
-            className="w-full bg-gradient-primary hover:opacity-90"
-          >
-            {isRunning ? (
-              <>
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                Parsing...
-              </>
-            ) : (
-              <>
-                <Upload className="h-4 w-4 mr-2" />
-                Parse ACORD Form
-              </>
+          {/* ── Step 1: Upload to RunPod ────────────────────────────────── */}
+          <div className="border-t border-border/50 pt-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <Label className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
+                <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-primary/20 text-primary text-[10px] font-bold">1</span>
+                Upload to RunPod
+              </Label>
+              {runpodUpload.phase === "done" && (
+                <Badge variant="outline" className="border-green-500 text-green-400">
+                  <CheckCircle2 className="h-3 w-3 mr-1" />
+                  uploaded
+                </Badge>
+              )}
+              {runpodUpload.phase === "error" && (
+                <Badge variant="outline" className="border-red-500 text-red-400">
+                  <AlertCircle className="h-3 w-3 mr-1" />
+                  error
+                </Badge>
+              )}
+            </div>
+
+            <Button
+              variant="outline"
+              onClick={handleRunPodUpload}
+              disabled={!file || runpodUpload.phase === "uploading"}
+              className="w-full border-dashed"
+            >
+              {runpodUpload.phase === "uploading" ? (
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Uploading to RunPod…</>
+              ) : runpodUpload.phase === "done" ? (
+                <><CheckCircle2 className="h-4 w-4 mr-2 text-green-400" />Re-upload PDF</>
+              ) : (
+                <><CloudUpload className="h-4 w-4 mr-2" />Upload PDF to RunPod</>
+              )}
+            </Button>
+
+            {runpodUpload.phase === "done" && (
+              <div className="rounded-md border border-border/50 bg-muted/30 p-2.5 text-xs font-mono space-y-1">
+                <div className="flex justify-between gap-2">
+                  <span className="text-muted-foreground shrink-0">file</span>
+                  <span className="text-foreground truncate">{runpodUpload.record.filename}</span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span className="text-muted-foreground shrink-0">size</span>
+                  <span className="text-foreground">{(runpodUpload.record.size_bytes / 1024).toFixed(1)} KB</span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span className="text-muted-foreground shrink-0">id</span>
+                  <span className="text-foreground truncate">{runpodUpload.record.upload_id.slice(0, 16)}…</span>
+                </div>
+              </div>
             )}
-          </Button>
+            {runpodUpload.phase === "error" && (
+              <p className="text-xs text-red-400">{runpodUpload.message}</p>
+            )}
+          </div>
+
+          {/* ── Step 2: Extract ACORD Fields ───────────────────────────── */}
+          <div className={`border-t border-border/50 pt-4 space-y-3 transition-opacity ${runpodUpload.phase === "done" ? "opacity-100" : "opacity-40 pointer-events-none"}`}>
+            <div className="flex items-center justify-between">
+              <Label className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
+                <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-primary/20 text-primary text-[10px] font-bold">2</span>
+                Extract ACORD Fields
+              </Label>
+              {extractionState.phase === "extracting" && (
+                <Badge variant="outline" className="border-yellow-500 text-yellow-400">
+                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                  Extracting…
+                </Badge>
+              )}
+              {extractionState.phase === "completed" && (
+                <Badge variant="outline" className="border-green-500 text-green-400">
+                  <CheckCircle2 className="h-3 w-3 mr-1" />
+                  Completed
+                </Badge>
+              )}
+              {extractionState.phase === "failed" && (
+                <Badge variant="outline" className="border-red-500 text-red-400">
+                  <AlertCircle className="h-3 w-3 mr-1" />
+                  Failed
+                </Badge>
+              )}
+            </div>
+
+            <Button
+              onClick={handleExecuteExtraction}
+              disabled={runpodUpload.phase !== "done" || extractionState.phase === "extracting"}
+              className="w-full bg-gradient-to-r from-violet-600 to-indigo-600 hover:opacity-90 text-white"
+            >
+              {extractionState.phase === "extracting" ? (
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Extracting ACORD Fields…</>
+              ) : extractionState.phase === "completed" ? (
+                <><RefreshCw className="h-4 w-4 mr-2" />Re-run Extraction</>
+              ) : (
+                <><Upload className="h-4 w-4 mr-2" />Execute — Extract ACORD Fields</>
+              )}
+            </Button>
+
+            {extractionState.phase === "extracting" && (
+              <div className="space-y-1.5 text-xs">
+                {[
+                  { label: "Surya OCR — layout detection" },
+                  { label: "Docling — structure analysis" },
+                  { label: "Qwen VL — field extraction" },
+                ].map(({ label }, i) => (
+                  <div key={i} className="flex items-center gap-2 text-yellow-400">
+                    <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                    {label}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {extractionState.phase === "failed" && (
+              <p className="text-xs text-red-400">{extractionState.message}</p>
+            )}
+          </div>
+          {/* ── end RunPod section ─────────────────────────────────────── */}
         </CardContent>
       </Card>
+
+      {/* ── ACORD Extraction Results ────────────────────────────────────── */}
+      {extractionState.phase === "completed" && (() => {
+        const extractedFields = flattenAcordFields(extractionState.result);
+        const rawText = extractionState.result.raw_text || extractionState.result.full_text || "";
+        const formTypeDetected = extractionState.result.form_type_detected || "";
+        const pdfType = extractionState.result.pdf_type || "";
+        return (
+          <Card className="bg-card border-border animate-fade-in">
+            <CardHeader className="bg-gradient-to-r from-violet-600/10 to-transparent">
+              <CardTitle className="text-card-foreground flex items-center gap-2 flex-wrap">
+                <CheckCircle2 className="h-5 w-5 text-violet-400" />
+                ACORD Extraction Results
+                <div className="ml-auto flex gap-2">
+                  {formTypeDetected && (
+                    <Badge variant="outline" className="border-violet-500 text-violet-400 text-xs">
+                      {formTypeDetected.toUpperCase()}
+                    </Badge>
+                  )}
+                  {pdfType && (
+                    <Badge variant="outline" className="border-blue-500 text-blue-400 text-xs">
+                      {pdfType === "scanned" ? "Scanned PDF" : pdfType === "digital" ? "Digital PDF" : pdfType}
+                    </Badge>
+                  )}
+                  <Badge variant="outline" className="border-violet-500 text-violet-400 text-xs">
+                    {extractedFields.length} field{extractedFields.length !== 1 ? "s" : ""}
+                  </Badge>
+                </div>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="pt-4 space-y-4">
+              <Tabs value={ocrTab} onValueChange={(v) => setOcrTab(v as "fields" | "rawtext")}>
+                <TabsList>
+                  <TabsTrigger value="fields">
+                    Extracted Fields
+                    {extractedFields.length > 0 && (
+                      <span className="ml-1.5 text-[10px] bg-violet-500/20 text-violet-300 rounded px-1">{extractedFields.length}</span>
+                    )}
+                  </TabsTrigger>
+                  <TabsTrigger value="rawtext">Raw Text</TabsTrigger>
+                </TabsList>
+
+                <TabsContent value="fields" className="mt-3">
+                  {extractedFields.length === 0 ? (
+                    <p className="text-xs text-muted-foreground italic">No fields extracted. Check Raw Text tab for OCR output.</p>
+                  ) : (
+                    <div className="rounded-md border border-border/60 overflow-hidden">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="bg-muted/40 border-b border-border/60">
+                            <th className="text-left px-3 py-2 font-medium text-muted-foreground w-[45%]">Field</th>
+                            <th className="text-left px-3 py-2 font-medium text-muted-foreground">Value</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {extractedFields.map((f, i) => (
+                            <tr key={i} className={`border-b border-border/30 ${i % 2 === 0 ? "" : "bg-muted/20"}`}>
+                              <td className="px-3 py-1.5 text-muted-foreground font-medium">{f.key}</td>
+                              <td className="px-3 py-1.5 text-foreground">{f.value}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </TabsContent>
+
+                <TabsContent value="rawtext" className="mt-3">
+                  <pre className="rounded-lg border border-border/70 bg-[#0b1020] p-3 overflow-auto max-h-[380px] text-xs font-mono leading-5 whitespace-pre-wrap text-muted-foreground">
+                    {rawText || "(no raw text available)"}
+                  </pre>
+                </TabsContent>
+              </Tabs>
+            </CardContent>
+          </Card>
+        );
+      })()}
 
       {result && (
         <Card className="bg-card border-border animate-fade-in">

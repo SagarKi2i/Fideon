@@ -10,6 +10,7 @@ import { apiUrl } from "@/lib/apiBaseUrl";
 const REALTIME_BACKOFF_BASE_MS = 1_000;
 const REALTIME_BACKOFF_MAX_MS = 30_000;
 const REALTIME_BACKOFF_JITTER_MS = 500;
+const REALTIME_MAX_RECONNECT_ATTEMPTS = 10;
 
 type RealtimeChannelStatus =
   | "SUBSCRIBED"
@@ -312,6 +313,17 @@ export function useGlobalRealtimeSubscriptions() {
       reconnectInFlightRef.current = true;
       const attempt = reconnectAttemptRef.current + 1;
       reconnectAttemptRef.current = attempt;
+
+      if (attempt > REALTIME_MAX_RECONNECT_ATTEMPTS) {
+        safeLog.error("realtime_reconnect_exhausted", {
+          channel: channelName,
+          attempts: attempt,
+          status,
+        });
+        reconnectInFlightRef.current = false;
+        return;
+      }
+
       const backoff = Math.min(
         REALTIME_BACKOFF_MAX_MS,
         REALTIME_BACKOFF_BASE_MS * Math.pow(2, attempt - 1),

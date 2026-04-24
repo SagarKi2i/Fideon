@@ -1,0 +1,171 @@
+"""
+PDF upload + full ACORD extraction proxy routes.
+
+Routes:
+  POST /api/v1/pdf/upload                       — upload PDF to RunPod
+  GET  /api/v1/pdf/upload/{upload_id}/status    — poll upload record
+  POST /api/v1/pdf/process/{upload_id}          — trigger Surya OCR on RunPod (legacy)
+  GET  /api/v1/pdf/process/{job_id}/status      — poll OCR job status + results (legacy)
+  POST /api/v1/pdf/extract/{upload_id}          — full ACORD extraction (Surya + Docling + Qwen VL)
+"""
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
+
+import httpx
+import structlog
+from fastapi import APIRouter, File, Header, HTTPException, UploadFile
+
+from app.core.config import RUNPOD_UPLOAD_BASE_URL
+from app.core.supabase import verify_user
+
+log = structlog.get_logger("pdf_upload")
+router = APIRouter()
+
+_ALLOWED_EXTENSIONS = {".pdf", ".docx"}
+
+
+def _upload_base() -> str:
+    base = (RUNPOD_UPLOAD_BASE_URL or "").strip().rstrip("/")
+    if not base:
+        raise HTTPException(status_code=503, detail="RUNPOD_UPLOAD_BASE_URL is not configured")
+    return base
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+async def _runpod_get(path: str) -> Dict[str, Any]:
+    base = _upload_base()
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.get(f"{base}{path}")
+            if resp.status_code == 404:
+                raise HTTPException(status_code=404, detail=f"Not found on RunPod: {path}")
+            resp.raise_for_status()
+            return resp.json()
+    except HTTPException:
+        raise
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"RunPod unreachable: {type(e).__name__}: {e}")
+
+
+async def _runpod_post(path: str, timeout: float = 120.0, **kwargs: Any) -> Dict[str, Any]:
+    base = _upload_base()
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(f"{base}{path}", **kwargs)
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail=f"RunPod request timed out: POST {path}")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"RunPod returned {e.response.status_code}: {(e.response.text or '')[:400]}",
+        )
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"RunPod unreachable: {type(e).__name__}: {e}")
+
+
+# ── POST /api/v1/pdf/upload ───────────────────────────────────────────────────
+@router.post("/api/v1/pdf/upload")
+async def upload_pdf_to_runpod(
+    file: UploadFile = File(...),
+    form_type: str = "25",
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Upload a PDF from the browser to the RunPod pod storage."""
+    await verify_user(authorization)
+
+    filename = file.filename or ""
+    ext = ("." + filename.rsplit(".", 1)[-1].lower()) if "." in filename else ""
+    if ext not in _ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Only PDF or DOCX accepted (got '{ext or filename}')")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    log.info("pdf_upload.forwarding", filename=filename, size_bytes=len(content), form_type=form_type)
+
+    result = await _runpod_post(
+        "/upload",
+        files={"file": (filename, content, file.content_type or "application/pdf")},
+        params={"form_type": form_type},
+    )
+
+    log.info("pdf_upload.done", upload_id=result.get("upload_id"), status=result.get("status"))
+    return result
+
+
+# ── GET /api/v1/pdf/upload/{upload_id}/status ─────────────────────────────────
+@router.get("/api/v1/pdf/upload/{upload_id}/status")
+async def pdf_upload_status(
+    upload_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Poll RunPod for the status of a previously uploaded PDF."""
+    await verify_user(authorization)
+    return await _runpod_get(f"/upload/{upload_id}/status")
+
+
+# ── POST /api/v1/pdf/process/{upload_id} ─────────────────────────────────────
+@router.post("/api/v1/pdf/process/{upload_id}")
+async def trigger_surya_ocr(
+    upload_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Trigger legacy Surya-only OCR job on RunPod. Returns job_id for polling."""
+    await verify_user(authorization)
+    log.info("surya_ocr.trigger", upload_id=upload_id)
+    result = await _runpod_post(f"/process/{upload_id}")
+    log.info("surya_ocr.queued", job_id=result.get("job_id"), upload_id=upload_id)
+    return result
+
+
+# ── GET /api/v1/pdf/process/{job_id}/status ──────────────────────────────────
+@router.get("/api/v1/pdf/process/{job_id}/status")
+async def surya_ocr_status(
+    job_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Poll legacy Surya OCR job status."""
+    await verify_user(authorization)
+    return await _runpod_get(f"/process/{job_id}/status")
+
+
+# ── POST /api/v1/pdf/extract/{upload_id} — full ACORD extraction ──────────────
+@router.post("/api/v1/pdf/extract/{upload_id}")
+async def extract_acord_from_upload(
+    upload_id: str,
+    form_type_hint: Optional[str] = None,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """
+    Full ACORD extraction pipeline for a PDF already uploaded to RunPod.
+    Proxies to the RunPod pod's /extract/{upload_id} endpoint which runs
+    Surya OCR + Qwen2-VL directly on the pod GPU.
+    Long-running (30s–5min). Returns structured ACORD fields.
+    """
+    await verify_user(authorization)
+
+    # Get upload metadata to resolve form_type
+    meta = await _runpod_get(f"/upload/{upload_id}/status")
+    form_type = form_type_hint or str(meta.get("form_type") or "25")
+    filename = meta.get("filename") or "document.pdf"
+
+    log.info("acord_extract.start", upload_id=upload_id, filename=filename, form_type=form_type)
+
+    # Delegate to RunPod pod — 5 min timeout for heavy GPU inference
+    result = await _runpod_post(
+        f"/extract/{upload_id}",
+        timeout=300.0,
+        params={"form_type_hint": form_type},
+    )
+
+    log.info(
+        "acord_extract.done",
+        upload_id=upload_id,
+        form_type=result.get("form_type_detected"),
+        pdf_type=result.get("pdf_type"),
+    )
+    return result

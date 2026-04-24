@@ -80,6 +80,9 @@ OFFLINE_LLM_FALLBACK_ENABLED = os.getenv("OFFLINE_LLM_FALLBACK_ENABLED", "false"
 RUNPOD_POD_ID = os.getenv("RUNPOD_POD_ID", "").strip()
 # Optional: ML server origin for health checks. If empty, derived from RUNPOD_GENERATE_URL (strip /generate).
 RUNPOD_PROXY_BASE_URL = os.getenv("RUNPOD_PROXY_BASE_URL", "").strip()
+# Upload server URL — separate port (8080) for PDF ingestion. Falls back to RUNPOD_PROXY_BASE_URL.
+# Example: https://<pod-id>-8080.proxy.runpod.net
+RUNPOD_UPLOAD_BASE_URL = os.getenv("RUNPOD_UPLOAD_BASE_URL", "").strip()
 # Aliases (e.g. llm-gateway): POD_ID, PROXY_URL
 if not RUNPOD_POD_ID:
     RUNPOD_POD_ID = (os.getenv("POD_ID") or "").strip()
