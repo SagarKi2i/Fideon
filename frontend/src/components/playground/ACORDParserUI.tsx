@@ -1,23 +1,25 @@
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Upload, FileText, Loader2, FileCheck, CloudUpload, CheckCircle2, AlertCircle, RefreshCw } from "lucide-react";
+import { Upload, FileText, Loader2, FileCheck, CheckCircle2, AlertCircle, RefreshCw, Scan, FileDigit } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { submitAcordRun } from "@/lib/acordWorkflowApi";
 import {
-  uploadPdfToRunPod,
+  smartExtractPdf,
   triggerFullExtraction,
   submitRunpodForTraining,
-  type PdfUploadRecord,
   type AcordExtractionResult,
 } from "@/lib/pdfUploadApi";
-import { submitFeedback } from "@/lib/trainingApi";
+import {
+  createAcordRun,
+  saveAcordFeedback,
+} from "@/lib/acordSupabaseApi";
 import { useNavigate } from "react-router-dom";
 
 interface ACORDParserUIProps {
@@ -151,11 +153,13 @@ function JsonHighlight({ text }: { text: string }) {
   return <>{parts}</>;
 }
 
-type RunPodUploadState =
-  | { phase: "idle" }
-  | { phase: "uploading" }
-  | { phase: "done"; record: PdfUploadRecord }
-  | { phase: "error"; message: string };
+// Unified processing pipeline state
+type ProcessingPhase =
+  | "idle"
+  | "processing"         // smart-extract in flight (detect + digital Claude OR detect + RunPod upload)
+  | "extracting_scanned" // RunPod Surya+Qwen running (scanned path only)
+  | "done"
+  | "failed";
 
 type ExtractionState =
   | { phase: "idle" }
@@ -246,66 +250,126 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
   const [trainSubmittedRunpod, setTrainSubmittedRunpod] = useState(false);
   const [isSubmittingTrain, setIsSubmittingTrain] = useState(false);
 
-  // RunPod upload state
-  const [runpodUpload, setRunpodUpload] = useState<RunPodUploadState>({ phase: "idle" });
-  const uploadPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Unified pipeline state
+  const [processingPhase, setProcessingPhase] = useState<ProcessingPhase>("idle");
+  const [processingError, setProcessingError] = useState<string | null>(null);
+  const [detectedPdfType, setDetectedPdfType] = useState<"digital" | "scanned" | null>(null);
+  // upload_id is only set for scanned PDFs (needed for RunPod training sync)
+  const [scannedUploadId, setScannedUploadId] = useState<string | null>(null);
+  // Supabase acord_extraction_runs.id — set after createAcordRun succeeds
+  const [runId, setRunId] = useState<string | null>(null);
 
-  // Full extraction state
+  // Full extraction state (result store)
   const [extractionState, setExtractionState] = useState<ExtractionState>({ phase: "idle" });
 
-  // Clear polls on unmount
-  useEffect(() => () => {
-    if (uploadPollRef.current) clearInterval(uploadPollRef.current);
-  }, []);
-
-  // Reset extraction state when a new file is selected
+  // Reset all state when a new file is selected
   useEffect(() => {
+    setProcessingPhase("idle");
+    setProcessingError(null);
+    setDetectedPdfType(null);
+    setScannedUploadId(null);
+    setRunId(null);
     setExtractionState({ phase: "idle" });
-    setRunpodUpload({ phase: "idle" });
     setTrainSubmittedRunpod(false);
     setMarkdownEditText("");
     setOcrTab("fields");
-    if (uploadPollRef.current) clearInterval(uploadPollRef.current);
   }, [file]);
 
-  const handleRunPodUpload = async () => {
+  // Single entry point — handles detect → digital(Claude) or scanned(RunPod) automatically
+  const handleProcess = async () => {
     if (!file) return;
-    setRunpodUpload({ phase: "uploading" });
+    setProcessingPhase("processing");
+    setProcessingError(null);
+    setDetectedPdfType(null);
+    setScannedUploadId(null);
+    setRunId(null);
     setExtractionState({ phase: "idle" });
-    if (uploadPollRef.current) clearInterval(uploadPollRef.current);
-
-    try {
-      const record = await uploadPdfToRunPod(file, formType);
-      setRunpodUpload({ phase: "done", record });
-      toast({
-        title: "PDF uploaded to RunPod",
-        description: `${record.filename} (${(record.size_bytes / 1024).toFixed(1)} KB)`,
-      });
-    } catch (e: any) {
-      const msg = e?.message || "Upload failed";
-      setRunpodUpload({ phase: "error", message: msg });
-      toast({ title: "RunPod upload failed", description: msg, variant: "destructive" });
-    }
-  };
-
-  const handleExecuteExtraction = async () => {
-    if (runpodUpload.phase !== "done") return;
-    const uploadId = runpodUpload.record.upload_id;
-
-    setExtractionState({ phase: "extracting" });
     setTrainSubmittedRunpod(false);
+    setMarkdownEditText("");
 
     try {
-      const result = await triggerFullExtraction(uploadId, formType);
-      setExtractionState({ phase: "completed", result });
-      const fields = flattenAcordFields(result);
-      setMarkdownEditText(fieldsToMarkdown(fields, result.form_type_detected || formType, result.pdf_type || ""));
-      const fieldCount = Object.keys(
-        result.extracted_json ?? result.extracted_fields ?? result.fields ?? {}
-      ).length;
-      toast({ title: "ACORD extraction completed", description: `${fieldCount} field(s) extracted` });
+      const smartResult = await smartExtractPdf(file, formType);
+      setDetectedPdfType(smartResult.pdf_type);
+
+      if (smartResult.pdf_type === "digital") {
+        // ── Digital path: extraction done by Claude on backend ────────────────
+        const acordResult: AcordExtractionResult = {
+          pdf_type: "digital",
+          form_type_detected: smartResult.form_type_detected,
+          extracted_json: smartResult.extracted_json,
+          full_text: smartResult.full_text,
+          source: smartResult.source,
+        } as any;
+        setExtractionState({ phase: "completed", result: acordResult });
+        const fields = flattenAcordFields(acordResult);
+        setMarkdownEditText(fieldsToMarkdown(fields, smartResult.form_type_detected || formType, "digital"));
+        setProcessingPhase("done");
+
+        // Persist run to Supabase — non-blocking, warn but don't fail UX
+        createAcordRun({
+          source_filename: file.name,
+          source_mime: file.type || "application/pdf",
+          form_type_detected: smartResult.form_type_detected || formType,
+          raw_text: smartResult.full_text || "",
+          extracted_json: smartResult.extracted_json || {},
+        })
+          .then((id) => setRunId(id))
+          .catch(() =>
+            toast({
+              title: "Warning: run not saved",
+              description: "Extraction succeeded but could not save to database. Save & Train will be unavailable.",
+              variant: "destructive",
+            })
+          );
+
+        toast({
+          title: "Digital PDF extracted",
+          description: `${fields.length} field(s) extracted locally via Claude`,
+        });
+      } else {
+        // ── Scanned path: uploaded to RunPod, auto-trigger OCR+Qwen ──────────
+        const uploadId = smartResult.upload_id;
+        setScannedUploadId(uploadId);
+        setProcessingPhase("extracting_scanned");
+        setExtractionState({ phase: "extracting" });
+
+        toast({
+          title: "Scanned PDF detected",
+          description: "PDF uploaded to RunPod — running OCR + field extraction…",
+        });
+
+        const result = await triggerFullExtraction(uploadId, formType);
+        setExtractionState({ phase: "completed", result });
+        const fields = flattenAcordFields(result);
+        setMarkdownEditText(fieldsToMarkdown(fields, result.form_type_detected || formType, "scanned"));
+        setProcessingPhase("done");
+        const fieldCount = Object.keys(
+          result.extracted_json ?? result.extracted_fields ?? result.fields ?? {}
+        ).length;
+
+        // Persist run to Supabase — non-blocking
+        createAcordRun({
+          source_filename: file.name,
+          source_mime: file.type || "application/pdf",
+          form_type_detected: result.form_type_detected || formType,
+          raw_text: result.full_text ?? result.raw_text ?? "",
+          extracted_json: result.extracted_json ?? result.extracted_fields ?? result.fields ?? {},
+        })
+          .then((id) => setRunId(id))
+          .catch(() =>
+            toast({
+              title: "Warning: run not saved",
+              description: "Extraction succeeded but could not save to database. Save & Train will be unavailable.",
+              variant: "destructive",
+            })
+          );
+
+        toast({ title: "Scanned PDF extracted", description: `${fieldCount} field(s) extracted via RunPod` });
+      }
     } catch (e: any) {
-      const msg = e?.message || "Extraction failed";
+      const msg = e?.message || "Processing failed";
+      setProcessingError(msg);
+      setProcessingPhase("failed");
       setExtractionState({ phase: "failed", message: msg });
       toast({ title: "Extraction failed", description: msg, variant: "destructive" });
     }
@@ -313,9 +377,15 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
 
   const handleSubmitAndTrain = async () => {
     if (extractionState.phase !== "completed") return;
-    if (runpodUpload.phase !== "done") return;
+    if (!runId) {
+      toast({
+        title: "Cannot save",
+        description: "Run was not persisted to database. Re-process the PDF and try again.",
+        variant: "destructive",
+      });
+      return;
+    }
 
-    const uploadId = runpodUpload.record.upload_id;
     const r = extractionState.result;
     const originalFields = (r.extracted_json ?? r.extracted_fields ?? r.fields ?? {}) as Record<string, any>;
     const rawText = r.full_text ?? r.raw_text ?? "";
@@ -323,26 +393,20 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
 
     setIsSubmittingTrain(true);
     try {
-      // 1. Save locally first — this always works and bumps the count in Local Training
-      await submitFeedback({
-        model_id: "acord_form_understanding",
-        prompt: rawText || JSON.stringify(originalFields, null, 2),
-        original_response: JSON.stringify(originalFields, null, 2),
-        corrected_response: JSON.stringify(correctedFields, null, 2),
-        feedback_type: "correction",
-        rating: 5,
-        form_type: formType,
-      });
+      // 1. Save correction to Supabase (acord_extraction_feedback + run status → submitted)
+      await saveAcordFeedback(runId, correctedFields);
 
-      // 2. Also try to store on RunPod (non-blocking — fine if pod is offline)
-      submitRunpodForTraining(uploadId, originalFields, correctedFields, rawText, formType).catch(() => {
-        // RunPod offline — local save already done; will sync when Fine-tune is clicked
-      });
+      // 2. For scanned PDFs: also sync to RunPod pod filesystem (non-blocking)
+      //    Digital PDFs have no upload_id — skipped. RunPod will get data at Fine-tune time
+      //    via getAcordTrainingSamples() → syncFeedbacksToRunpod().
+      if (scannedUploadId) {
+        submitRunpodForTraining(scannedUploadId, originalFields, correctedFields, rawText, formType).catch(() => {});
+      }
 
       setTrainSubmittedRunpod(true);
       toast({
         title: "Training sample saved",
-        description: "Sample saved locally. Go to Model Training → Local Training to fine-tune.",
+        description: "Saved to database. Go to Model Training → Local Training to fine-tune.",
       });
     } catch (e: any) {
       toast({ title: "Training submission failed", description: e?.message || "Unknown error", variant: "destructive" });
@@ -392,8 +456,8 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
   const currentRunId = useMemo(() => {
     if (!originalParsed || typeof originalParsed !== "object") return "";
     const r = originalParsed as Record<string, unknown>;
-    const runId = r.run_id ?? (r as any).runId ?? (r as any).run?.run_id ?? (r as any).run_id?.toString?.();
-    return typeof runId === "string" ? runId : "";
+    const extracted = r.run_id ?? (r as any).runId ?? (r as any).run?.run_id ?? (r as any).run_id?.toString?.();
+    return typeof extracted === "string" ? extracted : "";
   }, [originalParsed]);
 
   const handleTrain = async () => {
@@ -493,83 +557,54 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
             )}
           </div>
 
-          {/* ── Step 1: Upload to RunPod ────────────────────────────────── */}
+          {/* ── Process PDF (auto-detects digital vs scanned) ──────────── */}
           <div className="border-t border-border/50 pt-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <Label className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
-                <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-primary/20 text-primary text-[10px] font-bold">1</span>
-                Upload to RunPod
-              </Label>
-              {runpodUpload.phase === "done" && (
-                <Badge variant="outline" className="border-green-500 text-green-400">
-                  <CheckCircle2 className="h-3 w-3 mr-1" />
-                  uploaded
-                </Badge>
-              )}
-              {runpodUpload.phase === "error" && (
-                <Badge variant="outline" className="border-red-500 text-red-400">
-                  <AlertCircle className="h-3 w-3 mr-1" />
-                  error
-                </Badge>
-              )}
-            </div>
 
-            <Button
-              variant="outline"
-              onClick={handleRunPodUpload}
-              disabled={!file || runpodUpload.phase === "uploading"}
-              className="w-full border-dashed"
-            >
-              {runpodUpload.phase === "uploading" ? (
-                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Uploading to RunPod…</>
-              ) : runpodUpload.phase === "done" ? (
-                <><CheckCircle2 className="h-4 w-4 mr-2 text-green-400" />Re-upload PDF</>
-              ) : (
-                <><CloudUpload className="h-4 w-4 mr-2" />Upload PDF to RunPod</>
-              )}
-            </Button>
-
-            {runpodUpload.phase === "done" && (
-              <div className="rounded-md border border-border/50 bg-muted/30 p-2.5 text-xs font-mono space-y-1">
-                <div className="flex justify-between gap-2">
-                  <span className="text-muted-foreground shrink-0">file</span>
-                  <span className="text-foreground truncate">{runpodUpload.record.filename}</span>
-                </div>
-                <div className="flex justify-between gap-2">
-                  <span className="text-muted-foreground shrink-0">size</span>
-                  <span className="text-foreground">{(runpodUpload.record.size_bytes / 1024).toFixed(1)} KB</span>
-                </div>
-                <div className="flex justify-between gap-2">
-                  <span className="text-muted-foreground shrink-0">id</span>
-                  <span className="text-foreground truncate">{runpodUpload.record.upload_id.slice(0, 16)}…</span>
-                </div>
+            {/* PDF type badge — shown once type is detected */}
+            {detectedPdfType && (
+              <div className="flex items-center gap-2 p-2.5 rounded-md border bg-muted/20">
+                {detectedPdfType === "digital" ? (
+                  <>
+                    <FileDigit className="h-4 w-4 text-blue-400 shrink-0" />
+                    <div>
+                      <span className="text-xs font-semibold text-blue-400">Digital PDF</span>
+                      <p className="text-[11px] text-muted-foreground leading-tight">
+                        Text extracted locally · Claude AI parsed fields · no RunPod upload
+                      </p>
+                    </div>
+                    <Badge className="ml-auto shrink-0 bg-blue-500/15 text-blue-400 border-blue-500/30">Local</Badge>
+                  </>
+                ) : (
+                  <>
+                    <Scan className="h-4 w-4 text-orange-400 shrink-0" />
+                    <div>
+                      <span className="text-xs font-semibold text-orange-400">Scanned PDF</span>
+                      <p className="text-[11px] text-muted-foreground leading-tight">
+                        Uploaded to RunPod · Surya OCR + Qwen VL extraction
+                      </p>
+                    </div>
+                    <Badge className="ml-auto shrink-0 bg-orange-500/15 text-orange-400 border-orange-500/30">RunPod GPU</Badge>
+                  </>
+                )}
               </div>
             )}
-            {runpodUpload.phase === "error" && (
-              <p className="text-xs text-red-400">{runpodUpload.message}</p>
-            )}
-          </div>
 
-          {/* ── Step 2: Extract ACORD Fields ───────────────────────────── */}
-          <div className={`border-t border-border/50 pt-4 space-y-3 transition-opacity ${runpodUpload.phase === "done" ? "opacity-100" : "opacity-40 pointer-events-none"}`}>
+            {/* Status badge */}
             <div className="flex items-center justify-between">
-              <Label className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
-                <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-primary/20 text-primary text-[10px] font-bold">2</span>
-                Extract ACORD Fields
-              </Label>
-              {extractionState.phase === "extracting" && (
+              <Label className="text-sm font-medium text-muted-foreground">Extract ACORD Fields</Label>
+              {(processingPhase === "processing" || processingPhase === "extracting_scanned") && (
                 <Badge variant="outline" className="border-yellow-500 text-yellow-400">
                   <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                  Extracting…
+                  {processingPhase === "extracting_scanned" ? "Running OCR…" : "Processing…"}
                 </Badge>
               )}
-              {extractionState.phase === "completed" && (
+              {processingPhase === "done" && (
                 <Badge variant="outline" className="border-green-500 text-green-400">
                   <CheckCircle2 className="h-3 w-3 mr-1" />
                   Completed
                 </Badge>
               )}
-              {extractionState.phase === "failed" && (
+              {processingPhase === "failed" && (
                 <Badge variant="outline" className="border-red-500 text-red-400">
                   <AlertCircle className="h-3 w-3 mr-1" />
                   Failed
@@ -577,27 +612,33 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
               )}
             </div>
 
+            {/* Single action button */}
             <Button
-              onClick={handleExecuteExtraction}
-              disabled={runpodUpload.phase !== "done" || extractionState.phase === "extracting"}
+              onClick={handleProcess}
+              disabled={!file || processingPhase === "processing" || processingPhase === "extracting_scanned"}
               className="w-full bg-gradient-to-r from-violet-600 to-indigo-600 hover:opacity-90 text-white"
             >
-              {extractionState.phase === "extracting" ? (
-                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Extracting ACORD Fields…</>
-              ) : extractionState.phase === "completed" ? (
-                <><RefreshCw className="h-4 w-4 mr-2" />Re-run Extraction</>
+              {processingPhase === "processing" ? (
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  {detectedPdfType === "digital"
+                    ? "Claude extracting fields…"
+                    : detectedPdfType === "scanned"
+                    ? "Uploading to RunPod…"
+                    : "Detecting PDF type…"}
+                </>
+              ) : processingPhase === "extracting_scanned" ? (
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Running OCR + Extraction on RunPod…</>
+              ) : processingPhase === "done" ? (
+                <><RefreshCw className="h-4 w-4 mr-2" />Re-process PDF</>
               ) : (
-                <><Upload className="h-4 w-4 mr-2" />Execute — Extract ACORD Fields</>
+                <><Upload className="h-4 w-4 mr-2" />Process PDF — Extract ACORD Fields</>
               )}
             </Button>
 
-            {extractionState.phase === "extracting" && (
+            {/* Progress steps for scanned path */}
+            {processingPhase === "extracting_scanned" && (
               <div className="space-y-1.5 text-xs">
-                {[
-                  { label: "Surya OCR — layout detection" },
-                  { label: "Docling — structure analysis" },
-                  { label: "Qwen VL — field extraction" },
-                ].map(({ label }, i) => (
+                {["Surya OCR — layout detection", "Qwen VL — field extraction"].map((label, i) => (
                   <div key={i} className="flex items-center gap-2 text-yellow-400">
                     <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
                     {label}
@@ -606,11 +647,19 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
               </div>
             )}
 
-            {extractionState.phase === "failed" && (
-              <p className="text-xs text-red-400">{extractionState.message}</p>
+            {/* Progress step for digital path */}
+            {processingPhase === "processing" && detectedPdfType === "digital" && (
+              <div className="flex items-center gap-2 text-xs text-blue-400">
+                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                Claude AI parsing ACORD fields from digital text…
+              </div>
+            )}
+
+            {processingPhase === "failed" && processingError && (
+              <p className="text-xs text-red-400">{processingError}</p>
             )}
           </div>
-          {/* ── end RunPod section ─────────────────────────────────────── */}
+          {/* ── end process section ────────────────────────────────────── */}
         </CardContent>
       </Card>
 

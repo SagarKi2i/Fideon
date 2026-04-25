@@ -297,7 +297,7 @@ def list_jobs() -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# POST /extract/{upload_id}  — full ACORD extraction (Surya OCR + Qwen VL)
+# POST /extract/{upload_id}  — full ACORD extraction (Surya + Docling + Qwen VL)
 # ---------------------------------------------------------------------------
 @app.post("/extract/{upload_id}")
 async def extract_acord(
@@ -306,8 +306,12 @@ async def extract_acord(
 ) -> Dict[str, Any]:
     """
     Full ACORD extraction pipeline for an already-uploaded PDF.
-    Runs Surya OCR + Qwen2-VL field extraction on the pod GPU.
-    Long-running (30s–5min). Returns structured ACORD fields directly.
+
+    Step 1 (parallel): Surya OCR + Docling run concurrently.
+    Step 2 (serial):   Qwen2-VL receives page images + both outputs.
+
+    Returns: { form_type_detected, pdf_type, extracted_json, full_text, markdown }
+    Long-running (30s–5min on GPU).
     """
     record = _uploads.get(upload_id)
     if not record:

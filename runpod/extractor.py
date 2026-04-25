@@ -1,6 +1,11 @@
 """
 Full ACORD extraction pipeline for RunPod.
-Pipeline: Surya OCR 0.17.x (DetectionPredictor + RecognitionPredictor) → Qwen2-VL field extraction.
+
+Pipeline:
+  [Parallel] Arm A: Surya OCR  (layout + line OCR → ocr_text, surya_fields)
+             Arm B: Docling     (structure + tables + KV → markdown, tables, kv_pairs)
+  [Serial]   Qwen2-VL          (original images + both arm outputs → fields JSON, raw text, markdown)
+
 Models are loaded lazily and cached for reuse across requests.
 """
 from __future__ import annotations
@@ -8,14 +13,20 @@ from __future__ import annotations
 import json
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-# ── Surya OCR singletons (0.17.x class-based API) ────────────────────────────
+# ── Surya OCR singletons (0.6.x API) ─────────────────────────────────────────
 _surya_lock = threading.Lock()
 _det_predictor = None
 _rec_predictor = None
 _surya_loaded = False
+
+# ── Docling singleton ─────────────────────────────────────────────────────────
+_docling_lock = threading.Lock()
+_docling_converter = None
+_docling_loaded = False
 
 # ── Qwen2-VL singletons ───────────────────────────────────────────────────────
 _qwen_lock = threading.Lock()
@@ -41,6 +52,27 @@ def _load_surya() -> None:
             foundation_predictor=FoundationPredictor()
         )
         _surya_loaded = True
+
+
+def _load_docling() -> None:
+    global _docling_converter, _docling_loaded
+    with _docling_lock:
+        if _docling_loaded:
+            return
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.datamodel.base_models import InputFormat
+
+        pipeline_options = PdfPipelineOptions()
+        pipeline_options.do_ocr = True           # needed for scanned PDFs
+        pipeline_options.do_table_structure = True
+
+        _docling_converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+            }
+        )
+        _docling_loaded = True
 
 
 def _load_qwen() -> None:
@@ -77,6 +109,8 @@ def _pdf_to_images(pdf_path: str, dpi: int = 150) -> List:
     return images
 
 
+# ── Arm A: Surya OCR ──────────────────────────────────────────────────────────
+
 def _run_surya_ocr(images: List) -> str:
     _load_surya()
     ocr_results = _rec_predictor(images, det_predictor=_det_predictor)
@@ -89,6 +123,43 @@ def _run_surya_ocr(images: List) -> str:
                 lines.append(text)
     return "\n".join(lines)
 
+
+# ── Arm B: Docling ────────────────────────────────────────────────────────────
+
+def _run_docling(pdf_path: str) -> Dict[str, Any]:
+    """Run Docling on the PDF; returns markdown, tables list, and KV pairs dict."""
+    _load_docling()
+    try:
+        result = _docling_converter.convert(pdf_path)
+        doc = result.document
+
+        markdown = doc.export_to_markdown()
+
+        # Export each detected table to markdown (pandas not required)
+        tables: List[str] = []
+        for table in getattr(doc, "tables", []):
+            try:
+                tables.append(table.export_to_markdown())
+            except Exception:
+                pass
+
+        # Extract KV pairs when Docling's layout parser detects them
+        kv_pairs: Dict[str, str] = {}
+        for item in getattr(doc, "key_value_items", []):
+            try:
+                key = (item.key.text or "").strip()
+                val = (item.value.text or "").strip()
+                if key:
+                    kv_pairs[key] = val
+            except Exception:
+                pass
+
+        return {"markdown": markdown, "tables": tables, "kv_pairs": kv_pairs}
+    except Exception as exc:
+        return {"markdown": "", "tables": [], "kv_pairs": {}, "error": str(exc)}
+
+
+# ── Output parser ─────────────────────────────────────────────────────────────
 
 def _parse_fields_section(section: str) -> Optional[Dict[str, Any]]:
     """Extract JSON from a FIELDS: section, stripping optional code fences."""
@@ -108,40 +179,49 @@ def _parse_fields_section(section: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _parse_qwen_output(text: str) -> tuple:
+def _parse_qwen_output(text: str) -> Tuple[Optional[Dict], str, str]:
     """
-    Parse Qwen output that may contain FIELDS: / RAW TEXT: sections.
-    Returns (fields_dict, raw_text_str).
+    Parse Qwen output for FIELDS: / RAW TEXT: / MARKDOWN: sections.
+    Returns (fields_dict, raw_text, markdown).
     """
     fields_marker = "FIELDS:"
     raw_marker = "RAW TEXT:"
+    md_marker = "MARKDOWN:"
 
     fi = text.find(fields_marker)
     ri = text.find(raw_marker)
+    mi = text.find(md_marker)
 
+    # FIELDS block ends at whichever marker comes next
     if fi != -1:
-        fields_block = text[fi + len(fields_marker):]
-        if ri != -1 and ri > fi:
-            fields_block = text[fi + len(fields_marker) : ri]
-        parsed = _parse_fields_section(fields_block)
+        next_after_fields = min(
+            (x for x in (ri, mi) if x != -1 and x > fi),
+            default=len(text),
+        )
+        parsed = _parse_fields_section(text[fi + len(fields_marker) : next_after_fields])
     else:
-        # Fallback: try to parse the whole text as JSON
         parsed = _parse_fields_section(text)
 
-    raw_text = text[ri + len(raw_marker):].strip() if ri != -1 else ""
+    # RAW TEXT block ends at MARKDOWN: (if present after it)
+    if ri != -1:
+        raw_end = mi if (mi != -1 and mi > ri) else len(text)
+        raw_text = text[ri + len(raw_marker) : raw_end].strip()
+    else:
+        raw_text = ""
 
-    return parsed, raw_text
+    qwen_markdown = text[mi + len(md_marker) :].strip() if mi != -1 else ""
 
+    return parsed, raw_text, qwen_markdown
+
+
+# ── Qwen2-VL prompt ───────────────────────────────────────────────────────────
 
 _PROMPT_TEMPLATE = """\
-You are an expert insurance document parser. You are given an image of an ACORD form.
+You are an expert insurance document parser. You are given page images of an ACORD form,
+plus pre-processed outputs from two independent parsers (Surya OCR and Docling).
 
-Your task is to:
-
-1. Extract ALL visible fields and their values as structured key-value pairs.
-2. Also return the complete raw text content of the form, preserving reading order (top to bottom, left to right).
-
-Follow this exact output format:
+Use ALL inputs — the images (ground truth), Surya OCR text, Docling markdown, and Docling KV pairs —
+to produce three outputs:
 
 ---
 FIELDS:
@@ -165,39 +245,60 @@ FIELDS:
 }}
 
 RAW TEXT:
-<full verbatim text extracted from the form, line by line, preserving layout>
+<full verbatim text extracted from the form, line by line, preserving reading order top-to-bottom>
+
+MARKDOWN:
+<clean markdown of the entire document — preserve tables as markdown tables, use ## for section headers>
 ---
 
 Checkbox Rules (IMPORTANT):
-- A checkbox is considered CHECKED if it contains ANY of the following marks:
-    - A tick or checkmark (✓ or √)
-    - An X mark or cross (X or ×)
-    - A filled square or circle (■, ●)
-    - Any handwritten mark inside the box
-- A checkbox is UNCHECKED only if the box is completely empty.
-- Represent checkbox state as:
-    - true  → if checked by ANY mark (tick, X, cross, fill, etc.)
-    - false → if completely empty
-- Do NOT assume a mark type — treat X marks and tick marks equally as "checked".
+- Checked if it contains a tick (✓), X, cross (×), filled square (■), filled circle (●), or any handwritten mark.
+- Unchecked only if the box is completely empty.
+- Represent as: true (checked) / false (unchecked).
+- Treat X marks and tick marks equally as "checked".
 
 Additional Rules:
-- If a field label is visible but the value is empty or illegible, include the key with an empty string value.
+- If a field label is visible but the value is empty or illegible, include the key with "".
 - Do not skip any field, checkbox, or section header.
-- For tables (e.g., coverage schedules, vehicle lists), represent each row as a nested object inside an array under the appropriate key.
-- Output valid JSON for the FIELDS section.
-- Do not add commentary or explanation — only the structured output above.
+- For tables (coverage schedules, vehicle lists, etc.), represent each row as a nested object in an array.
+- When Docling and Surya disagree on a value, prefer what you can verify directly in the image.
+- Output valid JSON in the FIELDS section. No commentary — only the three structured sections above.
 """
 
 
-def _run_qwen_extraction(images: List, ocr_text: str, form_type: str) -> Dict[str, Any]:
+# ── Qwen2-VL inference ────────────────────────────────────────────────────────
+
+def _run_qwen_extraction(
+    images: List,
+    surya_ocr_text: str,
+    docling_result: Dict[str, Any],
+    form_type: str,
+) -> Dict[str, Any]:
     _load_qwen()
     import torch
 
     page_images = images[:2]
 
+    # Build reference context from both arms
+    context_parts: List[str] = []
+    if surya_ocr_text.strip():
+        context_parts.append(
+            f"=== Surya OCR text (line-by-line) ===\n{surya_ocr_text[:2500]}"
+        )
+    if docling_result.get("markdown", "").strip():
+        context_parts.append(
+            f"=== Docling structured markdown (tables + layout) ===\n{docling_result['markdown'][:2500]}"
+        )
+    if docling_result.get("kv_pairs"):
+        kv_str = "\n".join(f"{k}: {v}" for k, v in list(docling_result["kv_pairs"].items())[:60])
+        context_parts.append(f"=== Docling KV pairs ===\n{kv_str}")
+    if docling_result.get("tables"):
+        tables_str = "\n\n".join(docling_result["tables"][:5])
+        context_parts.append(f"=== Docling extracted tables ===\n{tables_str[:1500]}")
+
     prompt = _PROMPT_TEMPLATE
-    if ocr_text.strip():
-        prompt += f"\n\nSurya OCR reference text (use to assist field identification):\n{ocr_text[:3000]}"
+    if context_parts:
+        prompt += "\n\n" + "\n\n".join(context_parts)
 
     content: List[Dict[str, Any]] = [
         {"type": "image", "image": img} for img in page_images
@@ -236,9 +337,9 @@ def _run_qwen_extraction(images: List, ocr_text: str, form_type: str) -> Dict[st
         trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
     )[0]
 
-    parsed, qwen_raw_text = _parse_qwen_output(output_text)
+    parsed, qwen_raw_text, qwen_markdown = _parse_qwen_output(output_text)
     fields = parsed if parsed is not None else {"_raw_qwen_output": output_text}
-    return {"fields": fields, "qwen_raw_text": qwen_raw_text}
+    return {"fields": fields, "qwen_raw_text": qwen_raw_text, "qwen_markdown": qwen_markdown}
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -246,7 +347,11 @@ def _run_qwen_extraction(images: List, ocr_text: str, form_type: str) -> Dict[st
 def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
     """
     Full ACORD extraction pipeline.
-    Returns: { form_type_detected, pdf_type, extracted_json, full_text }
+
+    Step 1 (parallel): Surya OCR + Docling run concurrently on separate threads.
+    Step 2 (serial):   Qwen2-VL receives page images + both arm outputs.
+
+    Returns: { form_type_detected, pdf_type, extracted_json, full_text, markdown }
     """
     if not Path(pdf_path).exists():
         return {"error": f"File not found: {pdf_path}"}
@@ -255,20 +360,34 @@ def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
     if not images:
         return {"error": "No pages found in PDF"}
 
-    ocr_text = _run_surya_ocr(images)
-
-    # Detect via PyMuPDF: digital PDFs have embedded text; scanned ones don't
+    # Detect digital vs scanned
     import fitz as _fitz
     _doc = _fitz.open(pdf_path)
     _embedded = "".join(p.get_text("text") for p in _doc).strip()
     _doc.close()
     pdf_type = "digital" if len(_embedded) > 100 else "scanned"
 
-    qwen_result = _run_qwen_extraction(images, ocr_text, form_type)
+    # ── Step 1: Surya + Docling in parallel ───────────────────────────────────
+    surya_ocr_text: str = ""
+    docling_result: Dict[str, Any] = {"markdown": "", "tables": [], "kv_pairs": {}}
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        future_surya = pool.submit(_run_surya_ocr, images)
+        future_docling = pool.submit(_run_docling, pdf_path)
+
+        for future in as_completed([future_surya, future_docling]):
+            if future is future_surya:
+                surya_ocr_text = future.result()
+            else:
+                docling_result = future.result()
+
+    # ── Step 2: Qwen2-VL with both arm outputs ────────────────────────────────
+    qwen_result = _run_qwen_extraction(images, surya_ocr_text, docling_result, form_type)
 
     return {
         "form_type_detected": f"acord{form_type}",
         "pdf_type": pdf_type,
         "extracted_json": qwen_result["fields"],
-        "full_text": qwen_result["qwen_raw_text"] or ocr_text,
+        "full_text": qwen_result["qwen_raw_text"] or surya_ocr_text,
+        "markdown": qwen_result["qwen_markdown"] or docling_result.get("markdown", ""),
     }

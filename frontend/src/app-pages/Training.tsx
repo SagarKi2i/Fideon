@@ -48,6 +48,11 @@ import {
   type TrainingStats,
 } from "@/lib/trainingApi";
 import { syncFeedbacksToRunpod, startRunpodFinetune, getRunpodJobStatus } from "@/lib/pdfUploadApi";
+import {
+  getAcordTrainingCount,
+  getAcordTrainingSamples,
+  markAcordSamplesUsed,
+} from "@/lib/acordSupabaseApi";
 
 export default function Training() {
   const { toast } = useToast();
@@ -67,15 +72,20 @@ export default function Training() {
   const [isFinetuning, setIsFinetuning] = useState(false);
   const [finetuneStatus, setFinetuneStatus] = useState<string | null>(null);
 
-  // Local ACORD sample count — always read directly from localStorage so it's
-  // accurate regardless of whether feedback state comes from backend or local
+  // ACORD training sample count — read from Supabase (status='submitted' runs)
   const [localAcordCount, setLocalAcordCount] = useState<number>(0);
 
-  const refreshLocalAcordCount = () => {
-    const count = getLocalFeedback().filter(
-      (f) => f.model_id === "acord_form_understanding" && !f.is_used_for_training
-    ).length;
-    setLocalAcordCount(count);
+  const refreshLocalAcordCount = async () => {
+    try {
+      const count = await getAcordTrainingCount();
+      setLocalAcordCount(count);
+    } catch {
+      // Supabase unavailable — fall back to localStorage for legacy samples
+      const count = getLocalFeedback().filter(
+        (f) => f.model_id === "acord_form_understanding" && !f.is_used_for_training
+      ).length;
+      setLocalAcordCount(count);
+    }
   };
 
   // Feedback form
@@ -105,7 +115,7 @@ export default function Training() {
       const connected = !!token;
       setIsConnected(connected);
       setWebMode(!electron || !connected);
-      refreshLocalAcordCount();
+      await refreshLocalAcordCount();
       loadData();
     };
     init();
@@ -178,7 +188,7 @@ export default function Training() {
       }
     } finally {
       setLoading(false);
-      refreshLocalAcordCount();
+      await refreshLocalAcordCount();
     }
   };
 
@@ -186,32 +196,36 @@ export default function Training() {
     setIsFinetuning(true);
     setFinetuneStatus(null);
 
-    // Always read from localStorage directly — works regardless of device token
-    const localAcordFeedbacks = getLocalFeedback().filter(
-      (f) => f.model_id === "acord_form_understanding" && !f.is_used_for_training
-    );
-
     try {
-      // Step 1: Sync local samples to RunPod so it has the training data
-      if (localAcordFeedbacks.length > 0) {
-        setFinetuneStatus(`Syncing ${localAcordFeedbacks.length} sample(s) to RunPod…`);
-        const syncResult = await syncFeedbacksToRunpod(
-          localAcordFeedbacks.map((f: any) => ({
-            prompt: f.prompt || "",
-            original_response: f.original_response || "{}",
-            corrected_response: f.corrected_response || "{}",
-            form_type: f.form_type,
-          }))
-        );
-        if (syncResult.failed > 0 && syncResult.synced === 0) {
-          const msg = "Could not reach RunPod. Start the server on the pod:\ncd /workspace && python -m uvicorn runpod.server:app --host 0.0.0.0 --port 8000";
-          setFinetuneStatus(msg);
-          toast({ title: "RunPod unreachable", description: "Start the RunPod server first.", variant: "destructive" });
-          return;
-        }
+      // Step 1: Load submitted samples from Supabase
+      setFinetuneStatus("Loading training samples from database…");
+      const samples = await getAcordTrainingSamples();
+
+      if (samples.length === 0) {
+        setFinetuneStatus("No training samples found. Save a correction from the ACORD Parser first.");
+        toast({ title: "No samples", description: "Save at least one correction before fine-tuning.", variant: "destructive" });
+        return;
       }
 
-      // Step 2: Trigger fine-tuning on RunPod
+      // Step 2: Sync samples to RunPod pod filesystem
+      setFinetuneStatus(`Syncing ${samples.length} sample(s) to RunPod…`);
+      const syncResult = await syncFeedbacksToRunpod(
+        samples.map((s) => ({
+          prompt: s.prompt,
+          original_response: s.original_response,
+          corrected_response: s.corrected_response,
+          form_type: s.form_type,
+        }))
+      );
+
+      if (syncResult.failed > 0 && syncResult.synced === 0) {
+        const msg = "Could not reach RunPod. Start the server on the pod:\ncd /workspace && python -m uvicorn runpod.server:app --host 0.0.0.0 --port 8000";
+        setFinetuneStatus(msg);
+        toast({ title: "RunPod unreachable", description: "Start the RunPod server first.", variant: "destructive" });
+        return;
+      }
+
+      // Step 3: Trigger fine-tuning on RunPod
       setFinetuneStatus("Starting fine-tuning job…");
       const result = await startRunpodFinetune();
       setFinetuneStatus(
@@ -221,20 +235,21 @@ export default function Training() {
       );
       toast({
         title: "Fine-tuning started on RunPod",
-        description: `${result.total_samples ?? localAcordFeedbacks.length} sample(s) sent for LoRA training.`,
+        description: `${result.total_samples ?? samples.length} sample(s) sent for LoRA training.`,
       });
 
-      // Create local training job with RunPod job_id so we can poll real status later
+      // Step 4: Mark samples as used in Supabase so they don't re-appear in count
+      const runIds = samples.map((s) => s.run_id);
+      await markAcordSamplesUsed(runIds).catch(() => {});
+
+      // Step 5: Record training job locally for history polling
       const runpodJobId = (result as any).job_id ?? null;
-      try {
-        await createTrainingJob({
-          model_id: "acord_form_understanding",
-          training_type: "fine-tune",
-          config: { runpod_job_id: runpodJobId },
-        });
-      } catch (_) {
-        // Non-fatal
-      }
+      await createTrainingJob({
+        model_id: "acord_form_understanding",
+        training_type: "fine-tune",
+        config: { runpod_job_id: runpodJobId },
+      }).catch(() => {});
+
       loadData();
     } catch (e: any) {
       const msg = e?.message || "Fine-tune failed";
@@ -242,7 +257,7 @@ export default function Training() {
       toast({ title: "Fine-tune failed", description: msg, variant: "destructive" });
     } finally {
       setIsFinetuning(false);
-      refreshLocalAcordCount();
+      await refreshLocalAcordCount();
     }
   };
 
@@ -528,9 +543,11 @@ export default function Training() {
             <CardContent className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {activatedModels.map(({ model_id: modelId, model_name: modelName }) => {
-                  const isAcord = modelId === "acord_form_understanding";
+                  const isAcord =
+                    modelId === "acord_form_understanding" ||
+                    modelName?.toLowerCase().includes("acord");
 
-                  // ACORD model — count always read from localStorage directly
+                  // ACORD model — count read from Supabase via refreshLocalAcordCount
                   if (isAcord) {
                     const canFinetune = !isFinetuning && localAcordCount > 0;
 

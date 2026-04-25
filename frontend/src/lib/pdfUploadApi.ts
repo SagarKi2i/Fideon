@@ -75,6 +75,53 @@ async function authHeader(): Promise<Record<string, string>> {
 
 // ── Upload ─────────────────────────────────────────────────────────────────────
 
+// ── Smart extraction (detect type → branch digital/scanned) ──────────────────
+
+export type SmartExtractDigitalResult = {
+  pdf_type: "digital";
+  form_type_detected: string;
+  extracted_json: Record<string, any>;
+  full_text: string;
+  source: "local" | "claude";
+};
+
+export type SmartExtractScannedResult = {
+  pdf_type: "scanned";
+  upload_id: string;
+  filename: string;
+  size_bytes: number;
+  status: string;
+  form_type: string;
+};
+
+export type SmartExtractResult = SmartExtractDigitalResult | SmartExtractScannedResult;
+
+/**
+ * Unified PDF entry point.
+ * - Digital PDF: backend detects type, extracts text with PyMuPDF, calls Claude API.
+ *   Returns full extraction result immediately — no RunPod upload.
+ * - Scanned PDF: backend detects type, uploads to RunPod.
+ *   Returns {pdf_type:"scanned", upload_id} — caller must then call triggerFullExtraction.
+ */
+export async function smartExtractPdf(
+  file: File,
+  formType: string = "25"
+): Promise<SmartExtractResult> {
+  const headers = await authHeader();
+  const body = new FormData();
+  body.append("file", file);
+
+  const resp = await fetch(
+    apiUrl(`/api/v1/pdf/smart-extract?form_type=${encodeURIComponent(formType)}`),
+    { method: "POST", headers, body }
+  );
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+    throw new Error(err.detail || err.error || `Smart extract failed: ${resp.status}`);
+  }
+  return resp.json();
+}
+
 /**
  * Upload a PDF to RunPod via the Fideon backend proxy.
  * Returns the upload record (includes upload_id for OCR triggering).
@@ -257,16 +304,17 @@ export async function syncFeedbacksToRunpod(
     form_type?: string;
   }>
 ): Promise<{ synced: number; failed: number }> {
+  if (feedbacks.length === 0) return { synced: 0, failed: 0 };
+
   const headers = await authHeader();
-  let synced = 0;
-  let failed = 0;
-  for (const fb of feedbacks) {
-    try {
+
+  const results = await Promise.allSettled(
+    feedbacks.map(async (fb) => {
       let originalFields: Record<string, any> = {};
       let correctedFields: Record<string, any> = {};
       try { originalFields = JSON.parse(fb.original_response || "{}"); } catch { /* not JSON */ }
       try { correctedFields = JSON.parse(fb.corrected_response || "{}"); } catch { /* not JSON */ }
-      const resp = await fetch(apiUrl("/api/v1/pdf/training-samples"), {
+      const r = await fetch(apiUrl("/api/v1/pdf/training-samples"), {
         method: "POST",
         headers: { ...headers, "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -276,10 +324,14 @@ export async function syncFeedbacksToRunpod(
           form_type: fb.form_type || "25",
         }),
       });
-      if (resp.ok) synced++; else failed++;
-    } catch {
-      failed++;
-    }
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    })
+  );
+
+  let synced = 0;
+  let failed = 0;
+  for (const r of results) {
+    if (r.status === "fulfilled") synced++; else failed++;
   }
   return { synced, failed };
 }
