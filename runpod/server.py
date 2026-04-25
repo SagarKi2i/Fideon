@@ -15,19 +15,37 @@ Endpoints:
   GET  /jobs                          — list all OCR jobs (admin)
   POST /extract/{upload_id}           — full ACORD extraction (Surya OCR + Qwen VL)
 
+  Training / Fine-tuning:
+  POST /training-samples              — store corrected extraction sample
+  GET  /training-samples              — list stored samples + count
+  POST /finetune/start                — ingest pending samples + launch run_cycle()
+  GET  /finetune/jobs/{job_id}        — poll fine-tuning job status
+  GET  /finetune/jobs                 — list all fine-tuning jobs
+  GET  /registry/versions             — SLM version history
+
 Start via:  python server.py  (or use start.sh)
 """
 from __future__ import annotations
 
+import json
 import os
+import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+# Ensure runpod/fine_tuning is resolved before any /workspace/fine_tuning that
+# may exist from the backend. Insert the directory containing this file (i.e.
+# /workspace/runpod) at the front of sys.path so `import fine_tuning` always
+# picks up the correct QLoRA pipeline package.
+_THIS_DIR = str(Path(__file__).parent.resolve())
+if _THIS_DIR not in sys.path:
+    sys.path.insert(0, _THIS_DIR)
 
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
@@ -35,6 +53,7 @@ from fastapi.responses import Response
 # Config
 # ---------------------------------------------------------------------------
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "/workspace/uploads"))
+TRAINING_SAMPLES_FILE = Path(os.getenv("TRAINING_SAMPLES_FILE", "/workspace/training_samples.jsonl"))
 PORT = int(os.getenv("UPLOAD_SERVER_PORT", "8080"))
 OCR_WORKERS = int(os.getenv("OCR_WORKERS", "1"))  # 1 GPU → 1 worker
 
@@ -324,6 +343,265 @@ async def extract_acord(
         raise HTTPException(status_code=500, detail=result["error"])
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Training samples — persist across pod restarts via JSONL on disk
+# ---------------------------------------------------------------------------
+
+def _pdf_path_for_upload(upload_id: str) -> Optional[str]:
+    record = _uploads.get(upload_id)
+    if record:
+        return record.get("path")
+    matches = list(UPLOAD_DIR.glob(f"{upload_id}_*"))
+    return str(matches[0]) if matches else None
+
+
+def _load_training_samples() -> List[Dict[str, Any]]:
+    if not TRAINING_SAMPLES_FILE.exists():
+        return []
+    samples = []
+    for line in TRAINING_SAMPLES_FILE.read_text().splitlines():
+        line = line.strip()
+        if line:
+            try:
+                samples.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return samples
+
+
+@app.post("/training-samples")
+async def store_training_sample(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """
+    Store one corrected extraction as a fine-tuning sample.
+    Called after the user edits and approves the extracted fields.
+    Each sample written as a JSONL line so it survives pod restarts.
+    """
+    upload_id = body.get("upload_id", "")
+    pdf_path = _pdf_path_for_upload(upload_id) or ""
+
+    sample: Dict[str, Any] = {
+        "sample_id": str(uuid.uuid4()),
+        "upload_id": upload_id,
+        "pdf_path": pdf_path,
+        "form_type": body.get("form_type", "25"),
+        "original_fields": body.get("original_fields") or {},
+        "corrected_fields": body.get("corrected_fields") or {},
+        "raw_text": body.get("raw_text", ""),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "status": "pending",
+    }
+
+    with open(TRAINING_SAMPLES_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(sample) + "\n")
+
+    total = len(_load_training_samples())
+    return {
+        "status": "stored",
+        "sample_id": sample["sample_id"],
+        "total_samples": total,
+    }
+
+
+@app.get("/training-samples")
+def list_training_samples() -> Dict[str, Any]:
+    """List all stored training samples (summary for status/count display)."""
+    samples = _load_training_samples()
+    return {
+        "total_samples": len(samples),
+        "pending": sum(1 for s in samples if s.get("status") == "pending"),
+        "samples": [
+            {
+                "sample_id": s.get("sample_id"),
+                "upload_id": s.get("upload_id"),
+                "form_type": s.get("form_type"),
+                "created_at": s.get("created_at"),
+                "status": s.get("status"),
+            }
+            for s in samples
+        ],
+    }
+
+
+@app.post("/finetune/start")
+async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """
+    Convert all pending training samples to chat-format, snapshot them to
+    a versioned JSONL, then launch run_cycle() in a background thread.
+
+    Returns immediately with job_id for polling via GET /finetune/jobs/{job_id}.
+    """
+    import asyncio
+    from fine_tuning.continuous_learning.ingest import build_training_sample_from_correction
+    from fine_tuning.continuous_learning.version_store import append_training_sample
+    from fine_tuning.job_runner import launch_cycle_background
+
+    samples = [s for s in _load_training_samples() if s.get("status") == "pending"]
+    if not samples:
+        return {
+            "status": "no_samples",
+            "message": "No pending training samples found.",
+            "total_samples": 0,
+        }
+
+    ft_config_path = os.getenv(
+        "FINE_TUNING_CONFIG_PATH",
+        str(Path(__file__).parent / "fine_tuning" / "config.yaml"),
+    )
+
+    # ── Load continuous-learning config ───────────────────────────────────────
+    try:
+        from fine_tuning.config_schema import load_and_validate_config
+        ft_cfg = load_and_validate_config(ft_config_path)
+    except Exception as e:
+        return {"status": "error", "message": f"Could not load fine-tuning config: {e}"}
+
+    cl_cfg       = ft_cfg.get("continuous_learning", {})
+    feedback_dir = Path(cl_cfg.get("feedback_datasets_dir",
+                                   "/workspace/fine_tuning/datasets/feedback_learning"))
+    threshold    = int(cl_cfg.get("retrain_threshold", 25))
+
+    # ── Build chat-format samples and append to version store ─────────────────
+    snapshot_path: Optional[str] = None
+    ingested = 0
+    for sample in samples:
+        try:
+            chat_row = build_training_sample_from_correction(
+                run_row=sample,
+                corrected_json=sample.get("corrected_fields") or {},
+            )
+            outcome = append_training_sample(
+                root=feedback_dir,
+                row=chat_row,
+                retrain_threshold=threshold,
+            )
+            ingested += 1
+            if outcome.version_snapshot_path:
+                snapshot_path = outcome.version_snapshot_path
+        except Exception as exc:
+            print(f"[finetune/start] skipping sample {sample.get('sample_id')}: {exc}")
+
+    if not snapshot_path:
+        # Force a snapshot from whatever is pending now (manual trigger bypasses threshold)
+        import json as _json
+        pending_file = feedback_dir / "pending.jsonl"
+        if pending_file.exists() and pending_file.stat().st_size > 0:
+            from fine_tuning.continuous_learning.version_store import (
+                _load_manifest, _save_manifest, _version_path, _pending_path,
+            )
+            manifest = _load_manifest(feedback_dir)
+            version  = int(manifest.get("next_version", 1))
+            vp = _version_path(feedback_dir, version)
+            vp.parent.mkdir(parents=True, exist_ok=True)
+            vp.write_bytes(pending_file.read_bytes())
+            pending_file.write_text("", encoding="utf-8")
+            manifest["pending_count"]  = 0
+            manifest["next_version"]   = version + 1
+            manifest.setdefault("snapshots", []).append({
+                "version":    version,
+                "path":       str(vp),
+                "rows":       ingested,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            _save_manifest(feedback_dir, manifest)
+            snapshot_path = str(vp)
+        else:
+            return {
+                "status": "no_data",
+                "message": "Samples ingested but no training data in pending store.",
+                "ingested": ingested,
+            }
+
+    # ── Mark ingested samples as "used" so they are not re-ingested next cycle ──
+    used_ids = {s.get("sample_id") for s in samples}
+    all_samples = _load_training_samples()
+    used_at = datetime.now(timezone.utc).isoformat()
+    updated_samples = []
+    for s in all_samples:
+        if s.get("sample_id") in used_ids:
+            s["status"] = "used"
+            s["used_at"] = used_at
+        updated_samples.append(s)
+    TRAINING_SAMPLES_FILE.write_text(
+        "\n".join(json.dumps(s) for s in updated_samples) + "\n",
+        encoding="utf-8",
+    )
+
+    # ── Launch cycle in background thread ─────────────────────────────────────
+    job_id = str(uuid.uuid4())
+    launch_cycle_background(
+        config_path=ft_config_path,
+        new_data_path=snapshot_path,
+        job_id=job_id,
+    )
+
+    return {
+        "status": "queued",
+        "job_id": job_id,
+        "message": (
+            f"Fine-tuning started with {ingested} sample(s). "
+            f"Poll GET /finetune/jobs/{job_id} for progress."
+        ),
+        "total_samples": ingested,
+        "snapshot_path": snapshot_path,
+    }
+
+
+@app.get("/finetune/jobs/{job_id}")
+def finetune_job_status(job_id: str) -> Dict[str, Any]:
+    """
+    Poll the status of a fine-tuning job launched via POST /finetune/start.
+
+    Phases: starting → loading_config → building_dataset → resolving_base_model
+            → training → evaluating → gate_checked → merging → promoting → done
+
+    Status values: running | completed | gate_failed | failed
+    """
+    from fine_tuning.job_runner import get_job_status
+    job = get_job_status(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Fine-tuning job '{job_id}' not found")
+    return job
+
+
+@app.get("/finetune/jobs")
+def list_finetune_jobs() -> Dict[str, Any]:
+    """List all fine-tuning jobs tracked in this server session."""
+    from fine_tuning.job_runner import _jobs
+    return {
+        "total": len(_jobs),
+        "jobs": [
+            {
+                "job_id":      jid,
+                "status":      j.get("status"),
+                "phase":       j.get("phase"),
+                "version":     j.get("version"),
+                "started_at":  j.get("started_at"),
+                "finished_at": j.get("finished_at"),
+            }
+            for jid, j in _jobs.items()
+        ],
+    }
+
+
+@app.get("/registry/versions")
+def list_registry_versions() -> Dict[str, Any]:
+    """Return the full version registry (SLM version history)."""
+    registry_path = os.getenv(
+        "VERSION_REGISTRY_PATH",
+        "/workspace/fine_tuning/registry/version_registry.json",
+    )
+    try:
+        from fine_tuning.registry.version_registry import VersionRegistry
+        reg = VersionRegistry(registry_path)
+        return {
+            "current_version": reg.get_current_version(),
+            "current_base":    reg.get_current_base(),
+            "versions":        reg.list_versions(),
+        }
+    except Exception as exc:
+        return {"error": str(exc), "versions": []}
 
 
 # ---------------------------------------------------------------------------

@@ -196,3 +196,123 @@ export async function triggerFullExtraction(
   }
   return resp.json();
 }
+
+/**
+ * Submit a corrected ACORD extraction as a RunPod fine-tuning sample.
+ * Stores: original_fields (what Qwen extracted) + corrected_fields (what user edited)
+ * + the PDF already on RunPod (via upload_id). Used later for LoRA fine-tuning.
+ */
+export async function submitRunpodForTraining(
+  uploadId: string,
+  originalFields: Record<string, any>,
+  correctedFields: Record<string, any>,
+  rawText: string,
+  formType: string,
+): Promise<{ status: string; sample_id?: string; total_samples?: number }> {
+  const headers = await authHeader();
+  const resp = await fetch(
+    apiUrl(`/api/v1/pdf/extract/${encodeURIComponent(uploadId)}/submit-training`),
+    {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        original_fields: originalFields,
+        corrected_fields: correctedFields,
+        raw_text: rawText,
+        form_type: formType,
+      }),
+    }
+  );
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+    throw new Error(err.detail || err.error || `Submit failed: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+/** Get count and list of all stored RunPod fine-tuning samples. */
+export async function getTrainingSamples(): Promise<{
+  total_samples: number;
+  pending: number;
+  samples: Array<{ sample_id: string; upload_id: string; form_type: string; created_at: string; status: string }>;
+}> {
+  const headers = await authHeader();
+  const resp = await fetch(apiUrl("/api/v1/pdf/training-samples"), { headers });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+    throw new Error(err.detail || err.error || `Failed: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+/**
+ * Sync locally-saved ACORD feedbacks to the RunPod pod as training samples.
+ * Called just before fine-tuning starts so RunPod has the data it needs.
+ */
+export async function syncFeedbacksToRunpod(
+  feedbacks: Array<{
+    prompt: string;
+    original_response: string;
+    corrected_response?: string;
+    form_type?: string;
+  }>
+): Promise<{ synced: number; failed: number }> {
+  const headers = await authHeader();
+  let synced = 0;
+  let failed = 0;
+  for (const fb of feedbacks) {
+    try {
+      let originalFields: Record<string, any> = {};
+      let correctedFields: Record<string, any> = {};
+      try { originalFields = JSON.parse(fb.original_response || "{}"); } catch { /* not JSON */ }
+      try { correctedFields = JSON.parse(fb.corrected_response || "{}"); } catch { /* not JSON */ }
+      const resp = await fetch(apiUrl("/api/v1/pdf/training-samples"), {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          raw_text: fb.prompt,
+          original_fields: originalFields,
+          corrected_fields: correctedFields,
+          form_type: fb.form_type || "25",
+        }),
+      });
+      if (resp.ok) synced++; else failed++;
+    } catch {
+      failed++;
+    }
+  }
+  return { synced, failed };
+}
+
+/** Poll the status of a RunPod fine-tuning job. Returns real loss/epoch metrics when done. */
+export async function getRunpodJobStatus(jobId: string): Promise<{
+  status: string;
+  phase?: string;
+  version?: number;
+  gate_passed?: boolean;
+  eval_scores?: Record<string, any>;
+  error?: string;
+}> {
+  const headers = await authHeader();
+  const resp = await fetch(apiUrl(`/api/v1/pdf/finetune/jobs/${encodeURIComponent(jobId)}`), { headers });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+    throw new Error(err.detail || err.error || `Status check failed: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+/** Trigger fine-tuning on RunPod with all pending training samples. */
+export async function startRunpodFinetune(): Promise<{ status: string; job_id?: string; message?: string; total_samples?: number }> {
+  const headers = await authHeader();
+  const resp = await fetch(apiUrl("/api/v1/pdf/finetune/start"), {
+    method: "POST",
+    headers: { ...headers, "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+    throw new Error(err.detail || err.error || `Finetune failed: ${resp.status}`);
+  }
+  return resp.json();
+}

@@ -1,6 +1,6 @@
 # =============================================================================
 # Fideon RunPod Server — Python dependencies
-# Python 3.12  |  RunPod GPU environment (CUDA 12.x)
+# Python 3.12  |  RunPod GPU environment (CUDA 12.x / H100)
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -10,6 +10,7 @@ fastapi==0.136.0
 uvicorn[standard]==0.45.0
 python-multipart>=0.0.9
 aiofiles>=23.2.1
+httpx>=0.27.0
 
 # -----------------------------------------------------------------------------
 # PDF → image conversion
@@ -26,10 +27,44 @@ numpy==2.4.4
 surya-ocr==0.6.13
 
 # -----------------------------------------------------------------------------
-# Qwen2-VL — vision-language field extraction
+# Qwen2-VL — vision-language field extraction + fine-tuning base model
 # -----------------------------------------------------------------------------
 torch==2.11.0
 torchvision==0.26.0
 transformers==4.57.6
 accelerate==1.13.0
 qwen-vl-utils>=0.0.8
+
+# -----------------------------------------------------------------------------
+# QLoRA fine-tuning
+# -----------------------------------------------------------------------------
+# 4-bit quantization (NF4 / double quant)
+bitsandbytes>=0.43.0
+
+# LoRA adapter training (PEFT)
+peft>=0.11.0
+
+# Supervised fine-tuning trainer (SFTTrainer / DataCollatorForLanguageModeling)
+trl>=0.9.0
+
+# Efficient weight serialization
+safetensors>=0.4.3
+
+# HuggingFace datasets (for Dataset.from_dict + map)
+datasets>=2.20.0
+
+# -----------------------------------------------------------------------------
+# Config parsing
+# -----------------------------------------------------------------------------
+pyyaml>=6.0
+
+# -----------------------------------------------------------------------------
+# Optional: SeaweedFS / S3 weight upload
+# -----------------------------------------------------------------------------
+boto3>=1.34.0
+
+# -----------------------------------------------------------------------------
+# Optional: DeepEval LLM-judge metrics
+# Install manually if needed:  pip install deepeval
+# -----------------------------------------------------------------------------
+# deepeval>=0.21.0

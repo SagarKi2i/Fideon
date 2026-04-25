@@ -47,6 +47,7 @@ import {
   type DeviceContribution,
   type TrainingStats,
 } from "@/lib/trainingApi";
+import { syncFeedbacksToRunpod, startRunpodFinetune, getRunpodJobStatus } from "@/lib/pdfUploadApi";
 
 export default function Training() {
   const { toast } = useToast();
@@ -61,6 +62,21 @@ export default function Training() {
   const [rounds, setRounds] = useState<FederatedRound[]>([]);
   const [contributions, setContributions] = useState<DeviceContribution[]>([]);
   const [activatedModels, setActivatedModels] = useState<{ model_id: string; model_name: string }[]>([]);
+
+  // RunPod ACORD fine-tuning
+  const [isFinetuning, setIsFinetuning] = useState(false);
+  const [finetuneStatus, setFinetuneStatus] = useState<string | null>(null);
+
+  // Local ACORD sample count — always read directly from localStorage so it's
+  // accurate regardless of whether feedback state comes from backend or local
+  const [localAcordCount, setLocalAcordCount] = useState<number>(0);
+
+  const refreshLocalAcordCount = () => {
+    const count = getLocalFeedback().filter(
+      (f) => f.model_id === "acord_form_understanding" && !f.is_used_for_training
+    ).length;
+    setLocalAcordCount(count);
+  };
 
   // Feedback form
   const [feedbackModelId, setFeedbackModelId] = useState("");
@@ -89,6 +105,7 @@ export default function Training() {
       const connected = !!token;
       setIsConnected(connected);
       setWebMode(!electron || !connected);
+      refreshLocalAcordCount();
       loadData();
     };
     init();
@@ -113,7 +130,35 @@ export default function Training() {
       } else {
         // Web-only: load from local storage
         const localFb = getLocalFeedback();
-        const localJb = getLocalJobs();
+        let localJb = getLocalJobs();
+
+        // Poll RunPod for real status on any running jobs that have a runpod_job_id
+        const runningJobs = localJb.filter((j: any) => j.status === 'running' && (j.config as any)?.runpod_job_id);
+        for (const job of runningJobs) {
+          try {
+            const rpStatus = await getRunpodJobStatus((job.config as any).runpod_job_id);
+            if (rpStatus.status === 'completed' || rpStatus.status === 'gate_failed' || rpStatus.status === 'failed') {
+              const updatedJobs = localJb.map((j: any) =>
+                j.id === job.id
+                  ? {
+                      ...j,
+                      status: rpStatus.status === 'completed' ? 'completed' : 'failed',
+                      completed_at: new Date().toISOString(),
+                      metrics: rpStatus.eval_scores
+                        ? { ...rpStatus.eval_scores, version: rpStatus.version }
+                        : { version: rpStatus.version },
+                      error_message: rpStatus.error ?? null,
+                    }
+                  : j
+              );
+              localStorage.setItem('local_training_jobs', JSON.stringify(updatedJobs));
+              localJb = updatedJobs;
+            }
+          } catch {
+            // RunPod unreachable — keep showing "running"
+          }
+        }
+
         setFeedback(localFb);
         setJobs(localJb);
         setStats({
@@ -133,6 +178,71 @@ export default function Training() {
       }
     } finally {
       setLoading(false);
+      refreshLocalAcordCount();
+    }
+  };
+
+  const handleRunpodFinetune = async () => {
+    setIsFinetuning(true);
+    setFinetuneStatus(null);
+
+    // Always read from localStorage directly — works regardless of device token
+    const localAcordFeedbacks = getLocalFeedback().filter(
+      (f) => f.model_id === "acord_form_understanding" && !f.is_used_for_training
+    );
+
+    try {
+      // Step 1: Sync local samples to RunPod so it has the training data
+      if (localAcordFeedbacks.length > 0) {
+        setFinetuneStatus(`Syncing ${localAcordFeedbacks.length} sample(s) to RunPod…`);
+        const syncResult = await syncFeedbacksToRunpod(
+          localAcordFeedbacks.map((f: any) => ({
+            prompt: f.prompt || "",
+            original_response: f.original_response || "{}",
+            corrected_response: f.corrected_response || "{}",
+            form_type: f.form_type,
+          }))
+        );
+        if (syncResult.failed > 0 && syncResult.synced === 0) {
+          const msg = "Could not reach RunPod. Start the server on the pod:\ncd /workspace && python -m uvicorn runpod.server:app --host 0.0.0.0 --port 8000";
+          setFinetuneStatus(msg);
+          toast({ title: "RunPod unreachable", description: "Start the RunPod server first.", variant: "destructive" });
+          return;
+        }
+      }
+
+      // Step 2: Trigger fine-tuning on RunPod
+      setFinetuneStatus("Starting fine-tuning job…");
+      const result = await startRunpodFinetune();
+      setFinetuneStatus(
+        result.status === "queued"
+          ? `Fine-tuning queued with ${result.total_samples} sample(s). Running on RunPod GPU…`
+          : result.message || result.status
+      );
+      toast({
+        title: "Fine-tuning started on RunPod",
+        description: `${result.total_samples ?? localAcordFeedbacks.length} sample(s) sent for LoRA training.`,
+      });
+
+      // Create local training job with RunPod job_id so we can poll real status later
+      const runpodJobId = (result as any).job_id ?? null;
+      try {
+        await createTrainingJob({
+          model_id: "acord_form_understanding",
+          training_type: "fine-tune",
+          config: { runpod_job_id: runpodJobId },
+        });
+      } catch (_) {
+        // Non-fatal
+      }
+      loadData();
+    } catch (e: any) {
+      const msg = e?.message || "Fine-tune failed";
+      setFinetuneStatus(msg);
+      toast({ title: "Fine-tune failed", description: msg, variant: "destructive" });
+    } finally {
+      setIsFinetuning(false);
+      refreshLocalAcordCount();
     }
   };
 
@@ -230,21 +340,8 @@ export default function Training() {
     );
   }
 
-  if (activatedModels.length === 0 && !loading) {
-    return (
-      <div className="space-y-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>Model Training</CardTitle>
-            <CardDescription>No activated models found. Activate models from the Marketplace to use training features.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Button onClick={() => navigate("/marketplace")}>Browse Marketplace</Button>
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
+  // Note: no early return for activatedModels.length === 0 —
+  // the ACORD RunPod fine-tuning card must always be visible.
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
@@ -431,6 +528,42 @@ export default function Training() {
             <CardContent className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {activatedModels.map(({ model_id: modelId, model_name: modelName }) => {
+                  const isAcord = modelId === "acord_form_understanding";
+
+                  // ACORD model — count always read from localStorage directly
+                  if (isAcord) {
+                    const canFinetune = !isFinetuning && localAcordCount > 0;
+
+                    return (
+                      <div key={modelId} className="p-4 border rounded-lg space-y-3">
+                        <div className="flex items-center justify-between">
+                          <h4 className="font-medium">{modelName}</h4>
+                          <Badge variant="outline">{localAcordCount} samples</Badge>
+                        </div>
+                        <p className="text-sm text-muted-foreground">
+                          {localAcordCount > 0
+                            ? `${localAcordCount} sample${localAcordCount !== 1 ? "s" : ""} ready for training`
+                            : "No feedback samples yet — save a sample from the ACORD Parser"}
+                        </p>
+                        {finetuneStatus && (
+                          <p className="text-xs text-muted-foreground whitespace-pre-line">{finetuneStatus}</p>
+                        )}
+                        <Button
+                          size="sm"
+                          disabled={!canFinetune}
+                          onClick={handleRunpodFinetune}
+                        >
+                          {isFinetuning ? (
+                            <><Loader2 className="h-4 w-4 mr-1 animate-spin" />Starting…</>
+                          ) : (
+                            <><Play className="h-4 w-4 mr-1" />Fine-tune</>
+                          )}
+                        </Button>
+                      </div>
+                    );
+                  }
+
+                  // All other models — local feedback
                   const modelFeedback = feedback.filter((f: any) => f.model_id === modelId && !f.is_used_for_training);
                   return (
                     <div key={modelId} className="p-4 border rounded-lg space-y-3">

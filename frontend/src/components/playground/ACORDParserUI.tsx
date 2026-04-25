@@ -13,10 +13,11 @@ import { submitAcordRun } from "@/lib/acordWorkflowApi";
 import {
   uploadPdfToRunPod,
   triggerFullExtraction,
+  submitRunpodForTraining,
   type PdfUploadRecord,
   type AcordExtractionResult,
-  type AcordFieldValue,
 } from "@/lib/pdfUploadApi";
+import { submitFeedback } from "@/lib/trainingApi";
 import { useNavigate } from "react-router-dom";
 
 interface ACORDParserUIProps {
@@ -191,12 +192,47 @@ function flattenAcordFields(result: AcordExtractionResult): Array<{ key: string;
     .map(([key, v]) => {
       if (v === null || v === undefined) return null;
       const val = serializeFieldValue(v);
-      return val ? { key, value: val } : null;
+      return val !== null && val !== undefined ? { key, value: val } : null;
     })
     .filter(Boolean) as Array<{ key: string; value: string }>;
 }
 
-export default function ACORDParserUI({ modelId: _modelId, onRun, isRunning, result }: ACORDParserUIProps) {
+function fieldsToMarkdown(
+  fields: Array<{ key: string; value: string }>,
+  formType: string,
+  pdfType: string,
+): string {
+  const formLabel = formType.replace(/^acord/i, "");
+  const pdfLabel = pdfType === "scanned" ? "Scanned PDF" : pdfType === "digital" ? "Digital PDF" : pdfType || "Unknown";
+  const rows = fields.map(
+    (f) => `| ${f.key.replace(/\|/g, "\\|")} | ${String(f.value).replace(/\|/g, "\\|")} |`
+  );
+  return [
+    `## ACORD ${formLabel} — Extracted Fields`,
+    ``,
+    `**PDF Type:** ${pdfLabel}  `,
+    `**Total Fields:** ${fields.length}`,
+    ``,
+    `| Field | Value |`,
+    `|-------|-------|`,
+    ...rows,
+  ].join("\n");
+}
+
+function parseMarkdownTableToJson(markdown: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const line of markdown.split("\n")) {
+    if (!line.trimStart().startsWith("|")) continue;
+    const cells = line.split("|").map((c) => c.trim()).filter(Boolean);
+    if (cells.length < 2) continue;
+    const [key, value] = cells;
+    if (!key || key === "Field" || /^-+$/.test(key)) continue;
+    result[key.replace(/\\\|/g, "|")] = (value ?? "").replace(/\\\|/g, "|");
+  }
+  return result;
+}
+
+export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunning, result }: ACORDParserUIProps) {
   const navigate = useNavigate();
   const [file, setFile] = useState<File | null>(null);
   const [formType, setFormType] = useState<string>("25");
@@ -205,7 +241,10 @@ export default function ACORDParserUI({ modelId: _modelId, onRun, isRunning, res
   const [editError, setEditError] = useState<string | null>(null);
   const [trainSubmitted, setTrainSubmitted] = useState(false);
   const [activeTab, setActiveTab] = useState<"json" | "fields" | "edit" | "changes" | "split">("json");
-  const [ocrTab, setOcrTab] = useState<"fields" | "rawtext">("fields");
+  const [ocrTab, setOcrTab] = useState<"fields" | "rawtext" | "markdown">("fields");
+  const [markdownEditText, setMarkdownEditText] = useState<string>("");
+  const [trainSubmittedRunpod, setTrainSubmittedRunpod] = useState(false);
+  const [isSubmittingTrain, setIsSubmittingTrain] = useState(false);
 
   // RunPod upload state
   const [runpodUpload, setRunpodUpload] = useState<RunPodUploadState>({ phase: "idle" });
@@ -223,6 +262,9 @@ export default function ACORDParserUI({ modelId: _modelId, onRun, isRunning, res
   useEffect(() => {
     setExtractionState({ phase: "idle" });
     setRunpodUpload({ phase: "idle" });
+    setTrainSubmittedRunpod(false);
+    setMarkdownEditText("");
+    setOcrTab("fields");
     if (uploadPollRef.current) clearInterval(uploadPollRef.current);
   }, [file]);
 
@@ -251,10 +293,13 @@ export default function ACORDParserUI({ modelId: _modelId, onRun, isRunning, res
     const uploadId = runpodUpload.record.upload_id;
 
     setExtractionState({ phase: "extracting" });
+    setTrainSubmittedRunpod(false);
 
     try {
       const result = await triggerFullExtraction(uploadId, formType);
       setExtractionState({ phase: "completed", result });
+      const fields = flattenAcordFields(result);
+      setMarkdownEditText(fieldsToMarkdown(fields, result.form_type_detected || formType, result.pdf_type || ""));
       const fieldCount = Object.keys(
         result.extracted_json ?? result.extracted_fields ?? result.fields ?? {}
       ).length;
@@ -266,15 +311,46 @@ export default function ACORDParserUI({ modelId: _modelId, onRun, isRunning, res
     }
   };
 
-  const handleRun = () => {
-    if (!file) return;
-    onRun({
-      type: "acord-parser",
-      file,
-      fileName: file.name,
-      formType,
-    });
+  const handleSubmitAndTrain = async () => {
+    if (extractionState.phase !== "completed") return;
+    if (runpodUpload.phase !== "done") return;
+
+    const uploadId = runpodUpload.record.upload_id;
+    const r = extractionState.result;
+    const originalFields = (r.extracted_json ?? r.extracted_fields ?? r.fields ?? {}) as Record<string, any>;
+    const rawText = r.full_text ?? r.raw_text ?? "";
+    const correctedFields = parseMarkdownTableToJson(markdownEditText);
+
+    setIsSubmittingTrain(true);
+    try {
+      // 1. Save locally first — this always works and bumps the count in Local Training
+      await submitFeedback({
+        model_id: "acord_form_understanding",
+        prompt: rawText || JSON.stringify(originalFields, null, 2),
+        original_response: JSON.stringify(originalFields, null, 2),
+        corrected_response: JSON.stringify(correctedFields, null, 2),
+        feedback_type: "correction",
+        rating: 5,
+        form_type: formType,
+      });
+
+      // 2. Also try to store on RunPod (non-blocking — fine if pod is offline)
+      submitRunpodForTraining(uploadId, originalFields, correctedFields, rawText, formType).catch(() => {
+        // RunPod offline — local save already done; will sync when Fine-tune is clicked
+      });
+
+      setTrainSubmittedRunpod(true);
+      toast({
+        title: "Training sample saved",
+        description: "Sample saved locally. Go to Model Training → Local Training to fine-tune.",
+      });
+    } catch (e: any) {
+      toast({ title: "Training submission failed", description: e?.message || "Unknown error", variant: "destructive" });
+    } finally {
+      setIsSubmittingTrain(false);
+    }
   };
+
 
   const normalizedResult = useMemo(() => {
     if (!result) return "";
@@ -577,6 +653,7 @@ export default function ACORDParserUI({ modelId: _modelId, onRun, isRunning, res
                     )}
                   </TabsTrigger>
                   <TabsTrigger value="rawtext">Raw Text</TabsTrigger>
+                  <TabsTrigger value="markdown">Markdown</TabsTrigger>
                 </TabsList>
 
                 <TabsContent value="fields" className="mt-3">
@@ -609,7 +686,68 @@ export default function ACORDParserUI({ modelId: _modelId, onRun, isRunning, res
                     {rawText || "(no raw text available)"}
                   </pre>
                 </TabsContent>
+
+                <TabsContent value="markdown" className="mt-3 space-y-3">
+                  <p className="text-xs text-muted-foreground">
+                    Edit the fields below — correct any wrong values — then click <strong>Submit &amp; Train</strong>.
+                  </p>
+                  <Textarea
+                    value={markdownEditText}
+                    onChange={(e) => { setMarkdownEditText(e.target.value); setTrainSubmittedRunpod(false); }}
+                    className="min-h-[340px] font-mono text-xs bg-[#0b1020] border-border/70 text-muted-foreground resize-y leading-5"
+                    spellCheck={false}
+                  />
+                  <div className="flex items-center justify-between gap-3 pt-1">
+                    <p className="text-xs text-muted-foreground">
+                      Each save adds one sample to <strong>Model Training → Local Training</strong>.
+                    </p>
+                    <Button
+                      onClick={async () => {
+                        await handleSubmitAndTrain();
+                        setTimeout(() => setTrainSubmittedRunpod(false), 2000);
+                      }}
+                      disabled={isSubmittingTrain}
+                      className="shrink-0 bg-gradient-to-r from-green-600 to-emerald-600 hover:opacity-90 text-white"
+                    >
+                      {isSubmittingTrain ? (
+                        <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Saving…</>
+                      ) : trainSubmittedRunpod ? (
+                        <><CheckCircle2 className="h-4 w-4 mr-2" />Saved!</>
+                      ) : (
+                        <><FileCheck className="h-4 w-4 mr-2" />Save &amp; Train</>
+                      )}
+                    </Button>
+                  </div>
+                </TabsContent>
               </Tabs>
+
+              <div className="flex items-center justify-between pt-3 border-t border-border/50 gap-3 flex-wrap">
+                <Button
+                  variant="outline"
+                  className="shrink-0 text-muted-foreground"
+                  onClick={() => toast({ title: "Send to Review", description: "Review workflow coming soon." })}
+                >
+                  Send to Review
+                </Button>
+                <Button
+                  onClick={async () => {
+                    if (ocrTab !== "markdown") {
+                      setOcrTab("markdown");
+                    } else {
+                      await handleSubmitAndTrain();
+                      setTimeout(() => setTrainSubmittedRunpod(false), 2000);
+                    }
+                  }}
+                  disabled={isSubmittingTrain}
+                  className="shrink-0 border-green-600 text-green-400 hover:bg-green-600/10 bg-transparent border"
+                >
+                  {isSubmittingTrain ? (
+                    <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Saving…</>
+                  ) : (
+                    <><FileCheck className="h-4 w-4 mr-2" />Edit &amp; Train</>
+                  )}
+                </Button>
+              </div>
             </CardContent>
           </Card>
         );

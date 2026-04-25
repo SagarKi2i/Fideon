@@ -2,11 +2,14 @@
 PDF upload + full ACORD extraction proxy routes.
 
 Routes:
-  POST /api/v1/pdf/upload                       — upload PDF to RunPod
-  GET  /api/v1/pdf/upload/{upload_id}/status    — poll upload record
-  POST /api/v1/pdf/process/{upload_id}          — trigger Surya OCR on RunPod (legacy)
-  GET  /api/v1/pdf/process/{job_id}/status      — poll OCR job status + results (legacy)
-  POST /api/v1/pdf/extract/{upload_id}          — full ACORD extraction (Surya + Docling + Qwen VL)
+  POST /api/v1/pdf/upload                                  — upload PDF to RunPod
+  GET  /api/v1/pdf/upload/{upload_id}/status               — poll upload record
+  POST /api/v1/pdf/process/{upload_id}                     — trigger Surya OCR on RunPod (legacy)
+  GET  /api/v1/pdf/process/{job_id}/status                 — poll OCR job status + results (legacy)
+  POST /api/v1/pdf/extract/{upload_id}                     — full ACORD extraction (Surya + Qwen VL)
+  POST /api/v1/pdf/extract/{upload_id}/submit-training     — store corrected sample for fine-tuning
+  GET  /api/v1/pdf/training-samples                        — list stored training samples / count
+  POST /api/v1/pdf/finetune/start                          — trigger RunPod fine-tuning job
 """
 from __future__ import annotations
 
@@ -14,7 +17,7 @@ from typing import Any, Dict, Optional
 
 import httpx
 import structlog
-from fastapi import APIRouter, File, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Body, File, Header, HTTPException, UploadFile
 
 from app.core.config import RUNPOD_UPLOAD_BASE_URL
 from app.core.supabase import verify_user
@@ -168,4 +171,97 @@ async def extract_acord_from_upload(
         form_type=result.get("form_type_detected"),
         pdf_type=result.get("pdf_type"),
     )
+    return result
+
+
+# ── POST /api/v1/pdf/extract/{upload_id}/submit-training ─────────────────────
+@router.post("/api/v1/pdf/extract/{upload_id}/submit-training")
+async def submit_for_training(
+    upload_id: str,
+    body: Dict[str, Any] = Body(...),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """
+    Store a corrected ACORD extraction as a RunPod fine-tuning sample.
+    Sends: original_fields, corrected_fields, raw_text, form_type + upload_id
+    (the upload_id links to the PDF already stored on the RunPod pod).
+    """
+    await verify_user(authorization)
+
+    meta = await _runpod_get(f"/upload/{upload_id}/status")
+    form_type = body.get("form_type") or str(meta.get("form_type") or "25")
+
+    log.info("training.submit", upload_id=upload_id, form_type=form_type)
+
+    result = await _runpod_post(
+        "/training-samples",
+        json={
+            "upload_id": upload_id,
+            "form_type": form_type,
+            "original_fields": body.get("original_fields") or {},
+            "corrected_fields": body.get("corrected_fields") or {},
+            "raw_text": body.get("raw_text") or "",
+        },
+    )
+
+    log.info("training.stored", sample_id=result.get("sample_id"), total=result.get("total_samples"))
+    return result
+
+
+# ── GET /api/v1/pdf/training-samples ─────────────────────────────────────────
+@router.get("/api/v1/pdf/training-samples")
+async def get_training_samples(
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Return all stored fine-tuning samples and their count from the RunPod pod."""
+    await verify_user(authorization)
+    return await _runpod_get("/training-samples")
+
+
+# ── POST /api/v1/pdf/training-samples ────────────────────────────────────────
+@router.post("/api/v1/pdf/training-samples")
+async def add_training_sample(
+    body: Dict[str, Any] = Body(...),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """
+    Add a training sample directly to RunPod without requiring an upload_id.
+    Used to sync locally-saved ACORD feedbacks to the pod when Fine-tune is clicked.
+    """
+    await verify_user(authorization)
+    log.info("training.sync_feedback", form_type=body.get("form_type"))
+    return await _runpod_post("/training-samples", json={
+        "upload_id": body.get("upload_id", ""),
+        "form_type": body.get("form_type", "25"),
+        "original_fields": body.get("original_fields") or {},
+        "corrected_fields": body.get("corrected_fields") or {},
+        "raw_text": body.get("raw_text") or "",
+    })
+
+
+# ── GET /api/v1/pdf/finetune/jobs/{job_id} ───────────────────────────────────
+@router.get("/api/v1/pdf/finetune/jobs/{job_id}")
+async def get_finetune_job_status(
+    job_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Poll the status of a RunPod fine-tuning job. Returns phase, eval_scores, version when done."""
+    await verify_user(authorization)
+    return await _runpod_get(f"/finetune/jobs/{job_id}")
+
+
+# ── POST /api/v1/pdf/finetune/start ──────────────────────────────────────────
+@router.post("/api/v1/pdf/finetune/start")
+async def start_finetune(
+    body: Dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """
+    Trigger fine-tuning on RunPod using all stored pending training samples.
+    RunPod pod reads the JSONL file + attached PDFs and runs LoRA training.
+    """
+    await verify_user(authorization)
+    log.info("finetune.start_requested")
+    result = await _runpod_post("/finetune/start", json=body)
+    log.info("finetune.queued", status=result.get("status"), samples=result.get("total_samples"))
     return result
