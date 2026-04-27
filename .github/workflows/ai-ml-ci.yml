@@ -38,6 +38,15 @@ jobs:
         with:
           projectBaseDir: ai-ml
 
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af
+          df -h
+
       - name: Build Docker Image
         if: >
           github.event_name == 'push' ||
