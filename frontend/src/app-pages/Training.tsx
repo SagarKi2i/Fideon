@@ -219,7 +219,7 @@ export default function Training() {
       );
 
       if (syncResult.failed > 0 && syncResult.synced === 0) {
-        const msg = "Could not reach RunPod. Start the server on the pod:\ncd /workspace && python -m uvicorn runpod.server:app --host 0.0.0.0 --port 8000";
+        const msg = "Could not reach RunPod. Start the server on the pod:\ncd /workspace/ai-ml && python -m uvicorn server:app --host 0.0.0.0 --port 8000";
         setFinetuneStatus(msg);
         toast({ title: "RunPod unreachable", description: "Start the RunPod server first.", variant: "destructive" });
         return;

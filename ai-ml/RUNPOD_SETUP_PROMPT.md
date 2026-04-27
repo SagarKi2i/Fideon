@@ -19,21 +19,21 @@
 > - Container Disk: at least **50 GB** (for uploaded PDFs and model weights)
 > - Expose **port 8080** via the HTTP proxy
 > - Expose **port 22** via TCP (for SSH file transfer)
-> - The server files will be uploaded to `/workspace/runpod/` via SSH
+> - The server files will be uploaded to `/workspace/ai-ml/` via SSH
 
 ---
 
 ## Files to deploy on the pod
 
-These 5 files from the `runpod/` folder in this repo go to `/workspace/runpod/` on the pod:
+These 5 files from the `ai-ml/` folder in this repo go to `/workspace/ai-ml/` on the pod:
 
 | Local file | Pod path |
 |---|---|
-| `runpod/server.py` | `/workspace/runpod/server.py` |
-| `runpod/surya_runner.py` | `/workspace/runpod/surya_runner.py` |
-| `runpod/requirements.txt` | `/workspace/runpod/requirements.txt` |
-| `runpod/start.sh` | `/workspace/runpod/start.sh` |
-| `runpod/__init__.py` | `/workspace/runpod/__init__.py` |
+| `ai-ml/server.py` | `/workspace/ai-ml/server.py` |
+| `ai-ml/surya_runner.py` | `/workspace/ai-ml/surya_runner.py` |
+| `ai-ml/requirements.txt` | `/workspace/ai-ml/requirements.txt` |
+| `ai-ml/start.sh` | `/workspace/ai-ml/start.sh` |
+| `ai-ml/__init__.py` | `/workspace/ai-ml/__init__.py` |
 
 ---
 
@@ -69,20 +69,20 @@ Run from your local `d:\Fideon OS\` directory:
 
 ```bash
 # Create directories on the pod
-ssh root@<ssh-host> -p <ssh-port> "mkdir -p /workspace/runpod /workspace/uploads"
+ssh root@<ssh-host> -p <ssh-port> "mkdir -p /workspace/ai-ml /workspace/uploads"
 
 # Copy all server files
-scp -P <ssh-port> runpod/server.py        root@<ssh-host>:/workspace/runpod/
-scp -P <ssh-port> runpod/surya_runner.py  root@<ssh-host>:/workspace/runpod/
-scp -P <ssh-port> runpod/requirements.txt root@<ssh-host>:/workspace/runpod/
-scp -P <ssh-port> runpod/start.sh         root@<ssh-host>:/workspace/runpod/
-scp -P <ssh-port> runpod/__init__.py      root@<ssh-host>:/workspace/runpod/
+scp -P <ssh-port> ai-ml/server.py        root@<ssh-host>:/workspace/ai-ml/
+scp -P <ssh-port> ai-ml/surya_runner.py  root@<ssh-host>:/workspace/ai-ml/
+scp -P <ssh-port> ai-ml/requirements.txt root@<ssh-host>:/workspace/ai-ml/
+scp -P <ssh-port> ai-ml/start.sh         root@<ssh-host>:/workspace/ai-ml/
+scp -P <ssh-port> ai-ml/__init__.py      root@<ssh-host>:/workspace/ai-ml/
 ```
 
 ### Step 5 — Install dependencies on the pod
 
 ```bash
-ssh root@<ssh-host> -p <ssh-port> "pip install -r /workspace/runpod/requirements.txt"
+ssh root@<ssh-host> -p <ssh-port> "pip install -r /workspace/ai-ml/requirements.txt"
 ```
 
 > **Note:** `surya-ocr` will download ~2–4 GB of model weights on first run. This is normal.
@@ -91,7 +91,7 @@ ssh root@<ssh-host> -p <ssh-port> "pip install -r /workspace/runpod/requirements
 
 ```bash
 ssh root@<ssh-host> -p <ssh-port> \
-  "cd /workspace && nohup python -m uvicorn runpod.server:app \
+  "cd /workspace/ai-ml && nohup python -m uvicorn server:app \
     --host 0.0.0.0 --port 8080 --log-level info \
     > /workspace/server.log 2>&1 &"
 ```
@@ -136,7 +136,7 @@ Create `/workspace/start_backend.sh` on the pod:
 #!/bin/bash
 mkdir -p /workspace/uploads
 cd /workspace
-nohup python -m uvicorn runpod.server:app \
+nohup python -m uvicorn server:app \
   --host 0.0.0.0 --port 8080 --log-level info \
   > /workspace/server.log 2>&1 &
 ```

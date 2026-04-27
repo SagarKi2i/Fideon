@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
 # Fideon RunPod — one-shot setup script
-# Run once after uploading the runpod/ folder to /workspace/runpod/
+# Run once after uploading the ai-ml/ folder to /workspace/ai-ml/
 #
-#   bash /workspace/runpod/setup.sh
+#   bash /workspace/ai-ml/setup.sh
 # =============================================================================
 set -euo pipefail
 
@@ -18,7 +18,7 @@ echo "================================================================"
 if [[ "$SKIP_PIP" -eq 0 ]]; then
   echo ""
   echo "[1/3] Installing Python packages..."
-  pip install -q -r /workspace/runpod/requirements.txt
+  pip install -q -r /workspace/ai-ml/requirements.txt
   echo "✓ Python packages installed"
 else
   echo "[1/3] Skipping pip install (--skip-pip)"
@@ -58,5 +58,5 @@ llama-convert-hf-to-gguf --help > /dev/null && echo "✓ llama-convert-hf-to-ggu
 echo ""
 echo "================================================================"
 echo " Setup complete! Start the server with:"
-echo "   cd /workspace/runpod && python server.py"
+echo "   cd /workspace/ai-ml && python server.py"
 echo "================================================================"
