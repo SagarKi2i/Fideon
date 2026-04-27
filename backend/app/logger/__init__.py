@@ -34,9 +34,15 @@ _anonymizer = None
 _PRESIDIO_EXECUTOR: Optional[ThreadPoolExecutor] = None
 
 try:
+    import spacy.util as _spacy_util
     from presidio_analyzer import AnalyzerEngine
     from presidio_anonymizer import AnonymizerEngine
     from presidio_anonymizer.entities import OperatorConfig
+
+    _SPACY_MODEL = "en_core_web_lg"
+    if not _spacy_util.is_package(_SPACY_MODEL):
+        raise ImportError(f"spaCy model '{_SPACY_MODEL}' is not installed — skipping Presidio PII scanner. "
+                          f"Run: python -m spacy download {_SPACY_MODEL}")
 
     _analyzer = AnalyzerEngine()
     _anonymizer = AnonymizerEngine()

@@ -24,7 +24,7 @@ numpy==2.4.4
 # NOTE: 0.6.x uses function-based API (batch_text_detection / batch_recognition)
 # DO NOT upgrade to 0.17.x without updating surya_runner.py and extractor.py
 # -----------------------------------------------------------------------------
-surya-ocr==0.6.13
+surya-ocr==0.17.1
 
 # -----------------------------------------------------------------------------
 # Qwen2-VL — vision-language field extraction + fine-tuning base model

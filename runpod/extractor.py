@@ -17,7 +17,40 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# ── Surya OCR singletons (0.6.x API) ─────────────────────────────────────────
+
+# ── Transformers 4.50+ compatibility patch ────────────────────────────────────
+# Must run before any surya or Qwen2-VL imports so the patched symbols are
+# available when those packages do their own `from transformers import ...`.
+def _patch_transformers_compat() -> None:
+    import transformers as _tf
+    import transformers.image_utils as _iu
+
+    # surya 0.17.x: `from transformers import PretrainedConfig`
+    # Renamed to PreTrainedConfig in 4.50+; restore the old alias.
+    if not hasattr(_tf, "PretrainedConfig"):
+        _cls = getattr(_tf, "PreTrainedConfig", None)
+        if _cls is None:
+            try:
+                from transformers.configuration_utils import PretrainedConfig as _cls  # type: ignore
+            except ImportError:
+                from transformers.configuration_utils import PreTrainedConfig as _cls  # type: ignore
+        _tf.PretrainedConfig = _cls  # type: ignore[attr-defined]
+
+    # Qwen2-VL processor: `from transformers.image_utils import VideoInput`
+    # Moved out of image_utils in 4.50+; inject a compatible type alias.
+    if not hasattr(_iu, "VideoInput"):
+        from typing import List as _List, Union as _Union
+        import numpy as _np
+        try:
+            from PIL.Image import Image as _PILImage
+            _iu.VideoInput = _Union[_List[_PILImage], _List[_np.ndarray]]  # type: ignore[attr-defined]
+        except ImportError:
+            _iu.VideoInput = list  # type: ignore[attr-defined]
+
+
+_patch_transformers_compat()
+
+# ── Surya OCR singletons (0.17.x API) ────────────────────────────────────────
 _surya_lock = threading.Lock()
 _det_predictor = None
 _rec_predictor = None
@@ -64,7 +97,7 @@ def _load_docling() -> None:
         from docling.datamodel.base_models import InputFormat
 
         pipeline_options = PdfPipelineOptions()
-        pipeline_options.do_ocr = True           # needed for scanned PDFs
+        pipeline_options.do_ocr = True
         pipeline_options.do_table_structure = True
 
         _docling_converter = DocumentConverter(
@@ -81,12 +114,19 @@ def _load_qwen() -> None:
         if _qwen_loaded:
             return
         import torch
-        from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+        from transformers import AutoConfig, AutoProcessor, Qwen2VLForConditionalGeneration
+
+        # Load config first and patch fields missing from older model checkpoints
+        # that transformers 4.57 now requires during weight initialisation.
+        config = AutoConfig.from_pretrained(QWEN_MODEL_ID)
+        if hasattr(config, "vision_config") and not hasattr(config.vision_config, "initializer_range"):
+            config.vision_config.initializer_range = 0.02
 
         _qwen_processor = AutoProcessor.from_pretrained(QWEN_MODEL_ID)
         _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
             QWEN_MODEL_ID,
-            dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            config=config,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
             device_map="auto",
         )
         _qwen_model.eval()
@@ -139,9 +179,12 @@ def _run_docling(pdf_path: str) -> Dict[str, Any]:
         tables: List[str] = []
         for table in getattr(doc, "tables", []):
             try:
-                tables.append(table.export_to_markdown())
+                tables.append(table.export_to_markdown(doc))
             except Exception:
-                pass
+                try:
+                    tables.append(table.export_to_markdown())
+                except Exception:
+                    pass
 
         # Extract KV pairs when Docling's layout parser detects them
         kv_pairs: Dict[str, str] = {}
@@ -276,8 +319,10 @@ def _run_qwen_extraction(
 ) -> Dict[str, Any]:
     _load_qwen()
     import torch
+    from qwen_vl_utils import process_vision_info
 
-    page_images = images[:2]
+    # Send up to 4 pages so multi-page ACORD forms (125, 140, etc.) are fully covered
+    page_images = images[:4]
 
     # Build reference context from both arms
     context_parts: List[str] = []
@@ -311,28 +356,21 @@ def _run_qwen_extraction(
         messages, tokenize=False, add_generation_prompt=True
     )
 
-    image_inputs = [
-        item["image"]
-        for msg in messages
-        if isinstance(msg.get("content"), list)
-        for item in msg["content"]
-        if item.get("type") == "image"
-    ]
+    # process_vision_info handles PIL image resizing/normalization for Qwen2-VL
+    image_inputs, video_inputs = process_vision_info(messages)
 
     inputs = _qwen_processor(
         text=[text_input],
-        images=image_inputs if image_inputs else None,
+        images=image_inputs,
+        videos=video_inputs,
         padding=True,
         return_tensors="pt",
-    )
-
-    device = next(_qwen_model.parameters()).device
-    inputs = {k: v.to(device) for k, v in inputs.items()}
+    ).to(_qwen_model.device)
 
     with torch.no_grad():
         generated_ids = _qwen_model.generate(**inputs, max_new_tokens=3072)
 
-    trimmed = [out[len(inp):] for inp, out in zip(inputs["input_ids"], generated_ids)]
+    trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
     output_text = _qwen_processor.batch_decode(
         trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
     )[0]

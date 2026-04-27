@@ -4,6 +4,33 @@ Models are loaded once on first use and reused for every job.
 """
 from __future__ import annotations
 
+
+def _patch_transformers_compat() -> None:
+    """Compatibility shim for transformers 4.50+ breaking changes."""
+    import transformers as _tf
+    import transformers.image_utils as _iu
+
+    if not hasattr(_tf, "PretrainedConfig"):
+        _cls = getattr(_tf, "PreTrainedConfig", None)
+        if _cls is None:
+            try:
+                from transformers.configuration_utils import PretrainedConfig as _cls  # type: ignore
+            except ImportError:
+                from transformers.configuration_utils import PreTrainedConfig as _cls  # type: ignore
+        _tf.PretrainedConfig = _cls  # type: ignore[attr-defined]
+
+    if not hasattr(_iu, "VideoInput"):
+        from typing import List as _List, Union as _Union
+        import numpy as _np
+        try:
+            from PIL.Image import Image as _PILImage
+            _iu.VideoInput = _Union[_List[_PILImage], _List[_np.ndarray]]  # type: ignore[attr-defined]
+        except ImportError:
+            _iu.VideoInput = list  # type: ignore[attr-defined]
+
+
+_patch_transformers_compat()
+
 import re
 import threading
 from pathlib import Path

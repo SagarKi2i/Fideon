@@ -337,7 +337,7 @@ async def extract_acord(
         ft = ft[5:]
 
     import asyncio
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     from runpod.extractor import run_full_extraction
 
