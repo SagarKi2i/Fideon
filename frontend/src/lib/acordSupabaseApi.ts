@@ -219,6 +219,62 @@ export async function getAcordTrainingSamples(): Promise<AcordTrainingSample[]> 
   return samples;
 }
 
+// ── Sample list for display (Local Training tab) ─────────────────────────────
+
+export type AcordSampleDisplay = {
+  run_id: string;
+  source_filename: string;
+  form_type: string;
+  status: string;
+  created_at: string;
+  prompt: string;
+  original_response: string;
+  corrected_response: string | null;
+};
+
+/**
+ * Returns all pending training samples with full detail data for display,
+ * ordered by created_at descending (latest first).
+ * Joins acord_extraction_runs with acord_extraction_feedback in memory.
+ */
+export async function getAcordSamplesForDisplay(): Promise<AcordSampleDisplay[]> {
+  const { data: runs, error: runsError } = await db
+    .from("acord_extraction_runs")
+    .select("id, source_filename, form_type_detected, status, created_at, raw_text, extracted_json")
+    .in("status", ["submitted", "needs_admin_review"])
+    .order("created_at", { ascending: false });
+
+  if (runsError || !runs || runs.length === 0) return [];
+
+  const runIds = (runs as any[]).map((r: any) => r.id);
+
+  const { data: feedbacks } = await db
+    .from("acord_extraction_feedback")
+    .select("run_id, corrected_json")
+    .eq("actor_role", "user")
+    .in("run_id", runIds);
+
+  // Last feedback per run_id wins
+  const fbMap = new Map<string, any>();
+  for (const fb of (feedbacks as any[]) ?? []) {
+    fbMap.set(fb.run_id, fb.corrected_json);
+  }
+
+  return (runs as any[]).map((r: any) => {
+    const correctedJson = fbMap.get(r.id) ?? null;
+    return {
+      run_id: r.id,
+      source_filename: r.source_filename || "Unknown file",
+      form_type: r.form_type_detected || "ACORD",
+      status: r.status,
+      created_at: r.created_at,
+      prompt: r.raw_text || JSON.stringify(r.extracted_json ?? {}),
+      original_response: JSON.stringify(r.extracted_json ?? {}, null, 2),
+      corrected_response: correctedJson ? JSON.stringify(correctedJson, null, 2) : null,
+    };
+  });
+}
+
 // ── Mark samples used after training ─────────────────────────────────────────
 
 /**

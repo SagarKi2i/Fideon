@@ -25,6 +25,9 @@ import {
   Shield,
   Users,
   BarChart3,
+  ChevronDown,
+  ChevronUp,
+  FileText,
 } from "lucide-react";
 import { isElectron } from "@/lib/ollama";
 import { getStoredDeviceToken } from "@/lib/deviceApi";
@@ -51,7 +54,9 @@ import { syncFeedbacksToRunpod, startRunpodFinetune, getRunpodJobStatus } from "
 import {
   getAcordTrainingCount,
   getAcordTrainingSamples,
+  getAcordSamplesForDisplay,
   markAcordSamplesUsed,
+  type AcordSampleDisplay,
 } from "@/lib/acordSupabaseApi";
 
 export default function Training() {
@@ -75,6 +80,20 @@ export default function Training() {
   // ACORD training sample count — read from Supabase (status='submitted' runs)
   const [localAcordCount, setLocalAcordCount] = useState<number>(0);
 
+  // Expanded feedback item (click to view full details) — Recent Feedback tab
+  const [expandedFeedbackId, setExpandedFeedbackId] = useState<string | null>(null);
+
+  // ACORD sample list (shown when user clicks the sample count badge)
+  const [showAcordSamples, setShowAcordSamples] = useState(false);
+  const [acordSampleList, setAcordSampleList] = useState<AcordSampleDisplay[]>([]);
+  const [acordSamplesLoading, setAcordSamplesLoading] = useState(false);
+  const [expandedSampleId, setExpandedSampleId] = useState<string | null>(null);
+
+  // Local Training tab — expanded item across all model lists (shared)
+  const [expandedLocalItemId, setExpandedLocalItemId] = useState<string | null>(null);
+  // Which non-ACORD model's feedback list is open (map modelId -> bool)
+  const [showModelFeedback, setShowModelFeedback] = useState<Record<string, boolean>>({});
+
   const refreshLocalAcordCount = async () => {
     try {
       const count = await getAcordTrainingCount();
@@ -85,6 +104,23 @@ export default function Training() {
         (f) => f.model_id === "acord_form_understanding" && !f.is_used_for_training
       ).length;
       setLocalAcordCount(count);
+    }
+  };
+
+  const handleToggleAcordSamples = async () => {
+    if (showAcordSamples) {
+      setShowAcordSamples(false);
+      return;
+    }
+    setShowAcordSamples(true);
+    setAcordSamplesLoading(true);
+    try {
+      const samples = await getAcordSamplesForDisplay();
+      setAcordSampleList(samples);
+    } catch {
+      setAcordSampleList([]);
+    } finally {
+      setAcordSamplesLoading(false);
     }
   };
 
@@ -501,27 +537,92 @@ export default function Training() {
                 <CardTitle>Recent Feedback ({feedback.length})</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="space-y-3">
-                  {feedback.slice(0, 10).map((fb: any) => (
-                    <div key={fb.id} className="flex items-start justify-between p-3 border rounded-lg">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1">
-                          <Badge variant="outline">{fb.model_id}</Badge>
-                          <Badge variant={fb.is_used_for_training ? "default" : "secondary"}>
-                            {fb.is_used_for_training ? "Used" : "Available"}
-                          </Badge>
-                          {fb.feedback_type === "correction" && <ThumbsUp className="h-3 w-3 text-green-500" />}
-                          {fb.feedback_type === "rating" && (
-                            <span className="text-xs text-muted-foreground">★ {fb.rating}/5</span>
-                          )}
-                        </div>
-                        <p className="text-sm text-muted-foreground truncate">{fb.prompt}</p>
+                <div className="space-y-2">
+                  {feedback.slice(0, 10).map((fb: any) => {
+                    const isExpanded = expandedFeedbackId === fb.id;
+                    const createdAt = new Date(fb.created_at);
+                    const dateStr = createdAt.toLocaleDateString(undefined, {
+                      year: "numeric", month: "short", day: "numeric",
+                    });
+                    const timeStr = createdAt.toLocaleTimeString(undefined, {
+                      hour: "2-digit", minute: "2-digit",
+                    });
+                    return (
+                      <div key={fb.id} className="border rounded-lg overflow-hidden">
+                        {/* Clickable header row */}
+                        <button
+                          className="w-full flex items-start justify-between p-3 hover:bg-muted/40 transition-colors text-left"
+                          onClick={() => setExpandedFeedbackId(isExpanded ? null : fb.id)}
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1 flex-wrap">
+                              <Badge variant="outline">{fb.model_id}</Badge>
+                              <Badge variant={fb.is_used_for_training ? "default" : "secondary"}>
+                                {fb.is_used_for_training ? "Used" : "Available"}
+                              </Badge>
+                              {fb.feedback_type === "correction" && (
+                                <ThumbsUp className="h-3 w-3 text-green-500" />
+                              )}
+                              {fb.feedback_type === "rating" && fb.rating > 0 && (
+                                <span className="text-xs text-muted-foreground">★ {fb.rating}/5</span>
+                              )}
+                            </div>
+                            <p className="text-sm text-muted-foreground truncate">{fb.prompt}</p>
+                          </div>
+                          <div className="flex items-center gap-2 ml-3 shrink-0">
+                            <div className="text-right">
+                              <p className="text-xs font-medium text-muted-foreground">{dateStr}</p>
+                              <p className="text-xs text-muted-foreground">{timeStr}</p>
+                            </div>
+                            {isExpanded ? (
+                              <ChevronUp className="h-4 w-4 text-muted-foreground" />
+                            ) : (
+                              <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                            )}
+                          </div>
+                        </button>
+
+                        {/* Expanded detail panel */}
+                        {isExpanded && (
+                          <div className="border-t bg-muted/20 px-4 py-3 space-y-3">
+                            <div>
+                              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">
+                                Prompt
+                              </p>
+                              <p className="text-sm whitespace-pre-wrap break-words">{fb.prompt}</p>
+                            </div>
+                            {fb.original_response && (
+                              <div>
+                                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">
+                                  Original Response
+                                </p>
+                                <p className="text-sm whitespace-pre-wrap break-words text-muted-foreground">
+                                  {fb.original_response}
+                                </p>
+                              </div>
+                            )}
+                            {fb.corrected_response && (
+                              <div>
+                                <p className="text-xs font-semibold text-green-600 uppercase tracking-wide mb-1">
+                                  Corrected Response
+                                </p>
+                                <p className="text-sm whitespace-pre-wrap break-words text-green-700 dark:text-green-400">
+                                  {fb.corrected_response}
+                                </p>
+                              </div>
+                            )}
+                            <div className="flex items-center gap-4 pt-1 border-t text-xs text-muted-foreground">
+                              <span>Type: <span className="font-medium capitalize">{fb.feedback_type ?? "—"}</span></span>
+                              {fb.rating > 0 && (
+                                <span>Rating: <span className="font-medium">{"★".repeat(fb.rating)}{"☆".repeat(5 - fb.rating)}</span></span>
+                              )}
+                              <span className="ml-auto">{dateStr} · {timeStr}</span>
+                            </div>
+                          </div>
+                        )}
                       </div>
-                      <span className="text-xs text-muted-foreground whitespace-nowrap ml-2">
-                        {new Date(fb.created_at).toLocaleDateString()}
-                      </span>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </CardContent>
             </Card>
@@ -549,58 +650,337 @@ export default function Training() {
 
                   // ACORD model — count read from Supabase via refreshLocalAcordCount
                   if (isAcord) {
-                    const canFinetune = !isFinetuning && localAcordCount > 0;
+                    const acordFormFeedback = [...feedback.filter((f: any) => f.model_id === modelId && !f.is_used_for_training)]
+                      .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+                    const totalAcordSamples = localAcordCount + acordFormFeedback.length;
+                    const canFinetune = !isFinetuning && totalAcordSamples > 0;
 
                     return (
-                      <div key={modelId} className="p-4 border rounded-lg space-y-3">
-                        <div className="flex items-center justify-between">
-                          <h4 className="font-medium">{modelName}</h4>
-                          <Badge variant="outline">{localAcordCount} samples</Badge>
-                        </div>
-                        <p className="text-sm text-muted-foreground">
-                          {localAcordCount > 0
-                            ? `${localAcordCount} sample${localAcordCount !== 1 ? "s" : ""} ready for training`
-                            : "No feedback samples yet — save a sample from the ACORD Parser"}
-                        </p>
-                        {finetuneStatus && (
-                          <p className="text-xs text-muted-foreground whitespace-pre-line">{finetuneStatus}</p>
-                        )}
-                        <Button
-                          size="sm"
-                          disabled={!canFinetune}
-                          onClick={handleRunpodFinetune}
-                        >
-                          {isFinetuning ? (
-                            <><Loader2 className="h-4 w-4 mr-1 animate-spin" />Starting…</>
-                          ) : (
-                            <><Play className="h-4 w-4 mr-1" />Fine-tune</>
+                      <div key={modelId} className="col-span-full space-y-2">
+                        <div className="p-4 border rounded-lg space-y-3">
+                          <div className="flex items-center justify-between">
+                            <h4 className="font-medium">{modelName}</h4>
+                            {totalAcordSamples > 0 ? (
+                              <button
+                                onClick={handleToggleAcordSamples}
+                                className="flex items-center gap-1 px-2.5 py-0.5 rounded-full border text-xs font-semibold hover:bg-muted transition-colors"
+                              >
+                                {totalAcordSamples} samples
+                                {showAcordSamples ? (
+                                  <ChevronUp className="h-3 w-3" />
+                                ) : (
+                                  <ChevronDown className="h-3 w-3" />
+                                )}
+                              </button>
+                            ) : (
+                              <Badge variant="outline">0 samples</Badge>
+                            )}
+                          </div>
+                          <p className="text-sm text-muted-foreground">
+                            {totalAcordSamples > 0
+                              ? `${totalAcordSamples} sample${totalAcordSamples !== 1 ? "s" : ""} ready for training`
+                              : "No feedback samples yet — save a sample from the ACORD Parser"}
+                          </p>
+                          {finetuneStatus && (
+                            <p className="text-xs text-muted-foreground whitespace-pre-line">{finetuneStatus}</p>
                           )}
-                        </Button>
+                          <Button
+                            size="sm"
+                            disabled={!canFinetune}
+                            onClick={handleRunpodFinetune}
+                          >
+                            {isFinetuning ? (
+                              <><Loader2 className="h-4 w-4 mr-1 animate-spin" />Starting…</>
+                            ) : (
+                              <><Play className="h-4 w-4 mr-1" />Fine-tune</>
+                            )}
+                          </Button>
+                        </div>
+
+                        {/* Expandable sample list — ACORD runs + form feedback, sorted latest first */}
+                        {showAcordSamples && (
+                          <div className="border rounded-lg overflow-hidden">
+                            <div className="px-4 py-2 bg-muted/50 border-b flex items-center justify-between">
+                              <span className="text-sm font-medium">Training Samples</span>
+                              <span className="text-xs text-muted-foreground">
+                                {acordSampleList.length} sample{acordSampleList.length !== 1 ? "s" : ""} · latest first
+                              </span>
+                            </div>
+                            {acordSamplesLoading ? (
+                              <div className="flex items-center justify-center py-6 gap-2 text-muted-foreground">
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                                <span className="text-sm">Loading samples…</span>
+                              </div>
+                            ) : acordSampleList.length === 0 ? (
+                              <div className="py-6 text-center text-sm text-muted-foreground">
+                                No samples found
+                              </div>
+                            ) : (
+                              <div className="divide-y">
+                                {acordSampleList.map((s, idx) => {
+                                  const date = new Date(s.created_at);
+                                  const dateStr = date.toLocaleDateString(undefined, {
+                                    year: "numeric", month: "short", day: "numeric",
+                                  });
+                                  const timeStr = date.toLocaleTimeString(undefined, {
+                                    hour: "2-digit", minute: "2-digit",
+                                  });
+                                  const isSampleExpanded = expandedSampleId === s.run_id;
+                                  return (
+                                    <div key={s.run_id} className="overflow-hidden">
+                                      {/* Clickable summary row */}
+                                      <button
+                                        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted/40 transition-colors text-left"
+                                        onClick={() => setExpandedSampleId(isSampleExpanded ? null : s.run_id)}
+                                      >
+                                        <span className="text-xs text-muted-foreground w-5 shrink-0">
+                                          {idx + 1}
+                                        </span>
+                                        <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
+                                        <div className="flex-1 min-w-0">
+                                          <p className="text-sm font-medium truncate">
+                                            {s.source_filename}
+                                          </p>
+                                          <p className="text-xs text-muted-foreground">
+                                            Form {s.form_type}
+                                          </p>
+                                        </div>
+                                        <div className="text-right shrink-0">
+                                          <p className="text-xs font-medium">{dateStr}</p>
+                                          <p className="text-xs text-muted-foreground">{timeStr}</p>
+                                        </div>
+                                        <Badge
+                                          variant={s.status === "needs_admin_review" ? "secondary" : "outline"}
+                                          className="text-xs shrink-0"
+                                        >
+                                          {s.status === "needs_admin_review" ? "review" : "ready"}
+                                        </Badge>
+                                        {isSampleExpanded ? (
+                                          <ChevronUp className="h-4 w-4 text-muted-foreground shrink-0" />
+                                        ) : (
+                                          <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />
+                                        )}
+                                      </button>
+
+                                      {/* Expanded detail panel */}
+                                      {isSampleExpanded && (
+                                        <div className="border-t bg-muted/20 px-5 py-4 space-y-4">
+                                          <div>
+                                            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">
+                                              Prompt / Raw Text
+                                            </p>
+                                            <p className="text-sm whitespace-pre-wrap break-words max-h-40 overflow-y-auto">
+                                              {s.prompt || "—"}
+                                            </p>
+                                          </div>
+                                          <div>
+                                            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">
+                                              Original Extracted JSON
+                                            </p>
+                                            <pre className="text-xs bg-muted rounded p-3 overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap break-words">
+                                              {s.original_response || "—"}
+                                            </pre>
+                                          </div>
+                                          {s.corrected_response && (
+                                            <div>
+                                              <p className="text-xs font-semibold text-green-600 uppercase tracking-wide mb-1">
+                                                Corrected JSON
+                                              </p>
+                                              <pre className="text-xs bg-green-50 dark:bg-green-950/30 text-green-800 dark:text-green-300 rounded p-3 overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap break-words">
+                                                {s.corrected_response}
+                                              </pre>
+                                            </div>
+                                          )}
+                                          <div className="flex items-center gap-3 pt-1 border-t text-xs text-muted-foreground">
+                                            <span>File: <span className="font-medium">{s.source_filename}</span></span>
+                                            <span>·</span>
+                                            <span>Form: <span className="font-medium">{s.form_type}</span></span>
+                                            <span className="ml-auto">{dateStr} · {timeStr}</span>
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Form-submitted feedback for ACORD — from training_feedback table */}
+                        {(() => {
+                          if (acordFormFeedback.length === 0) return null;
+                          return (
+                            <div className="border rounded-lg overflow-hidden">
+                              <div className="px-4 py-2 bg-muted/50 border-b flex items-center justify-between">
+                                <span className="text-sm font-medium">Form Feedback</span>
+                                <span className="text-xs text-muted-foreground">
+                                  {acordFormFeedback.length} item{acordFormFeedback.length !== 1 ? "s" : ""} · latest first
+                                </span>
+                              </div>
+                              <div className="divide-y">
+                                {acordFormFeedback.map((fb: any, idx: number) => {
+                                  const isItemExpanded = expandedLocalItemId === fb.id;
+                                  const date = new Date(fb.created_at);
+                                  const dateStr = date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+                                  const timeStr = date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+                                  return (
+                                    <div key={fb.id} className="overflow-hidden">
+                                      <button
+                                        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted/40 transition-colors text-left"
+                                        onClick={() => setExpandedLocalItemId(isItemExpanded ? null : fb.id)}
+                                      >
+                                        <span className="text-xs text-muted-foreground w-5 shrink-0">{idx + 1}</span>
+                                        <MessageSquare className="h-4 w-4 text-muted-foreground shrink-0" />
+                                        <div className="flex-1 min-w-0">
+                                          <p className="text-sm font-medium truncate">{fb.prompt}</p>
+                                          <p className="text-xs text-muted-foreground capitalize">{fb.feedback_type || "feedback"}</p>
+                                        </div>
+                                        <div className="text-right shrink-0">
+                                          <p className="text-xs font-medium">{dateStr}</p>
+                                          <p className="text-xs text-muted-foreground">{timeStr}</p>
+                                        </div>
+                                        <Badge variant="outline" className="text-xs shrink-0">ready</Badge>
+                                        {isItemExpanded ? <ChevronUp className="h-4 w-4 text-muted-foreground shrink-0" /> : <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />}
+                                      </button>
+                                      {isItemExpanded && (
+                                        <div className="border-t bg-muted/20 px-5 py-4 space-y-4">
+                                          <div>
+                                            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">Prompt</p>
+                                            <p className="text-sm whitespace-pre-wrap break-words max-h-40 overflow-y-auto">{fb.prompt || "—"}</p>
+                                          </div>
+                                          {fb.original_response && (
+                                            <div>
+                                              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">Original Response</p>
+                                              <p className="text-sm whitespace-pre-wrap break-words text-muted-foreground max-h-40 overflow-y-auto">{fb.original_response}</p>
+                                            </div>
+                                          )}
+                                          {fb.corrected_response && (
+                                            <div>
+                                              <p className="text-xs font-semibold text-green-600 uppercase tracking-wide mb-1">Corrected Response</p>
+                                              <p className="text-sm whitespace-pre-wrap break-words text-green-700 dark:text-green-400 max-h-40 overflow-y-auto">{fb.corrected_response}</p>
+                                            </div>
+                                          )}
+                                          <div className="flex items-center gap-4 pt-1 border-t text-xs text-muted-foreground">
+                                            <span>Type: <span className="font-medium capitalize">{fb.feedback_type || "feedback"}</span></span>
+                                            {fb.rating > 0 && <span>Rating: <span className="font-medium">{"★".repeat(fb.rating)}{"☆".repeat(5 - fb.rating)}</span></span>}
+                                            <span className="ml-auto">{dateStr} · {timeStr}</span>
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
                     );
                   }
 
-                  // All other models — local feedback
-                  const modelFeedback = feedback.filter((f: any) => f.model_id === modelId && !f.is_used_for_training);
+                  // All other models — local feedback from training_feedback table
+                  const modelFeedback = [...feedback.filter((f: any) => f.model_id === modelId && !f.is_used_for_training)]
+                    .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+                  const isShowingFeedback = showModelFeedback[modelId] ?? false;
+
                   return (
-                    <div key={modelId} className="p-4 border rounded-lg space-y-3">
-                      <div className="flex items-center justify-between">
-                        <h4 className="font-medium">{modelName}</h4>
-                        <Badge variant="outline">{modelFeedback.length} samples</Badge>
+                    <div key={modelId} className="col-span-full space-y-2">
+                      <div className="p-4 border rounded-lg space-y-3">
+                        <div className="flex items-center justify-between">
+                          <h4 className="font-medium">{modelName}</h4>
+                          {modelFeedback.length > 0 ? (
+                            <button
+                              onClick={() => setShowModelFeedback(prev => ({ ...prev, [modelId]: !isShowingFeedback }))}
+                              className="flex items-center gap-1 px-2.5 py-0.5 rounded-full border text-xs font-semibold hover:bg-muted transition-colors"
+                            >
+                              {modelFeedback.length} samples
+                              {isShowingFeedback ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                            </button>
+                          ) : (
+                            <Badge variant="outline">0 samples</Badge>
+                          )}
+                        </div>
+                        <p className="text-sm text-muted-foreground">
+                          {modelFeedback.length >= 1
+                            ? `${modelFeedback.length} sample${modelFeedback.length > 1 ? "s" : ""} ready for training`
+                            : "No feedback samples yet"}
+                        </p>
+                        <Button
+                          size="sm"
+                          disabled={modelFeedback.length < 1}
+                          onClick={() => handleStartTraining(modelId, "fine-tune")}
+                        >
+                          <Play className="h-4 w-4 mr-1" />
+                          Fine-tune
+                        </Button>
                       </div>
-                      <p className="text-sm text-muted-foreground">
-                        {modelFeedback.length >= 1
-                          ? `${modelFeedback.length} sample${modelFeedback.length > 1 ? "s" : ""} ready for training`
-                          : "No feedback samples yet"}
-                      </p>
-                      <Button
-                        size="sm"
-                        disabled={modelFeedback.length < 1}
-                        onClick={() => handleStartTraining(modelId, "fine-tune")}
-                      >
-                        <Play className="h-4 w-4 mr-1" />
-                        Fine-tune
-                      </Button>
+
+                      {/* Expandable feedback list */}
+                      {isShowingFeedback && modelFeedback.length > 0 && (
+                        <div className="border rounded-lg overflow-hidden">
+                          <div className="px-4 py-2 bg-muted/50 border-b flex items-center justify-between">
+                            <span className="text-sm font-medium">Training Samples</span>
+                            <span className="text-xs text-muted-foreground">
+                              {modelFeedback.length} sample{modelFeedback.length !== 1 ? "s" : ""} · latest first
+                            </span>
+                          </div>
+                          <div className="divide-y">
+                            {modelFeedback.map((fb: any, idx: number) => {
+                              const isItemExpanded = expandedLocalItemId === fb.id;
+                              const date = new Date(fb.created_at);
+                              const dateStr = date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+                              const timeStr = date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+                              return (
+                                <div key={fb.id} className="overflow-hidden">
+                                  <button
+                                    className="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted/40 transition-colors text-left"
+                                    onClick={() => setExpandedLocalItemId(isItemExpanded ? null : fb.id)}
+                                  >
+                                    <span className="text-xs text-muted-foreground w-5 shrink-0">{idx + 1}</span>
+                                    <MessageSquare className="h-4 w-4 text-muted-foreground shrink-0" />
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-sm font-medium truncate">{fb.prompt}</p>
+                                      <p className="text-xs text-muted-foreground capitalize">{fb.feedback_type || "feedback"}</p>
+                                    </div>
+                                    <div className="text-right shrink-0">
+                                      <p className="text-xs font-medium">{dateStr}</p>
+                                      <p className="text-xs text-muted-foreground">{timeStr}</p>
+                                    </div>
+                                    <Badge variant="outline" className="text-xs shrink-0">ready</Badge>
+                                    {isItemExpanded ? <ChevronUp className="h-4 w-4 text-muted-foreground shrink-0" /> : <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />}
+                                  </button>
+                                  {isItemExpanded && (
+                                    <div className="border-t bg-muted/20 px-5 py-4 space-y-4">
+                                      <div>
+                                        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">Prompt</p>
+                                        <p className="text-sm whitespace-pre-wrap break-words max-h-40 overflow-y-auto">{fb.prompt || "—"}</p>
+                                      </div>
+                                      {fb.original_response && (
+                                        <div>
+                                          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">Original Response</p>
+                                          <p className="text-sm whitespace-pre-wrap break-words text-muted-foreground max-h-40 overflow-y-auto">{fb.original_response}</p>
+                                        </div>
+                                      )}
+                                      {fb.corrected_response && (
+                                        <div>
+                                          <p className="text-xs font-semibold text-green-600 uppercase tracking-wide mb-1">Corrected Response</p>
+                                          <p className="text-sm whitespace-pre-wrap break-words text-green-700 dark:text-green-400 max-h-40 overflow-y-auto">{fb.corrected_response}</p>
+                                        </div>
+                                      )}
+                                      <div className="flex items-center gap-4 pt-1 border-t text-xs text-muted-foreground">
+                                        <span>Type: <span className="font-medium capitalize">{fb.feedback_type || "feedback"}</span></span>
+                                        {fb.rating > 0 && <span>Rating: <span className="font-medium">{"★".repeat(fb.rating)}{"☆".repeat(5 - fb.rating)}</span></span>}
+                                        <span className="ml-auto">{dateStr} · {timeStr}</span>
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })}

@@ -236,8 +236,9 @@ export default function MyModels() {
       </div>
 
       <div className="relative z-10 space-y-8 animate-fade-in">
-        {/* Model update banner — only visible in Electron when an update is available */}
+        {/* Model update banners — only visible in Electron when an update is available */}
         <ModelUpdateBanner domain="broker" />
+        <ModelUpdateBanner domain="federated" />
 
         {/* Hero Header */}
         <div className="relative rounded-2xl bg-gradient-hero p-8 border border-border/50 backdrop-blur-sm shadow-premium">

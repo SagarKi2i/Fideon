@@ -57,6 +57,7 @@ rapidfuzz
 
 # --- Vector/RAG ---
 psycopg[binary]>=3.1.0
+pgvector>=0.2.0
 
 # --- Fine-tuning pipeline ---
 torch>=2.0.0

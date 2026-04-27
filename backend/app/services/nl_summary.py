@@ -1,0 +1,113 @@
+"""
+Natural language summary generation for ACORD extraction results.
+
+Enabled via ACORD_NL_SUMMARY_ENABLED=true.
+Uses whichever LLM endpoint is configured (OFFLINE_LLM_GENERATE_URL → chat endpoint fallback).
+All failures are silently swallowed — the summary is always optional.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+from typing import Any, Optional
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+_PROMPT_TEMPLATE = """\
+You are an insurance document analyst. Given the extracted structured fields from an ACORD insurance certificate, write a clear, natural language summary of the document.
+
+Rules:
+- Write in flowing paragraphs (no bullet points, no headings, no JSON, no markdown)
+- Mention the insured, the insurer, the policy period, and all coverage types with their limits
+- Mention the certificate holder and any special provisions (additional insured, waiver of subrogation, cancellation notice)
+- Use plain English dollar amounts (e.g. "one million dollars" or "$1,000,000")
+- If a value is missing or empty, skip that detail — do not say "not provided"
+- Do NOT reproduce the raw OCR text verbatim
+- Length: 3–7 paragraphs
+
+EXTRACTED FIELDS (JSON):
+{fields_json}
+
+RAW TEXT (for context only):
+{raw_text}
+
+Write the natural language summary now:"""
+
+
+async def generate_nl_summary(extracted: dict[str, Any], raw_text: str) -> Optional[str]:
+    """
+    Returns a natural language narrative of the ACORD document, or None when:
+    - ACORD_NL_SUMMARY_ENABLED is not set to true
+    - No LLM endpoint is configured
+    - The LLM call fails for any reason
+    """
+    enabled = os.getenv("ACORD_NL_SUMMARY_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return None
+
+    fields_json = json.dumps(extracted, indent=2, ensure_ascii=False)[:6000]
+    raw_snippet = (raw_text or "")[:3000]
+    prompt = _PROMPT_TEMPLATE.format(fields_json=fields_json, raw_text=raw_snippet)
+
+    offline_url = (os.getenv("OFFLINE_LLM_GENERATE_URL") or os.getenv("RUNPOD_GENERATE_URL") or "").strip()
+    chat_url = (os.getenv("RUNPOD_OPENAI_COMPAT_URL") or os.getenv("OPENAI_CHAT_COMPLETIONS_URL") or "").strip()
+    token = (os.getenv("OFFLINE_LLM_AUTH_TOKEN") or os.getenv("OPENAI_API_KEY") or "").strip()
+    model = (os.getenv("OFFLINE_LLM_MODEL_NAME") or os.getenv("OPENAI_MODEL") or "").strip()
+
+    if not offline_url and not chat_url:
+        return None
+
+    headers = {"Content-Type": "application/json"}
+    if token:
+        tok = token[7:].strip() if token.lower().startswith("bearer ") else token
+        headers["Authorization"] = f"Bearer {tok}"
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            if offline_url:
+                resp = await client.post(
+                    offline_url,
+                    headers=headers,
+                    json={
+                        "prompt": prompt,
+                        "model": model or "default",
+                        "max_new_tokens": 1024,
+                        "temperature": 0.3,
+                        "raw": True,
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                text = (
+                    data.get("text")
+                    or data.get("generated_text")
+                    or data.get("response")
+                    or ""
+                )
+            else:
+                resp = await client.post(
+                    chat_url,
+                    headers=headers,
+                    json={
+                        "model": model or "default",
+                        "messages": [
+                            {"role": "system", "content": "You are an insurance document analyst."},
+                            {"role": "user", "content": prompt},
+                        ],
+                        "max_tokens": 1024,
+                        "temperature": 0.3,
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+        summary = (text or "").strip()
+        return summary if len(summary) > 50 else None
+
+    except Exception as exc:
+        logger.warning("ACORD[nl_summary] generation failed (non-fatal): %s", exc)
+        return None
