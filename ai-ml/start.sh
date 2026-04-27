@@ -1,6 +1,6 @@
 #!/bin/bash
 # start.sh — start the Fideon PDF upload server on the RunPod pod.
-# Place this file at /workspace/runpod/start.sh on the pod.
+# Place this file at /workspace/ai-ml/start.sh on the pod.
 # Called automatically by Dockerfile CMD, or manually via SSH.
 
 set -e
@@ -14,7 +14,7 @@ echo "[start.sh] Starting Fideon RunPod Upload Server on port $PORT"
 
 cd /workspace
 
-exec python -m uvicorn runpod.server:app \
+exec python -m uvicorn ai-ml.server:app \
     --host 0.0.0.0 \
     --port "$PORT" \
     --log-level info
