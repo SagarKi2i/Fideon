@@ -12,9 +12,9 @@ mkdir -p "$UPLOAD_DIR"
 echo "[start.sh] Upload dir: $UPLOAD_DIR"
 echo "[start.sh] Starting Fideon RunPod Upload Server on port $PORT"
 
-cd /workspace
+cd /workspace/ai-ml
 
-exec python -m uvicorn ai-ml.server:app \
+exec python -m uvicorn server:app \
     --host 0.0.0.0 \
     --port "$PORT" \
     --log-level info

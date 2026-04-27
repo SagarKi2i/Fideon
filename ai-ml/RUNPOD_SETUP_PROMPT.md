@@ -91,7 +91,7 @@ ssh root@<ssh-host> -p <ssh-port> "pip install -r /workspace/ai-ml/requirements.
 
 ```bash
 ssh root@<ssh-host> -p <ssh-port> \
-  "cd /workspace && nohup python -m uvicorn runpod.server:app \
+  "cd /workspace/ai-ml && nohup python -m uvicorn server:app \
     --host 0.0.0.0 --port 8080 --log-level info \
     > /workspace/server.log 2>&1 &"
 ```
@@ -135,8 +135,8 @@ Create `/workspace/start_backend.sh` on the pod:
 ```bash
 #!/bin/bash
 mkdir -p /workspace/uploads
-cd /workspace
-nohup python -m uvicorn runpod.server:app \
+cd /workspace/ai-ml
+nohup python -m uvicorn server:app \
   --host 0.0.0.0 --port 8080 --log-level info \
   > /workspace/server.log 2>&1 &
 ```

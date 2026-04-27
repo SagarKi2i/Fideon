@@ -52,7 +52,10 @@ async def generate_nl_summary(extracted: dict[str, Any], raw_text: str) -> Optio
     raw_snippet = (raw_text or "")[:3000]
     prompt = _PROMPT_TEMPLATE.format(fields_json=fields_json, raw_text=raw_snippet)
 
-    offline_url = (os.getenv("OFFLINE_LLM_GENERATE_URL") or os.getenv("RUNPOD_GENERATE_URL") or "").strip()
+    # Prefer the external RunPod generate URL; fall back to the local offline URL.
+    # OFFLINE_LLM_GENERATE_URL is often set to localhost (co-located vLLM) which is
+    # unreachable when the LLM is running on a remote RunPod pod.
+    offline_url = (os.getenv("RUNPOD_GENERATE_URL") or os.getenv("OFFLINE_LLM_GENERATE_URL") or "").strip()
     chat_url = (os.getenv("RUNPOD_OPENAI_COMPAT_URL") or os.getenv("OPENAI_CHAT_COMPLETIONS_URL") or "").strip()
     token = (os.getenv("OFFLINE_LLM_AUTH_TOKEN") or os.getenv("OPENAI_API_KEY") or "").strip()
     model = (os.getenv("OFFLINE_LLM_MODEL_NAME") or os.getenv("OPENAI_MODEL") or "").strip()
