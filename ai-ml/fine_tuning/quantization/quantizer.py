@@ -53,7 +53,7 @@ def run_quantization(
     """
     if not tools_available():
         print("[quantizer] llama-convert-hf-to-gguf or llama-quantize not found — skipping.")
-        print("[quantizer] To enable: bash /workspace/Quantization/setup.sh")
+        print("[quantizer] To enable: bash /workspace/ai-ml/setup.sh --skip-pip")
         return {}
 
     # Free GPU VRAM left over from the merge step before running llama-quantize

@@ -23,10 +23,36 @@ from fastapi import APIRouter, Body, File, Header, HTTPException, UploadFile
 
 from app.core.config import RUNPOD_UPLOAD_BASE_URL
 from app.core.supabase import verify_user
+from app.services.nl_summary import generate_nl_summary
 from app.services.runpod_orchestrator import ensure_runpod_ml_ready
+from Models.acord_form_understanding.extraction_pipeline import openai_compat_extract_structured
+from Models.acord_form_understanding.uir import TextBlock, UnifiedIntermediateRepresentation
 
 log = structlog.get_logger("pdf_upload")
 router = APIRouter()
+
+
+async def _llm_extract_from_raw_text(
+    raw_text: str,
+    form_type_hint: str = "25",
+) -> Dict[str, Any]:
+    """
+    Runs the same LLM extraction pipeline used by the ACORD route on raw text.
+    Builds a minimal UIR from the full text and calls openai_compat_extract_structured.
+    Returns an empty dict silently if the LLM is not configured or fails.
+    """
+    if not (raw_text or "").strip():
+        return {}
+    try:
+        uir = UnifiedIntermediateRepresentation(
+            text_blocks=[TextBlock(text=raw_text, page=1, bbox=None, source="txt")],
+            layout={"extraction_engine": "txt"},
+        )
+        result = await openai_compat_extract_structured(uir, form_type_hint=form_type_hint)
+        return result or {}
+    except Exception as exc:
+        log.warning("llm_extract_from_raw_text.failed", reason=str(exc))
+        return {}
 
 _ALLOWED_EXTENSIONS = {".pdf", ".docx"}
 
@@ -132,7 +158,7 @@ async def smart_extract_pdf(
         form_type=form_type,
     )
 
-    # All PDFs now use RunPod extraction path.
+    # All PDFs use RunPod extraction path.
     log.info("smart_extract.uploading_to_runpod", filename=filename, pdf_type=pdf_type)
     result = await _runpod_post(
         "/upload",
@@ -253,6 +279,27 @@ async def extract_acord_from_upload(
         form_type=result.get("form_type_detected"),
         pdf_type=result.get("pdf_type"),
     )
+    raw_text = result.get("full_text") or result.get("raw_text") or ""
+    runpod_fields = result.get("extracted_json") or result.get("fields") or {}
+
+    # Re-run LLM extraction on the backend using the full raw text returned by RunPod.
+    # This ensures all fields present in the raw text are captured even if RunPod's
+    # internal extraction missed them (e.g. truncated context, partial model output).
+    llm_fields = await _llm_extract_from_raw_text(raw_text, form_type_hint=form_type)
+    if llm_fields:
+        # RunPod values win over LLM when both exist and RunPod value is non-null.
+        for k, v in runpod_fields.items():
+            if k not in llm_fields or llm_fields[k] is None:
+                llm_fields[k] = v
+        result["extracted_json"] = llm_fields
+        log.info("acord_extract.llm_supplement_done", upload_id=upload_id, field_count=len(llm_fields))
+    else:
+        result["extracted_json"] = runpod_fields
+        log.info("acord_extract.llm_supplement_skipped", upload_id=upload_id)
+
+    nl_summary = await generate_nl_summary(result["extracted_json"], raw_text)
+    if nl_summary:
+        result["natural_language_summary"] = nl_summary
     return result
 
 

@@ -621,6 +621,7 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
         const rawText = extractionState.result.raw_text || extractionState.result.full_text || "";
         const formTypeDetected = extractionState.result.form_type_detected || "";
         const pdfType = extractionState.result.pdf_type || "";
+        const nlSummary = extractionState.result.natural_language_summary || null;
         return (
           <Card className="bg-card border-border animate-fade-in">
             <CardHeader className="bg-gradient-to-r from-violet-600/10 to-transparent">
@@ -645,6 +646,35 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
               </CardTitle>
             </CardHeader>
             <CardContent className="pt-4 space-y-4">
+              {/* Natural Language Summary — always visible; content depends on SLM availability */}
+              <div className={`rounded-lg border p-4 space-y-2 ${nlSummary ? "border-violet-500/30 bg-violet-500/5" : "border-border/60 bg-muted/30"}`}>
+                <div className="flex items-center gap-2 mb-1">
+                  <FileText className={`h-4 w-4 shrink-0 ${nlSummary ? "text-violet-400" : "text-muted-foreground"}`} />
+                  <span className={`text-sm font-semibold ${nlSummary ? "text-violet-300" : "text-foreground"}`}>
+                    Document Summary
+                  </span>
+                  <Badge
+                    variant="outline"
+                    className={`ml-auto text-[10px] ${nlSummary ? "border-violet-500/50 text-violet-400" : "border-border text-muted-foreground"}`}
+                  >
+                    {nlSummary ? "AI Generated" : "SLM Unavailable"}
+                  </Badge>
+                </div>
+                {nlSummary ? (
+                  <p className="text-sm text-foreground/90 leading-relaxed whitespace-pre-line">
+                    {nlSummary}
+                  </p>
+                ) : (
+                  <div className="space-y-1.5">
+                    <p className="text-sm text-muted-foreground leading-relaxed">
+                      A natural language narrative of this document is currently unavailable. The language model (SLM) is not active or the RunPod endpoint is unreachable.
+                    </p>
+                    <p className="text-xs text-muted-foreground/70">
+                      To enable: set <code className="bg-muted px-1 py-0.5 rounded text-xs">ACORD_NL_SUMMARY_ENABLED=true</code> in the backend environment and ensure the RunPod inference endpoint is running.
+                    </p>
+                  </div>
+                )}
+              </div>
               <Tabs value={ocrTab} onValueChange={(v) => setOcrTab(v as "fields" | "rawtext")}>
                 <TabsList>
                   <TabsTrigger value="fields">
@@ -722,31 +752,13 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
                 </TabsContent>
               </Tabs>
 
-              <div className="flex items-center justify-between pt-3 border-t border-border/50 gap-3 flex-wrap">
+              <div className="flex items-center justify-start pt-3 border-t border-border/50">
                 <Button
                   variant="outline"
                   className="shrink-0 text-muted-foreground"
                   onClick={() => toast({ title: "Send to Review", description: "Review workflow coming soon." })}
                 >
                   Send to Review
-                </Button>
-                <Button
-                  onClick={async () => {
-                    if (ocrTab !== "markdown") {
-                      setOcrTab("markdown");
-                    } else {
-                      await handleSubmitAndTrain();
-                      setTimeout(() => setTrainSubmittedRunpod(false), 2000);
-                    }
-                  }}
-                  disabled={isSubmittingTrain}
-                  className="shrink-0 border-green-600 text-green-400 hover:bg-green-600/10 bg-transparent border"
-                >
-                  {isSubmittingTrain ? (
-                    <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Saving…</>
-                  ) : (
-                    <><FileCheck className="h-4 w-4 mr-2" />Edit &amp; Train</>
-                  )}
                 </Button>
               </div>
             </CardContent>

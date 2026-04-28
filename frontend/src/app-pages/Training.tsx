@@ -25,6 +25,9 @@ import {
   Shield,
   Users,
   BarChart3,
+  ChevronDown,
+  ChevronUp,
+  FileText,
 } from "lucide-react";
 import { isElectron } from "@/lib/ollama";
 import { getStoredDeviceToken } from "@/lib/deviceApi";
@@ -51,7 +54,9 @@ import { syncFeedbacksToRunpod, startRunpodFinetune, getRunpodJobStatus } from "
 import {
   getAcordTrainingCount,
   getAcordTrainingSamples,
+  getAcordSamplesForDisplay,
   markAcordSamplesUsed,
+  type AcordSampleDisplay,
 } from "@/lib/acordSupabaseApi";
 
 export default function Training() {
@@ -75,6 +80,26 @@ export default function Training() {
   // ACORD training sample count — read from Supabase (status='submitted' runs)
   const [localAcordCount, setLocalAcordCount] = useState<number>(0);
 
+  // Expanded feedback item (click to view full details) — Recent Feedback tab
+  const [expandedFeedbackId, setExpandedFeedbackId] = useState<string | null>(null);
+
+  // ACORD sample list (shown when user clicks the sample count badge)
+  const [showAcordSamples, setShowAcordSamples] = useState(false);
+  const [acordSampleList, setAcordSampleList] = useState<AcordSampleDisplay[]>([]);
+  const [acordSamplesLoading, setAcordSamplesLoading] = useState(false);
+  const [expandedSampleId, setExpandedSampleId] = useState<string | null>(null);
+
+  // Local Training tab — expanded item across all model lists (shared)
+  const [expandedLocalItemId, setExpandedLocalItemId] = useState<string | null>(null);
+  // Which non-ACORD model's feedback list is open (map modelId -> bool)
+  const [showModelFeedback, setShowModelFeedback] = useState<Record<string, boolean>>({});
+
+  // Live RunPod job polling
+  const [activeRunpodJobId, setActiveRunpodJobId] = useState<string | null>(null);
+  const [runpodJobStatus, setRunpodJobStatus] = useState<{
+    status: string; phase?: string; version?: number; error?: string; eval_scores?: Record<string, any>;
+  } | null>(null);
+
   const refreshLocalAcordCount = async () => {
     try {
       const count = await getAcordTrainingCount();
@@ -85,6 +110,23 @@ export default function Training() {
         (f) => f.model_id === "acord_form_understanding" && !f.is_used_for_training
       ).length;
       setLocalAcordCount(count);
+    }
+  };
+
+  const handleToggleAcordSamples = async () => {
+    if (showAcordSamples) {
+      setShowAcordSamples(false);
+      return;
+    }
+    setShowAcordSamples(true);
+    setAcordSamplesLoading(true);
+    try {
+      const samples = await getAcordSamplesForDisplay();
+      setAcordSampleList(samples);
+    } catch {
+      setAcordSampleList([]);
+    } finally {
+      setAcordSamplesLoading(false);
     }
   };
 
@@ -101,12 +143,16 @@ export default function Training() {
       const user = session?.user;
       if (!user) { navigate("/auth"); return; }
 
-      const modelsRes = await fetch(apiUrl("/api/v1/activated-models"), {
-        headers: { Authorization: `Bearer ${session.access_token}` },
-      });
-      if (modelsRes.ok) {
-        const modelsPayload = await modelsRes.json();
-        setActivatedModels(modelsPayload.activated_models ?? []);
+      try {
+        const modelsRes = await fetch(apiUrl("/api/v1/activated-models"), {
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        });
+        if (modelsRes.ok) {
+          const modelsPayload = await modelsRes.json();
+          setActivatedModels(modelsPayload.activated_models ?? []);
+        }
+      } catch {
+        // Backend unreachable — continue with empty model list
       }
 
       const electron = await isElectron();
@@ -117,9 +163,75 @@ export default function Training() {
       setWebMode(!electron || !connected);
       await refreshLocalAcordCount();
       loadData();
+      // Restore live polling for any job still marked running
+      const savedJobs = getLocalJobs();
+      const runningJob = savedJobs.find((j: any) => j.status === "running" && (j.config as any)?.runpod_job_id);
+      if (runningJob) setActiveRunpodJobId((runningJob.config as any).runpod_job_id);
     };
     init();
   }, []);
+
+  // Poll RunPod job every 5 s while a job is active
+  useEffect(() => {
+    if (!activeRunpodJobId) return;
+    let alive = true;
+    let failCount = 0;
+    const MAX_FAILURES = 3;
+    const jobIdSnapshot = activeRunpodJobId;
+    const poll = async () => {
+      try {
+        const rpStatus = await getRunpodJobStatus(jobIdSnapshot);
+        if (!alive) return;
+        failCount = 0;
+        setRunpodJobStatus(rpStatus);
+        const terminal = ["completed", "failed", "gate_failed"].includes(rpStatus.status);
+        if (terminal) {
+          // Persist final status into localStorage
+          const allJobs = getLocalJobs();
+          const updated = allJobs.map((j: any) =>
+            (j.config as any)?.runpod_job_id === jobIdSnapshot
+              ? {
+                  ...j,
+                  status: rpStatus.status === "completed" ? "completed" : "failed",
+                  completed_at: new Date().toISOString(),
+                  metrics: rpStatus.eval_scores
+                    ? { ...rpStatus.eval_scores, version: rpStatus.version }
+                    : { version: rpStatus.version },
+                  error_message: rpStatus.error ?? null,
+                }
+              : j
+          );
+          localStorage.setItem("local_training_jobs", JSON.stringify(updated));
+          setActiveRunpodJobId(null);
+          loadData();
+        }
+      } catch {
+        if (!alive) return;
+        failCount++;
+        if (failCount >= MAX_FAILURES) {
+          // RunPod unreachable after 3 attempts — stop spinner, mark job as failed
+          const allJobs = getLocalJobs();
+          const updated = allJobs.map((j: any) =>
+            (j.config as any)?.runpod_job_id === jobIdSnapshot
+              ? {
+                  ...j,
+                  status: "failed",
+                  error_message: "RunPod unreachable",
+                  completed_at: new Date().toISOString(),
+                }
+              : j
+          );
+          localStorage.setItem("local_training_jobs", JSON.stringify(updated));
+          setActiveRunpodJobId(null);
+          setRunpodJobStatus(null);
+          loadData();
+        }
+      }
+    };
+    poll();
+    const interval = window.setInterval(poll, 5000);
+    return () => { alive = false; clearInterval(interval); };
+  }, [activeRunpodJobId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadData = async () => {
     setLoading(true);
@@ -244,10 +356,14 @@ export default function Training() {
 
       // Step 5: Record training job locally for history polling
       const runpodJobId = (result as any).job_id ?? null;
+      if (runpodJobId) {
+        setActiveRunpodJobId(runpodJobId);
+        setRunpodJobStatus({ status: "running", phase: "starting" });
+      }
       await createTrainingJob({
         model_id: "acord_form_understanding",
         training_type: "fine-tune",
-        config: { runpod_job_id: runpodJobId },
+        config: { runpod_job_id: runpodJobId, sample_count: samples.length },
       }).catch(() => {});
 
       loadData();
@@ -337,6 +453,35 @@ export default function Training() {
     return "outline";
   };
 
+  // ── Pipeline helpers ─────────────────────────────────────────────────────────
+  const getPhaseLabel = (phase: string | undefined): string => {
+    switch (phase) {
+      case "starting":            return "Initialising job…";
+      case "loading_config":      return "Loading configuration…";
+      case "building_dataset":    return "Building training dataset…";
+      case "resolving_base_model":return "Loading base model weights…";
+      case "pending_registered":  return "Registering pending version…";
+      case "training":            return "Training on GPU…";
+      case "evaluating":          return "Evaluating model quality…";
+      case "gate_checked":        return "Quality gate passed ✓";
+      case "merging":             return "Merging LoRA adapter…";
+      case "promoting":           return "Uploading to SeaweedFS & registering…";
+      case "done":                return "Complete — model registered";
+      default:                    return phase ? `${phase}…` : "Processing…";
+    }
+  };
+
+  // 0=idle 1=local-training 2=uploading 3=aggregating 4=done
+  const getPipelineStep = (phase: string | undefined, status: string): number => {
+    if (status === "completed") return 4;
+    if (!phase) return 0;
+    if (["promoting"].includes(phase)) return 3;
+    if (["merging"].includes(phase)) return 2;
+    if (["starting", "loading_config", "building_dataset", "resolving_base_model",
+         "pending_registered", "training", "evaluating", "gate_checked"].includes(phase)) return 1;
+    return 0;
+  };
+
   if (!isElectronApp && !webMode) {
     return null;
   }
@@ -357,6 +502,12 @@ export default function Training() {
 
   // Note: no early return for activatedModels.length === 0 —
   // the ACORD RunPod fine-tuning card must always be visible.
+
+  // Derived pipeline state — placed after early returns so TS sees them as read
+  const pipelineStep = getPipelineStep(runpodJobStatus?.phase, runpodJobStatus?.status ?? "");
+  const isJobRunning = !!activeRunpodJobId || runpodJobStatus?.status === "running";
+  const isJobDone = runpodJobStatus?.status === "completed";
+  const isJobFailed = runpodJobStatus?.status === "failed" || runpodJobStatus?.status === "gate_failed";
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
@@ -501,27 +652,92 @@ export default function Training() {
                 <CardTitle>Recent Feedback ({feedback.length})</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="space-y-3">
-                  {feedback.slice(0, 10).map((fb: any) => (
-                    <div key={fb.id} className="flex items-start justify-between p-3 border rounded-lg">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1">
-                          <Badge variant="outline">{fb.model_id}</Badge>
-                          <Badge variant={fb.is_used_for_training ? "default" : "secondary"}>
-                            {fb.is_used_for_training ? "Used" : "Available"}
-                          </Badge>
-                          {fb.feedback_type === "correction" && <ThumbsUp className="h-3 w-3 text-green-500" />}
-                          {fb.feedback_type === "rating" && (
-                            <span className="text-xs text-muted-foreground">★ {fb.rating}/5</span>
-                          )}
-                        </div>
-                        <p className="text-sm text-muted-foreground truncate">{fb.prompt}</p>
+                <div className="space-y-2">
+                  {feedback.slice(0, 10).map((fb: any) => {
+                    const isExpanded = expandedFeedbackId === fb.id;
+                    const createdAt = new Date(fb.created_at);
+                    const dateStr = createdAt.toLocaleDateString(undefined, {
+                      year: "numeric", month: "short", day: "numeric",
+                    });
+                    const timeStr = createdAt.toLocaleTimeString(undefined, {
+                      hour: "2-digit", minute: "2-digit",
+                    });
+                    return (
+                      <div key={fb.id} className="border rounded-lg overflow-hidden">
+                        {/* Clickable header row */}
+                        <button
+                          className="w-full flex items-start justify-between p-3 hover:bg-muted/40 transition-colors text-left"
+                          onClick={() => setExpandedFeedbackId(isExpanded ? null : fb.id)}
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1 flex-wrap">
+                              <Badge variant="outline">{fb.model_id}</Badge>
+                              <Badge variant={fb.is_used_for_training ? "default" : "secondary"}>
+                                {fb.is_used_for_training ? "Used" : "Available"}
+                              </Badge>
+                              {fb.feedback_type === "correction" && (
+                                <ThumbsUp className="h-3 w-3 text-green-500" />
+                              )}
+                              {fb.feedback_type === "rating" && fb.rating > 0 && (
+                                <span className="text-xs text-muted-foreground">★ {fb.rating}/5</span>
+                              )}
+                            </div>
+                            <p className="text-sm text-muted-foreground truncate">{fb.prompt}</p>
+                          </div>
+                          <div className="flex items-center gap-2 ml-3 shrink-0">
+                            <div className="text-right">
+                              <p className="text-xs font-medium text-muted-foreground">{dateStr}</p>
+                              <p className="text-xs text-muted-foreground">{timeStr}</p>
+                            </div>
+                            {isExpanded ? (
+                              <ChevronUp className="h-4 w-4 text-muted-foreground" />
+                            ) : (
+                              <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                            )}
+                          </div>
+                        </button>
+
+                        {/* Expanded detail panel */}
+                        {isExpanded && (
+                          <div className="border-t bg-muted/20 px-4 py-3 space-y-3">
+                            <div>
+                              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">
+                                Prompt
+                              </p>
+                              <p className="text-sm whitespace-pre-wrap break-words">{fb.prompt}</p>
+                            </div>
+                            {fb.original_response && (
+                              <div>
+                                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">
+                                  Original Response
+                                </p>
+                                <p className="text-sm whitespace-pre-wrap break-words text-muted-foreground">
+                                  {fb.original_response}
+                                </p>
+                              </div>
+                            )}
+                            {fb.corrected_response && (
+                              <div>
+                                <p className="text-xs font-semibold text-green-600 uppercase tracking-wide mb-1">
+                                  Corrected Response
+                                </p>
+                                <p className="text-sm whitespace-pre-wrap break-words text-green-700 dark:text-green-400">
+                                  {fb.corrected_response}
+                                </p>
+                              </div>
+                            )}
+                            <div className="flex items-center gap-4 pt-1 border-t text-xs text-muted-foreground">
+                              <span>Type: <span className="font-medium capitalize">{fb.feedback_type ?? "—"}</span></span>
+                              {fb.rating > 0 && (
+                                <span>Rating: <span className="font-medium">{"★".repeat(fb.rating)}{"☆".repeat(5 - fb.rating)}</span></span>
+                              )}
+                              <span className="ml-auto">{dateStr} · {timeStr}</span>
+                            </div>
+                          </div>
+                        )}
                       </div>
-                      <span className="text-xs text-muted-foreground whitespace-nowrap ml-2">
-                        {new Date(fb.created_at).toLocaleDateString()}
-                      </span>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </CardContent>
             </Card>
@@ -549,58 +765,337 @@ export default function Training() {
 
                   // ACORD model — count read from Supabase via refreshLocalAcordCount
                   if (isAcord) {
-                    const canFinetune = !isFinetuning && localAcordCount > 0;
+                    const acordFormFeedback = [...feedback.filter((f: any) => f.model_id === modelId && !f.is_used_for_training)]
+                      .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+                    const totalAcordSamples = localAcordCount + acordFormFeedback.length;
+                    const canFinetune = !isFinetuning && totalAcordSamples > 0;
 
                     return (
-                      <div key={modelId} className="p-4 border rounded-lg space-y-3">
-                        <div className="flex items-center justify-between">
-                          <h4 className="font-medium">{modelName}</h4>
-                          <Badge variant="outline">{localAcordCount} samples</Badge>
-                        </div>
-                        <p className="text-sm text-muted-foreground">
-                          {localAcordCount > 0
-                            ? `${localAcordCount} sample${localAcordCount !== 1 ? "s" : ""} ready for training`
-                            : "No feedback samples yet — save a sample from the ACORD Parser"}
-                        </p>
-                        {finetuneStatus && (
-                          <p className="text-xs text-muted-foreground whitespace-pre-line">{finetuneStatus}</p>
-                        )}
-                        <Button
-                          size="sm"
-                          disabled={!canFinetune}
-                          onClick={handleRunpodFinetune}
-                        >
-                          {isFinetuning ? (
-                            <><Loader2 className="h-4 w-4 mr-1 animate-spin" />Starting…</>
-                          ) : (
-                            <><Play className="h-4 w-4 mr-1" />Fine-tune</>
+                      <div key={modelId} className="col-span-full space-y-2">
+                        <div className="p-4 border rounded-lg space-y-3">
+                          <div className="flex items-center justify-between">
+                            <h4 className="font-medium">{modelName}</h4>
+                            {totalAcordSamples > 0 ? (
+                              <button
+                                onClick={handleToggleAcordSamples}
+                                className="flex items-center gap-1 px-2.5 py-0.5 rounded-full border text-xs font-semibold hover:bg-muted transition-colors"
+                              >
+                                {totalAcordSamples} samples
+                                {showAcordSamples ? (
+                                  <ChevronUp className="h-3 w-3" />
+                                ) : (
+                                  <ChevronDown className="h-3 w-3" />
+                                )}
+                              </button>
+                            ) : (
+                              <Badge variant="outline">0 samples</Badge>
+                            )}
+                          </div>
+                          <p className="text-sm text-muted-foreground">
+                            {totalAcordSamples > 0
+                              ? `${totalAcordSamples} sample${totalAcordSamples !== 1 ? "s" : ""} ready for training`
+                              : "No feedback samples yet — save a sample from the ACORD Parser"}
+                          </p>
+                          {finetuneStatus && (
+                            <p className="text-xs text-muted-foreground whitespace-pre-line">{finetuneStatus}</p>
                           )}
-                        </Button>
+                          <Button
+                            size="sm"
+                            disabled={!canFinetune}
+                            onClick={handleRunpodFinetune}
+                          >
+                            {isFinetuning ? (
+                              <><Loader2 className="h-4 w-4 mr-1 animate-spin" />Starting…</>
+                            ) : (
+                              <><Play className="h-4 w-4 mr-1" />Fine-tune</>
+                            )}
+                          </Button>
+                        </div>
+
+                        {/* Expandable sample list — ACORD runs + form feedback, sorted latest first */}
+                        {showAcordSamples && (
+                          <div className="border rounded-lg overflow-hidden">
+                            <div className="px-4 py-2 bg-muted/50 border-b flex items-center justify-between">
+                              <span className="text-sm font-medium">Training Samples</span>
+                              <span className="text-xs text-muted-foreground">
+                                {acordSampleList.length} sample{acordSampleList.length !== 1 ? "s" : ""} · latest first
+                              </span>
+                            </div>
+                            {acordSamplesLoading ? (
+                              <div className="flex items-center justify-center py-6 gap-2 text-muted-foreground">
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                                <span className="text-sm">Loading samples…</span>
+                              </div>
+                            ) : acordSampleList.length === 0 ? (
+                              <div className="py-6 text-center text-sm text-muted-foreground">
+                                No samples found
+                              </div>
+                            ) : (
+                              <div className="divide-y">
+                                {acordSampleList.map((s, idx) => {
+                                  const date = new Date(s.created_at);
+                                  const dateStr = date.toLocaleDateString(undefined, {
+                                    year: "numeric", month: "short", day: "numeric",
+                                  });
+                                  const timeStr = date.toLocaleTimeString(undefined, {
+                                    hour: "2-digit", minute: "2-digit",
+                                  });
+                                  const isSampleExpanded = expandedSampleId === s.run_id;
+                                  return (
+                                    <div key={s.run_id} className="overflow-hidden">
+                                      {/* Clickable summary row */}
+                                      <button
+                                        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted/40 transition-colors text-left"
+                                        onClick={() => setExpandedSampleId(isSampleExpanded ? null : s.run_id)}
+                                      >
+                                        <span className="text-xs text-muted-foreground w-5 shrink-0">
+                                          {idx + 1}
+                                        </span>
+                                        <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
+                                        <div className="flex-1 min-w-0">
+                                          <p className="text-sm font-medium truncate">
+                                            {s.source_filename}
+                                          </p>
+                                          <p className="text-xs text-muted-foreground">
+                                            Form {s.form_type}
+                                          </p>
+                                        </div>
+                                        <div className="text-right shrink-0">
+                                          <p className="text-xs font-medium">{dateStr}</p>
+                                          <p className="text-xs text-muted-foreground">{timeStr}</p>
+                                        </div>
+                                        <Badge
+                                          variant={s.status === "needs_admin_review" ? "secondary" : "outline"}
+                                          className="text-xs shrink-0"
+                                        >
+                                          {s.status === "needs_admin_review" ? "review" : "ready"}
+                                        </Badge>
+                                        {isSampleExpanded ? (
+                                          <ChevronUp className="h-4 w-4 text-muted-foreground shrink-0" />
+                                        ) : (
+                                          <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />
+                                        )}
+                                      </button>
+
+                                      {/* Expanded detail panel */}
+                                      {isSampleExpanded && (
+                                        <div className="border-t bg-muted/20 px-5 py-4 space-y-4">
+                                          <div>
+                                            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">
+                                              Prompt / Raw Text
+                                            </p>
+                                            <p className="text-sm whitespace-pre-wrap break-words max-h-40 overflow-y-auto">
+                                              {s.prompt || "—"}
+                                            </p>
+                                          </div>
+                                          <div>
+                                            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">
+                                              Original Extracted JSON
+                                            </p>
+                                            <pre className="text-xs bg-muted rounded p-3 overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap break-words">
+                                              {s.original_response || "—"}
+                                            </pre>
+                                          </div>
+                                          {s.corrected_response && (
+                                            <div>
+                                              <p className="text-xs font-semibold text-green-600 uppercase tracking-wide mb-1">
+                                                Corrected JSON
+                                              </p>
+                                              <pre className="text-xs bg-green-50 dark:bg-green-950/30 text-green-800 dark:text-green-300 rounded p-3 overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap break-words">
+                                                {s.corrected_response}
+                                              </pre>
+                                            </div>
+                                          )}
+                                          <div className="flex items-center gap-3 pt-1 border-t text-xs text-muted-foreground">
+                                            <span>File: <span className="font-medium">{s.source_filename}</span></span>
+                                            <span>·</span>
+                                            <span>Form: <span className="font-medium">{s.form_type}</span></span>
+                                            <span className="ml-auto">{dateStr} · {timeStr}</span>
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Form-submitted feedback for ACORD — from training_feedback table */}
+                        {(() => {
+                          if (acordFormFeedback.length === 0) return null;
+                          return (
+                            <div className="border rounded-lg overflow-hidden">
+                              <div className="px-4 py-2 bg-muted/50 border-b flex items-center justify-between">
+                                <span className="text-sm font-medium">Form Feedback</span>
+                                <span className="text-xs text-muted-foreground">
+                                  {acordFormFeedback.length} item{acordFormFeedback.length !== 1 ? "s" : ""} · latest first
+                                </span>
+                              </div>
+                              <div className="divide-y">
+                                {acordFormFeedback.map((fb: any, idx: number) => {
+                                  const isItemExpanded = expandedLocalItemId === fb.id;
+                                  const date = new Date(fb.created_at);
+                                  const dateStr = date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+                                  const timeStr = date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+                                  return (
+                                    <div key={fb.id} className="overflow-hidden">
+                                      <button
+                                        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted/40 transition-colors text-left"
+                                        onClick={() => setExpandedLocalItemId(isItemExpanded ? null : fb.id)}
+                                      >
+                                        <span className="text-xs text-muted-foreground w-5 shrink-0">{idx + 1}</span>
+                                        <MessageSquare className="h-4 w-4 text-muted-foreground shrink-0" />
+                                        <div className="flex-1 min-w-0">
+                                          <p className="text-sm font-medium truncate">{fb.prompt}</p>
+                                          <p className="text-xs text-muted-foreground capitalize">{fb.feedback_type || "feedback"}</p>
+                                        </div>
+                                        <div className="text-right shrink-0">
+                                          <p className="text-xs font-medium">{dateStr}</p>
+                                          <p className="text-xs text-muted-foreground">{timeStr}</p>
+                                        </div>
+                                        <Badge variant="outline" className="text-xs shrink-0">ready</Badge>
+                                        {isItemExpanded ? <ChevronUp className="h-4 w-4 text-muted-foreground shrink-0" /> : <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />}
+                                      </button>
+                                      {isItemExpanded && (
+                                        <div className="border-t bg-muted/20 px-5 py-4 space-y-4">
+                                          <div>
+                                            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">Prompt</p>
+                                            <p className="text-sm whitespace-pre-wrap break-words max-h-40 overflow-y-auto">{fb.prompt || "—"}</p>
+                                          </div>
+                                          {fb.original_response && (
+                                            <div>
+                                              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">Original Response</p>
+                                              <p className="text-sm whitespace-pre-wrap break-words text-muted-foreground max-h-40 overflow-y-auto">{fb.original_response}</p>
+                                            </div>
+                                          )}
+                                          {fb.corrected_response && (
+                                            <div>
+                                              <p className="text-xs font-semibold text-green-600 uppercase tracking-wide mb-1">Corrected Response</p>
+                                              <p className="text-sm whitespace-pre-wrap break-words text-green-700 dark:text-green-400 max-h-40 overflow-y-auto">{fb.corrected_response}</p>
+                                            </div>
+                                          )}
+                                          <div className="flex items-center gap-4 pt-1 border-t text-xs text-muted-foreground">
+                                            <span>Type: <span className="font-medium capitalize">{fb.feedback_type || "feedback"}</span></span>
+                                            {fb.rating > 0 && <span>Rating: <span className="font-medium">{"★".repeat(fb.rating)}{"☆".repeat(5 - fb.rating)}</span></span>}
+                                            <span className="ml-auto">{dateStr} · {timeStr}</span>
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
                     );
                   }
 
-                  // All other models — local feedback
-                  const modelFeedback = feedback.filter((f: any) => f.model_id === modelId && !f.is_used_for_training);
+                  // All other models — local feedback from training_feedback table
+                  const modelFeedback = [...feedback.filter((f: any) => f.model_id === modelId && !f.is_used_for_training)]
+                    .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+                  const isShowingFeedback = showModelFeedback[modelId] ?? false;
+
                   return (
-                    <div key={modelId} className="p-4 border rounded-lg space-y-3">
-                      <div className="flex items-center justify-between">
-                        <h4 className="font-medium">{modelName}</h4>
-                        <Badge variant="outline">{modelFeedback.length} samples</Badge>
+                    <div key={modelId} className="col-span-full space-y-2">
+                      <div className="p-4 border rounded-lg space-y-3">
+                        <div className="flex items-center justify-between">
+                          <h4 className="font-medium">{modelName}</h4>
+                          {modelFeedback.length > 0 ? (
+                            <button
+                              onClick={() => setShowModelFeedback(prev => ({ ...prev, [modelId]: !isShowingFeedback }))}
+                              className="flex items-center gap-1 px-2.5 py-0.5 rounded-full border text-xs font-semibold hover:bg-muted transition-colors"
+                            >
+                              {modelFeedback.length} samples
+                              {isShowingFeedback ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                            </button>
+                          ) : (
+                            <Badge variant="outline">0 samples</Badge>
+                          )}
+                        </div>
+                        <p className="text-sm text-muted-foreground">
+                          {modelFeedback.length >= 1
+                            ? `${modelFeedback.length} sample${modelFeedback.length > 1 ? "s" : ""} ready for training`
+                            : "No feedback samples yet"}
+                        </p>
+                        <Button
+                          size="sm"
+                          disabled={modelFeedback.length < 1}
+                          onClick={() => handleStartTraining(modelId, "fine-tune")}
+                        >
+                          <Play className="h-4 w-4 mr-1" />
+                          Fine-tune
+                        </Button>
                       </div>
-                      <p className="text-sm text-muted-foreground">
-                        {modelFeedback.length >= 1
-                          ? `${modelFeedback.length} sample${modelFeedback.length > 1 ? "s" : ""} ready for training`
-                          : "No feedback samples yet"}
-                      </p>
-                      <Button
-                        size="sm"
-                        disabled={modelFeedback.length < 1}
-                        onClick={() => handleStartTraining(modelId, "fine-tune")}
-                      >
-                        <Play className="h-4 w-4 mr-1" />
-                        Fine-tune
-                      </Button>
+
+                      {/* Expandable feedback list */}
+                      {isShowingFeedback && modelFeedback.length > 0 && (
+                        <div className="border rounded-lg overflow-hidden">
+                          <div className="px-4 py-2 bg-muted/50 border-b flex items-center justify-between">
+                            <span className="text-sm font-medium">Training Samples</span>
+                            <span className="text-xs text-muted-foreground">
+                              {modelFeedback.length} sample{modelFeedback.length !== 1 ? "s" : ""} · latest first
+                            </span>
+                          </div>
+                          <div className="divide-y">
+                            {modelFeedback.map((fb: any, idx: number) => {
+                              const isItemExpanded = expandedLocalItemId === fb.id;
+                              const date = new Date(fb.created_at);
+                              const dateStr = date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+                              const timeStr = date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+                              return (
+                                <div key={fb.id} className="overflow-hidden">
+                                  <button
+                                    className="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted/40 transition-colors text-left"
+                                    onClick={() => setExpandedLocalItemId(isItemExpanded ? null : fb.id)}
+                                  >
+                                    <span className="text-xs text-muted-foreground w-5 shrink-0">{idx + 1}</span>
+                                    <MessageSquare className="h-4 w-4 text-muted-foreground shrink-0" />
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-sm font-medium truncate">{fb.prompt}</p>
+                                      <p className="text-xs text-muted-foreground capitalize">{fb.feedback_type || "feedback"}</p>
+                                    </div>
+                                    <div className="text-right shrink-0">
+                                      <p className="text-xs font-medium">{dateStr}</p>
+                                      <p className="text-xs text-muted-foreground">{timeStr}</p>
+                                    </div>
+                                    <Badge variant="outline" className="text-xs shrink-0">ready</Badge>
+                                    {isItemExpanded ? <ChevronUp className="h-4 w-4 text-muted-foreground shrink-0" /> : <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />}
+                                  </button>
+                                  {isItemExpanded && (
+                                    <div className="border-t bg-muted/20 px-5 py-4 space-y-4">
+                                      <div>
+                                        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">Prompt</p>
+                                        <p className="text-sm whitespace-pre-wrap break-words max-h-40 overflow-y-auto">{fb.prompt || "—"}</p>
+                                      </div>
+                                      {fb.original_response && (
+                                        <div>
+                                          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">Original Response</p>
+                                          <p className="text-sm whitespace-pre-wrap break-words text-muted-foreground max-h-40 overflow-y-auto">{fb.original_response}</p>
+                                        </div>
+                                      )}
+                                      {fb.corrected_response && (
+                                        <div>
+                                          <p className="text-xs font-semibold text-green-600 uppercase tracking-wide mb-1">Corrected Response</p>
+                                          <p className="text-sm whitespace-pre-wrap break-words text-green-700 dark:text-green-400 max-h-40 overflow-y-auto">{fb.corrected_response}</p>
+                                        </div>
+                                      )}
+                                      <div className="flex items-center gap-4 pt-1 border-t text-xs text-muted-foreground">
+                                        <span>Type: <span className="font-medium capitalize">{fb.feedback_type || "feedback"}</span></span>
+                                        {fb.rating > 0 && <span>Rating: <span className="font-medium">{"★".repeat(fb.rating)}{"☆".repeat(5 - fb.rating)}</span></span>}
+                                        <span className="ml-auto">{dateStr} · {timeStr}</span>
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -619,29 +1114,41 @@ export default function Training() {
               </CardHeader>
               <CardContent>
                 <div className="space-y-3">
-                  {jobs.map((job: any) => (
-                    <div key={job.id} className="flex items-center justify-between p-3 border rounded-lg">
-                      <div className="flex items-center gap-3">
-                        {statusIcon(job.status)}
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium capitalize">{job.model_id.replace("-", " ")}</span>
-                            <Badge variant="outline">{job.training_type}</Badge>
-                            <Badge variant={getJobBadgeVariant(job.status)}>{job.status}</Badge>
+                  {jobs.map((job: any) => {
+                    const isActiveJob = (job.config as any)?.runpod_job_id === activeRunpodJobId;
+                    const livePhase = isActiveJob ? runpodJobStatus?.phase : undefined;
+                    const displayStatus = isActiveJob && runpodJobStatus ? runpodJobStatus.status : job.status;
+                    return (
+                      <div key={job.id} className="flex items-center justify-between p-3 border rounded-lg">
+                        <div className="flex items-center gap-3">
+                          {statusIcon(displayStatus)}
+                          <div>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-medium capitalize">{job.model_id.replace(/_/g, " ")}</span>
+                              <Badge variant="outline">{job.training_type}</Badge>
+                              <Badge variant={getJobBadgeVariant(displayStatus)}>{displayStatus}</Badge>
+                              {livePhase && displayStatus === "running" && (
+                                <Badge variant="secondary" className="text-[10px]">
+                                  {getPhaseLabel(livePhase)}
+                                </Badge>
+                              )}
+                            </div>
+                            <p className="text-sm text-muted-foreground">
+                              {(job.config as any)?.sample_count ?? job.feedback_count} samples • {new Date(job.created_at).toLocaleDateString()}
+                            </p>
                           </div>
-                          <p className="text-sm text-muted-foreground">
-                            {job.feedback_count} samples • {new Date(job.created_at).toLocaleDateString()}
-                          </p>
+                        </div>
+                        <div className="text-right text-sm text-muted-foreground">
+                          {job.metrics && (job.metrics as any).version && (
+                            <p className="text-xs font-medium">v{(job.metrics as any).version}</p>
+                          )}
+                          {job.metrics && (job.metrics as any).loss && (
+                            <p>Loss: {(job.metrics as any).loss}</p>
+                          )}
                         </div>
                       </div>
-                      {job.metrics && Object.keys(job.metrics).length > 0 && (
-                        <div className="text-right text-sm text-muted-foreground">
-                          {(job.metrics as any).loss && <p>Loss: {(job.metrics as any).loss}</p>}
-                          {(job.metrics as any).epochs && <p>Epochs: {(job.metrics as any).epochs}</p>}
-                        </div>
-                      )}
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </CardContent>
             </Card>
@@ -650,79 +1157,164 @@ export default function Training() {
 
         {/* Federated Learning Tab */}
         <TabsContent value="federated" className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Globe className="h-5 w-5" />
-                Federated Learning Rounds
-              </CardTitle>
-              <CardDescription>
-                Contribute your local training improvements to the global model. Only encrypted weight
-                deltas are shared — your data never leaves your device.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex items-center gap-2 p-3 bg-muted/50 rounded-lg mb-4">
-                <Shield className="h-5 w-5 text-green-500 flex-shrink-0" />
-                <p className="text-sm text-muted-foreground">
-                  <strong className="text-foreground">Privacy Protected:</strong> Differential privacy noise is added
-                  to all gradient updates before submission. Your raw data stays on your device.
-                </p>
-              </div>
 
-              {rounds.length === 0 ? (
-                <div className="text-center py-8">
-                  <Globe className="h-12 w-12 mx-auto mb-3 text-muted-foreground opacity-50" />
-                  <h3 className="font-medium mb-1">No Active Rounds</h3>
-                  <p className="text-sm text-muted-foreground">
-                    No federated learning rounds are currently active. Your admin will start rounds when ready.
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {rounds.map((round: any) => {
-                    const contributed = hasContributed(round);
-                    const progress = (round.current_participants / round.min_participants) * 100;
-                    return (
-                      <div key={round.id} className="p-4 border rounded-lg space-y-3">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <h4 className="font-medium capitalize">{round.model_id.replace("-", " ")}</h4>
-                            <Badge variant="outline">Round {round.round_number}</Badge>
-                            <Badge variant={getRoundBadgeVariant(round.status)}>{round.status}</Badge>
+          {/* Privacy banner */}
+          <div className="flex items-center gap-2 p-3 bg-muted/50 rounded-lg border">
+            <Shield className="h-5 w-5 text-green-500 flex-shrink-0" />
+            <p className="text-sm text-muted-foreground">
+              <strong className="text-foreground">Privacy Protected:</strong> Differential privacy noise is added
+              to all gradient updates before submission. Your raw data stays on your device.
+            </p>
+          </div>
+
+          {/* Live Pipeline Status */}
+          {(isJobRunning || isJobDone || isJobFailed) && (() => {
+            const steps = [
+              { label: "Local Training",      desc: "QLoRA fine-tuning on GPU",                  icon: Cpu },
+              { label: "Upload Weights",       desc: "Merge adapter & push to SeaweedFS",         icon: Upload },
+              { label: "Global Aggregation",   desc: "FedAvg across participants",                icon: Globe },
+              { label: "Model Ready",          desc: "New version available for Electron download", icon: CheckCircle2 },
+            ];
+            return (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Globe className="h-5 w-5" />
+                    Federated Learning — Pipeline Status
+                    {isJobRunning && <Loader2 className="h-4 w-4 ml-1 animate-spin text-blue-500" />}
+                    {isJobDone && <CheckCircle2 className="h-4 w-4 ml-1 text-green-500" />}
+                    {isJobFailed && <XCircle className="h-4 w-4 ml-1 text-red-500" />}
+                  </CardTitle>
+                  {runpodJobStatus?.phase && (
+                    <CardDescription className="flex items-center gap-1.5">
+                      <span className="inline-block h-1.5 w-1.5 rounded-full bg-blue-500 animate-pulse" />
+                      {getPhaseLabel(runpodJobStatus.phase)}
+                    </CardDescription>
+                  )}
+                </CardHeader>
+                <CardContent>
+                  {/* Step indicators */}
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+                    {steps.map((s, i) => {
+                      const stepNum = i + 1;
+                      const done = isJobDone ? true : pipelineStep > stepNum;
+                      const active = !isJobFailed && pipelineStep === stepNum;
+                      const failed = isJobFailed && pipelineStep === stepNum;
+                      return (
+                        <div
+                          key={s.label}
+                          className={`relative flex flex-col items-center text-center p-3 rounded-lg border transition-colors ${
+                            done ? "border-green-500/40 bg-green-500/5" :
+                            active ? "border-blue-500/40 bg-blue-500/5" :
+                            failed ? "border-red-500/40 bg-red-500/5" :
+                            "border-border/40 bg-muted/20 opacity-50"
+                          }`}
+                        >
+                          <div className={`mb-2 h-9 w-9 rounded-full flex items-center justify-center ${
+                            done ? "bg-green-500/15" : active ? "bg-blue-500/15" : failed ? "bg-red-500/15" : "bg-muted"
+                          }`}>
+                            {done ? (
+                              <CheckCircle2 className="h-5 w-5 text-green-500" />
+                            ) : active ? (
+                              <Loader2 className="h-5 w-5 text-blue-500 animate-spin" />
+                            ) : failed ? (
+                              <XCircle className="h-5 w-5 text-red-500" />
+                            ) : (
+                              <s.icon className="h-5 w-5 text-muted-foreground" />
+                            )}
                           </div>
-                          {contributed && (
-                            <Badge variant="default" className="bg-green-500">
-                              <CheckCircle2 className="h-3 w-3 mr-1" />
-                              Contributed
-                            </Badge>
+                          <span className={`text-[10px] font-bold uppercase tracking-wide mb-0.5 ${
+                            done ? "text-green-500" : active ? "text-blue-500" : failed ? "text-red-500" : "text-muted-foreground"
+                          }`}>Step {stepNum}</span>
+                          <p className="text-xs font-medium leading-tight">{s.label}</p>
+                          <p className="text-[10px] text-muted-foreground mt-0.5 leading-tight">{s.desc}</p>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Overall progress bar */}
+                  <Progress value={isJobDone ? 100 : isJobFailed ? (pipelineStep / 4) * 100 : ((pipelineStep - 0.5) / 4) * 100} className="h-1.5 mb-3" />
+
+                  {/* Terminal state messages */}
+                  {isJobDone && (
+                    <div className="flex items-center gap-2 p-3 rounded-lg bg-green-500/10 border border-green-500/20 text-sm text-green-600 dark:text-green-400">
+                      <CheckCircle2 className="h-4 w-4 shrink-0" />
+                      Model {runpodJobStatus?.version ? `v${runpodJobStatus.version}` : ""} registered successfully — available for Electron download.
+                    </div>
+                  )}
+                  {isJobFailed && (
+                    <div className="flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-sm text-red-600 dark:text-red-400">
+                      <XCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                      <span>{runpodJobStatus?.error || "Training failed. Check RunPod logs for details."}</span>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            );
+          })()}
+
+          {/* No job running and no recent result — show idle state with existing rounds or info */}
+          {!isJobRunning && !isJobDone && !isJobFailed && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Globe className="h-5 w-5" />
+                  Federated Learning Rounds
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {rounds.length === 0 ? (
+                  <div className="text-center py-8">
+                    <Globe className="h-12 w-12 mx-auto mb-3 text-muted-foreground opacity-40" />
+                    <h3 className="font-medium mb-1">No Active Rounds</h3>
+                    <p className="text-sm text-muted-foreground max-w-sm mx-auto">
+                      Start local training above to kick off the pipeline. After weights are uploaded
+                      to SeaweedFS the global aggregation runs automatically.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {rounds.map((round: any) => {
+                      const contributed = hasContributed(round);
+                      const progress = (round.current_participants / round.min_participants) * 100;
+                      return (
+                        <div key={round.id} className="p-4 border rounded-lg space-y-3">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <h4 className="font-medium capitalize">{round.model_id.replace(/_/g, " ")}</h4>
+                              <Badge variant="outline">Round {round.round_number}</Badge>
+                              <Badge variant={getRoundBadgeVariant(round.status)}>{round.status}</Badge>
+                            </div>
+                            {contributed && (
+                              <Badge className="bg-green-500 text-white">
+                                <CheckCircle2 className="h-3 w-3 mr-1" />Contributed
+                              </Badge>
+                            )}
+                          </div>
+                          <div className="space-y-1">
+                            <div className="flex justify-between text-sm">
+                              <span className="text-muted-foreground flex items-center gap-1">
+                                <Users className="h-3 w-3" />
+                                {round.current_participants}/{round.min_participants} participants
+                              </span>
+                              <span className="text-muted-foreground">{round.aggregation_method}</span>
+                            </div>
+                            <Progress value={Math.min(progress, 100)} />
+                          </div>
+                          {!contributed && round.status === "collecting" && (
+                            <Button size="sm" onClick={() => handleContribute(round)}>
+                              <Upload className="h-4 w-4 mr-2" />Contribute Gradient Update
+                            </Button>
                           )}
                         </div>
-
-                        <div className="space-y-1">
-                          <div className="flex justify-between text-sm">
-                            <span className="text-muted-foreground flex items-center gap-1">
-                              <Users className="h-3 w-3" />
-                              {round.current_participants}/{round.min_participants} participants
-                            </span>
-                            <span className="text-muted-foreground">{round.aggregation_method}</span>
-                          </div>
-                          <Progress value={Math.min(progress, 100)} />
-                        </div>
-
-                        {!contributed && round.status === "collecting" && (
-                          <Button size="sm" onClick={() => handleContribute(round)}>
-                            <Upload className="h-4 w-4 mr-2" />
-                            Contribute Gradient Update
-                          </Button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+                      );
+                    })}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
 
           {/* How It Works */}
           <Card>
@@ -736,9 +1328,9 @@ export default function Training() {
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                 {[
                   { step: "1", title: "Collect Feedback", desc: "Rate and correct AI outputs during normal use", icon: MessageSquare },
-                  { step: "2", title: "Train Locally", desc: "Fine-tune the model on your device using LoRA adapters", icon: Cpu },
-                  { step: "3", title: "Share Gradients", desc: "Only encrypted weight deltas are sent (not your data)", icon: Shield },
-                  { step: "4", title: "Global Update", desc: "Server aggregates updates and distributes improved model", icon: Globe },
+                  { step: "2", title: "Train Locally", desc: "Fine-tune the model on RunPod GPU using LoRA adapters", icon: Cpu },
+                  { step: "3", title: "Upload & Aggregate", desc: "Weights pushed to SeaweedFS; FedAvg runs automatically", icon: Globe },
+                  { step: "4", title: "Model Updated", desc: "New version registered and distributed to Electron devices", icon: CheckCircle2 },
                 ].map((item: any) => (
                   <div key={item.step} className="text-center p-4 border rounded-lg">
                     <div className="mx-auto mb-2 h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center">

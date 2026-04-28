@@ -30,9 +30,12 @@ class CorrectionValidationError(ValueError):
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _canonical_form_key(form_type: str) -> str:
-    """Normalise form type to canonical key, e.g. 'acord25' → '25'."""
+    """Normalise form type to canonical key, e.g. 'acord25', 'ACORD_25', 'acord_25' → '25'."""
     ft = str(form_type or "").strip().lower()
-    if ft.startswith("acord"):
+    # Strip 'acord_' or 'acord' prefix (handles ACORD_25, ACORD_125, acord25, etc.)
+    if ft.startswith("acord_"):
+        ft = ft[6:]
+    elif ft.startswith("acord"):
         ft = ft[5:]
     if ft not in SUPPORTED_FORM_TYPES:
         raise CorrectionValidationError(

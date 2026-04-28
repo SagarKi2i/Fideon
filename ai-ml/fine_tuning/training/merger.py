@@ -64,12 +64,17 @@ class AdapterMerger:
         base_model = Qwen2VLForConditionalGeneration.from_pretrained(
             base_model_path,
             dtype=dtype,
-            device_map="auto",         # use GPU when available (H100 80GB has headroom)
+            device_map="auto",
             local_files_only=local_only,
         )
-        processor = AutoProcessor.from_pretrained(
-            base_model_path, local_files_only=local_only
-        )
+        try:
+            processor = AutoProcessor.from_pretrained(
+                base_model_path, local_files_only=local_only, fix_mistral_regex=True
+            )
+        except TypeError:
+            processor = AutoProcessor.from_pretrained(
+                base_model_path, local_files_only=local_only
+            )
 
         print(f"[merger] Attaching LoRA adapter from {adapter_path} …")
         peft_model = PeftModel.from_pretrained(base_model, adapter_path)
@@ -80,6 +85,14 @@ class AdapterMerger:
         print(f"[merger] Saving merged model to {output_path} …")
         merged.save_pretrained(output_path)
         processor.save_pretrained(output_path)
+
+        # Free VRAM so the quantization step (llama-quantize uses GPU) has headroom
+        import gc
+        del merged, peft_model, base_model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            print("[merger] VRAM freed after merge — GPU ready for quantization.")
 
         merged_at = datetime.now(timezone.utc).isoformat()
         manifest = {

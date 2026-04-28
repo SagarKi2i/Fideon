@@ -81,8 +81,23 @@ def run_training(
     train_cfg = config.get("training", {})
     local_only = str(config.get("local_files_only", "true")).lower() in {"1", "true", "yes"}
 
+    # Free any VRAM left from the OCR/VLM extraction model before training
+    try:
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            print("[train] VRAM cleared before loading training model.")
+    except Exception:
+        pass
+
     print(f"[train] Loading processor from {base_model} …")
-    processor = AutoProcessor.from_pretrained(base_model, local_files_only=local_only)
+    try:
+        processor = AutoProcessor.from_pretrained(
+            base_model, local_files_only=local_only, fix_mistral_regex=True
+        )
+    except TypeError:
+        processor = AutoProcessor.from_pretrained(base_model, local_files_only=local_only)
     tokenizer = processor.tokenizer
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token

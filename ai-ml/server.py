@@ -331,10 +331,14 @@ async def extract_acord(
     if not pdf_path or not Path(pdf_path).exists():
         raise HTTPException(status_code=404, detail=f"PDF not on disk: {pdf_path}")
 
-    # Normalise form_type: "acord25" → "25", "25" → "25"
+    # Normalise form_type: "ACORD_25" → "25", "acord25" → "25", "25" → "25"
     ft = form_type_hint or record.get("form_type", "25")
-    if isinstance(ft, str) and ft.lower().startswith("acord"):
-        ft = ft[5:]
+    if isinstance(ft, str):
+        ftl = ft.lower()
+        if ftl.startswith("acord_"):
+            ft = ft[6:]
+        elif ftl.startswith("acord"):
+            ft = ft[5:]
 
     import asyncio
     loop = asyncio.get_running_loop()
@@ -347,6 +351,60 @@ async def extract_acord(
         raise HTTPException(status_code=500, detail=result["error"])
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# POST /generate  — text generation using the loaded Qwen2-VL model
+# Used by the backend's NL summary service (RUNPOD_GENERATE_URL).
+# ---------------------------------------------------------------------------
+@app.post("/generate")
+async def generate_text(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """
+    Lightweight text generation endpoint backed by the already-loaded Qwen2-VL model.
+    Accepts: { prompt, max_new_tokens, temperature, raw }
+    Returns: { text }
+    """
+    import asyncio
+
+    prompt: str = body.get("prompt", "")
+    max_new_tokens: int = int(body.get("max_new_tokens", 2048))
+    temperature: float = float(body.get("temperature", 0.3))
+
+    if not prompt.strip():
+        raise HTTPException(status_code=400, detail="prompt is required")
+
+    def _infer() -> str:
+        from extractor import _load_qwen, _qwen_model, _qwen_processor
+        import torch
+
+        _load_qwen()
+
+        messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+        text_input = _qwen_processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        inputs = _qwen_processor(
+            text=[text_input],
+            padding=True,
+            return_tensors="pt",
+        ).to(_qwen_model.device)
+
+        with torch.no_grad():
+            generated_ids = _qwen_model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                do_sample=temperature > 0,
+            )
+
+        trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
+        return _qwen_processor.batch_decode(
+            trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )[0]
+
+    loop = asyncio.get_running_loop()
+    text = await loop.run_in_executor(_executor, _infer)
+    return {"text": text}
 
 
 # ---------------------------------------------------------------------------
@@ -385,11 +443,19 @@ async def store_training_sample(body: Dict[str, Any] = Body(...)) -> Dict[str, A
     upload_id = body.get("upload_id", "")
     pdf_path = _pdf_path_for_upload(upload_id) or ""
 
+    # Normalise form_type so ingest.py never sees "ACORD_25" / "acord25" variants
+    raw_ft = str(body.get("form_type") or "25")
+    ftl = raw_ft.lower()
+    if ftl.startswith("acord_"):
+        raw_ft = raw_ft[6:]
+    elif ftl.startswith("acord"):
+        raw_ft = raw_ft[5:]
+
     sample: Dict[str, Any] = {
         "sample_id": str(uuid.uuid4()),
         "upload_id": upload_id,
         "pdf_path": pdf_path,
-        "form_type": body.get("form_type", "25"),
+        "form_type": raw_ft,
         "original_fields": body.get("original_fields") or {},
         "corrected_fields": body.get("corrected_fields") or {},
         "raw_text": body.get("raw_text", ""),
@@ -469,6 +535,7 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
     # ── Build chat-format samples and append to version store ─────────────────
     snapshot_path: Optional[str] = None
     ingested = 0
+    ingested_ids: set = set()   # only successfully processed samples get marked "used"
     for sample in samples:
         try:
             chat_row = build_training_sample_from_correction(
@@ -481,10 +548,11 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
                 retrain_threshold=threshold,
             )
             ingested += 1
+            ingested_ids.add(sample.get("sample_id"))
             if outcome.version_snapshot_path:
                 snapshot_path = outcome.version_snapshot_path
         except Exception as exc:
-            print(f"[finetune/start] skipping sample {sample.get('sample_id')}: {exc}")
+            print(f"[finetune/start] skipping sample {sample.get('sample_id')} (stays pending for retry): {exc}")
 
     if not snapshot_path:
         # Force a snapshot from whatever is pending now (manual trigger bypasses threshold)
@@ -517,8 +585,8 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
                 "ingested": ingested,
             }
 
-    # ── Mark ingested samples as "used" so they are not re-ingested next cycle ──
-    used_ids = {s.get("sample_id") for s in samples}
+    # ── Mark successfully ingested samples as "used" — skipped ones stay pending ──
+    used_ids = ingested_ids
     all_samples = _load_training_samples()
     used_at = datetime.now(timezone.utc).isoformat()
     updated_samples = []

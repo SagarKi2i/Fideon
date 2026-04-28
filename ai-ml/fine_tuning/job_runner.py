@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 import traceback
 import uuid
@@ -86,6 +87,37 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_MIN_FREE_DISK_GB = float(os.getenv("MIN_FREE_DISK_GB", "15"))
+
+
+def _free_disk_gb(path: str = "/workspace") -> float:
+    try:
+        stat = shutil.disk_usage(path)
+        return stat.free / (1024 ** 3)
+    except Exception:
+        return 999.0
+
+
+def _cleanup_old_runs(runs_dir: Path, active_model_path: Optional[str], keep_last: int = 1) -> None:
+    """
+    Delete old merged model directories to free disk space.
+    Keeps the `keep_last` most-recent merged dirs and never deletes the active_model_path.
+    """
+    merged_dirs = sorted(
+        [d for d in runs_dir.iterdir() if d.is_dir() and d.name.endswith("-merged")],
+        key=lambda d: d.stat().st_mtime,
+    )
+    to_delete = merged_dirs[: max(0, len(merged_dirs) - keep_last)]
+    for d in to_delete:
+        if active_model_path and str(d) == active_model_path.rstrip("/"):
+            continue  # never delete the currently active model
+        try:
+            shutil.rmtree(d)
+            print(f"[job_runner] Cleaned up old run: {d}")
+        except Exception as exc:
+            print(f"[job_runner] Warning: could not clean up {d}: {exc}")
+
+
 def _check_eval_files(config: Dict[str, Any]) -> None:
     """Warn (non-fatal) if eval JSON files referenced in config are missing."""
     eval_cfg = config.get("evaluation", {})
@@ -125,48 +157,83 @@ def _load_eval_examples_from_config(config: Dict[str, Any]) -> List[Dict[str, An
     return examples
 
 
-def _resolve_base_model(config: Dict[str, Any], registry_path: str) -> str:
+def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Optional[Path] = None) -> str:
     """
     Return the base model path to train from, in priority order:
 
       1. Latest fine-tuned model on SeaweedFS (finetuned/v{N}/)
-         — downloaded to /workspace/fine_tuning/models/finetuned/v{N}/ if not cached
+         — downloaded only when sufficient free disk space exists
       2. Current promoted model path from local registry (already on disk)
       3. config.base_model (original Qwen2-VL-7B)
 
-    This implements the continuous-learning loop: each cycle fine-tunes on top
-    of the previously promoted model rather than the original base weights.
+    Cleans up old merged runs before attempting SeaweedFS download to free space.
     """
     from fine_tuning.seaweedfs_client import SeaweedFSClient
     from fine_tuning.registry.version_registry import VersionRegistry
 
+    registry = VersionRegistry(registry_path)
     seaweed = SeaweedFSClient()
+
+    # ── Pre-flight: clean up old merged runs to reclaim disk ─────────────────
+    if runs_dir and runs_dir.exists():
+        active = registry.get_current_base()
+        _cleanup_old_runs(runs_dir, active_model_path=active, keep_last=1)
+        free_gb = _free_disk_gb()
+        print(f"[job_runner] Free disk after cleanup: {free_gb:.1f} GB")
 
     # ── 1. SeaweedFS: latest fine-tuned version ───────────────────────────────
     seaweed_version = seaweed.get_latest_finetuned_version()
     if seaweed_version is not None:
         cache_dir = f"/workspace/fine_tuning/models/finetuned/v{seaweed_version}"
-        # Check if already cached locally (avoid re-download on every cycle)
         cache_path = Path(cache_dir)
-        if cache_path.exists() and any(cache_path.iterdir()):
+        # Validate cached model is complete — a partial upload/download with missing shards
+        # causes OSError at training time. Check config.json AND all shards from the index.
+        def _cache_is_complete(p: Path) -> bool:
+            if not p.exists() or not (p / "config.json").exists():
+                return False
+            index_file = p / "model.safetensors.index.json"
+            if index_file.exists():
+                try:
+                    import json as _json
+                    idx = _json.loads(index_file.read_text())
+                    expected = set((idx.get("weight_map") or {}).values())
+                    existing = {f.name for f in p.glob("*.safetensors")}
+                    if expected and not expected.issubset(existing):
+                        missing = expected - existing
+                        print(f"[job_runner] Cache v{seaweed_version} missing shards: {missing}")
+                        return False
+                except Exception:
+                    pass
+            return any(f.suffix == ".safetensors" for f in p.iterdir())
+
+        if _cache_is_complete(cache_path):
+            print(f"[job_runner] Using cached SeaweedFS model v{seaweed_version}: {cache_dir}")
+            return cache_dir
+        if cache_path.exists():
+            print(f"[job_runner] Cached model v{seaweed_version} is incomplete — deleting and re-downloading …")
+            shutil.rmtree(cache_path, ignore_errors=True)
+        free_gb = _free_disk_gb()
+        if free_gb < _MIN_FREE_DISK_GB:
             print(
-                f"[job_runner] Using cached SeaweedFS model v{seaweed_version}: {cache_dir}"
+                f"[job_runner] Skipping SeaweedFS download — only {free_gb:.1f} GB free "
+                f"(need ≥{_MIN_FREE_DISK_GB} GB). Falling back to local model."
             )
-            return cache_dir
-        # Not cached — download from SeaweedFS
-        print(
-            f"[job_runner] Downloading fine-tuned model v{seaweed_version} "
-            f"from SeaweedFS → {cache_dir} …"
-        )
-        try:
-            seaweed.download_finetuned_model(seaweed_version, cache_dir)
-            print(f"[job_runner] SeaweedFS model v{seaweed_version} ready at {cache_dir}")
-            return cache_dir
-        except Exception as exc:
-            print(f"[job_runner] SeaweedFS download failed (non-fatal): {exc}")
+        else:
+            print(
+                f"[job_runner] Downloading fine-tuned model v{seaweed_version} "
+                f"from SeaweedFS → {cache_dir} …"
+            )
+            try:
+                seaweed.download_finetuned_model(seaweed_version, cache_dir)
+                print(f"[job_runner] SeaweedFS model v{seaweed_version} ready at {cache_dir}")
+                return cache_dir
+            except Exception as exc:
+                print(f"[job_runner] SeaweedFS download failed (non-fatal): {exc}")
+                # Remove partial download to reclaim space
+                if cache_path.exists():
+                    shutil.rmtree(cache_path, ignore_errors=True)
 
     # ── 2. Local registry: last promoted path ─────────────────────────────────
-    registry = VersionRegistry(registry_path)
     current = registry.get_current_base()
     if current and Path(current).exists():
         print(f"[job_runner] Resuming from local promoted model: {current}")
@@ -270,7 +337,7 @@ def run_cycle(
 
             # ── 4. Resolve base model ─────────────────────────────────────────
             _update("resolving_base_model")
-            base_model = _resolve_base_model(config, reg_path)
+            base_model = _resolve_base_model(config, reg_path, runs_dir=runs_dir)
 
             # ── 5. Create pending registry entry ─────────────────────────────
             registry = VersionRegistry(reg_path)
