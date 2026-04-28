@@ -186,9 +186,32 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
     if seaweed_version is not None:
         cache_dir = f"/workspace/fine_tuning/models/finetuned/v{seaweed_version}"
         cache_path = Path(cache_dir)
-        if cache_path.exists() and any(cache_path.iterdir()):
+        # Validate cached model is complete — a partial upload/download with missing shards
+        # causes OSError at training time. Check config.json AND all shards from the index.
+        def _cache_is_complete(p: Path) -> bool:
+            if not p.exists() or not (p / "config.json").exists():
+                return False
+            index_file = p / "model.safetensors.index.json"
+            if index_file.exists():
+                try:
+                    import json as _json
+                    idx = _json.loads(index_file.read_text())
+                    expected = set((idx.get("weight_map") or {}).values())
+                    existing = {f.name for f in p.glob("*.safetensors")}
+                    if expected and not expected.issubset(existing):
+                        missing = expected - existing
+                        print(f"[job_runner] Cache v{seaweed_version} missing shards: {missing}")
+                        return False
+                except Exception:
+                    pass
+            return any(f.suffix == ".safetensors" for f in p.iterdir())
+
+        if _cache_is_complete(cache_path):
             print(f"[job_runner] Using cached SeaweedFS model v{seaweed_version}: {cache_dir}")
             return cache_dir
+        if cache_path.exists():
+            print(f"[job_runner] Cached model v{seaweed_version} is incomplete — deleting and re-downloading …")
+            shutil.rmtree(cache_path, ignore_errors=True)
         free_gb = _free_disk_gb()
         if free_gb < _MIN_FREE_DISK_GB:
             print(

@@ -174,12 +174,6 @@ export default function OutputCorrection({ modelId, prompt, output, children }: 
                   </>
                 )}
               </div>
-              {!submitted && (
-                <Button variant="outline" size="sm" onClick={handleStartEdit}>
-                  <Edit3 className="h-3.5 w-3.5 mr-1" />
-                  Edit & Train
-                </Button>
-              )}
             </div>
           )}
         </>

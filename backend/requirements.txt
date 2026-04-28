@@ -46,14 +46,14 @@ presidio-anonymizer>=2.2.0
 spacy>=3.4.0,<4.0.0
 
 # --- Document/OCR processing ---
-PyPDF2
-pypdf
-PyMuPDF
-python-docx
-openpyxl
-Pillow
-pdfplumber
-rapidfuzz
+PyPDF2==3.0.1
+pypdf>=6.10.2
+PyMuPDF>=1.27.2
+python-docx>=1.1.2
+openpyxl>=3.1.5
+Pillow>=12.2.0
+pdfplumber>=0.11.9
+rapidfuzz>=3.14.5
 
 # --- Vector/RAG ---
 psycopg[binary]>=3.1.0

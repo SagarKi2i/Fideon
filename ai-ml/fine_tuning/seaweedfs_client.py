@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-_MULTIPART_THRESHOLD = 64 * 1024 * 1024   # 64 MB
-_MULTIPART_CHUNK     = 32 * 1024 * 1024   # 32 MB chunks
+_MULTIPART_THRESHOLD = 64 * 1024 * 1024    # 64 MB
+_MULTIPART_CHUNK     = 256 * 1024 * 1024  # 256 MB chunks — fewer parts = fewer failure points
 
 
 class SeaweedFSClient:
@@ -44,9 +45,9 @@ class SeaweedFSClient:
             aws_secret_access_key=self._secret_key,
             config=Config(
                 signature_version="s3v4",
-                connect_timeout=30,
-                read_timeout=600,
-                retries={"max_attempts": 3},
+                connect_timeout=60,
+                read_timeout=1800,
+                retries={"max_attempts": 5, "mode": "adaptive"},
             ),
         )
 
@@ -55,7 +56,7 @@ class SeaweedFSClient:
         return TransferConfig(
             multipart_threshold=_MULTIPART_THRESHOLD,
             multipart_chunksize=_MULTIPART_CHUNK,
-            max_concurrency=4,
+            max_concurrency=2,  # lower concurrency is more stable on SeaweedFS
         )
 
     # ── Fine-tuned model (full HF weights) ───────────────────────────────────
@@ -76,14 +77,43 @@ class SeaweedFSClient:
         tc = self._transfer_config()
         files = [f for f in local.rglob("*") if f.is_file()]
         print(f"[seaweedfs] Uploading HF model ({len(files)} files) → s3://{self._bucket}/{prefix}/")
+        _RETRY_DELAYS = [30, 90]  # seconds to wait before attempt 2, 3
+        failed: list[str] = []
         for f in files:
             rel = f.relative_to(local)
             key = f"{prefix}/{rel.as_posix()}"
             size_mb = f.stat().st_size // 1_000_000
             print(f"[seaweedfs]   {rel} ({size_mb} MB) …")
-            client.upload_file(str(f), self._bucket, key, Config=tc)
+            last_exc: Exception | None = None
+            for attempt in range(1, 4):  # 3 attempts per file
+                try:
+                    client.upload_file(str(f), self._bucket, key, Config=tc)
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt < 3:
+                        wait = _RETRY_DELAYS[attempt - 1]
+                        print(f"[seaweedfs]   Retry {attempt}/3 for {rel} (waiting {wait}s): {exc}")
+                        time.sleep(wait)
+                    else:
+                        print(f"[seaweedfs]   Retry {attempt}/3 for {rel}: {exc}")
+            if last_exc is not None:
+                failed.append(str(rel))
+                print(f"[seaweedfs]   FAILED after 3 attempts: {rel} — {last_exc}")
 
-        # Mark this as the latest version
+        if failed:
+            # Training succeeded — don't mark job as failed just because SeaweedFS is down.
+            # The merged model is still on disk; next cycle will re-upload.
+            # Do NOT write latest.txt — an incomplete upload must not be used as base model.
+            print(
+                f"[seaweedfs] WARNING: {len(failed)} file(s) failed to upload to {prefix}. "
+                f"Model is preserved on disk. SeaweedFS may be full or unhealthy. "
+                f"Failed files: {', '.join(failed)}"
+            )
+            return prefix
+
+        # Only mark as latest when ALL files uploaded successfully
         client.put_object(
             Bucket=self._bucket,
             Key="finetuned/latest.txt",
@@ -155,14 +185,35 @@ class SeaweedFSClient:
         tc = self._transfer_config()
         files = list(local.glob("*.gguf")) + list(local.glob("manifest.json"))
         print(f"[seaweedfs] Uploading {len(files)} quantized file(s) → s3://{self._bucket}/{prefix}/")
+        _RETRY_DELAYS = [30, 90]
+        failed: list[str] = []
         for f in sorted(files):
             key = f"{prefix}/{f.name}"
             size_mb = f.stat().st_size // 1_000_000
             print(f"[seaweedfs]   {f.name} ({size_mb} MB) …")
-            client.upload_file(str(f), self._bucket, key, Config=tc)
-            keys.append(key)
+            last_exc: Exception | None = None
+            for attempt in range(1, 4):
+                try:
+                    client.upload_file(str(f), self._bucket, key, Config=tc)
+                    last_exc = None
+                    keys.append(key)
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt < 3:
+                        wait = _RETRY_DELAYS[attempt - 1]
+                        print(f"[seaweedfs]   Retry {attempt}/3 for {f.name} (waiting {wait}s): {exc}")
+                        time.sleep(wait)
+                    else:
+                        print(f"[seaweedfs]   Retry {attempt}/3 for {f.name}: {exc}")
+            if last_exc is not None:
+                failed.append(f.name)
+                print(f"[seaweedfs]   FAILED after 3 attempts: {f.name} — {last_exc}")
 
-        print(f"[seaweedfs] Quantized upload complete ({len(keys)} files).")
+        if failed:
+            print(f"[seaweedfs] WARNING: {len(failed)} GGUF file(s) failed to upload: {', '.join(failed)}")
+        else:
+            print(f"[seaweedfs] Quantized upload complete ({len(keys)} files).")
         return keys
 
     # ── Legacy helpers ────────────────────────────────────────────────────────
