@@ -12,12 +12,46 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# ── Surya OCR singletons (0.6.x API) ─────────────────────────────────────────
+
+# ── Transformers 4.50+ compatibility patch ────────────────────────────────────
+# Must run before any surya or Qwen2-VL imports so the patched symbols are
+# available when those packages do their own `from transformers import ...`.
+def _patch_transformers_compat() -> None:
+    import transformers as _tf
+    import transformers.image_utils as _iu
+
+    # surya 0.17.x: `from transformers import PretrainedConfig`
+    # Renamed to PreTrainedConfig in 4.50+; restore the old alias.
+    if not hasattr(_tf, "PretrainedConfig"):
+        _cls = getattr(_tf, "PreTrainedConfig", None)
+        if _cls is None:
+            try:
+                from transformers.configuration_utils import PretrainedConfig as _cls  # type: ignore
+            except ImportError:
+                from transformers.configuration_utils import PreTrainedConfig as _cls  # type: ignore
+        _tf.PretrainedConfig = _cls  # type: ignore[attr-defined]
+
+    # Qwen2-VL processor: `from transformers.image_utils import VideoInput`
+    # Moved out of image_utils in 4.50+; inject a compatible type alias.
+    if not hasattr(_iu, "VideoInput"):
+        from typing import List as _List, Union as _Union
+        import numpy as _np
+        try:
+            from PIL.Image import Image as _PILImage
+            _iu.VideoInput = _Union[_List[_PILImage], _List[_np.ndarray]]  # type: ignore[attr-defined]
+        except ImportError:
+            _iu.VideoInput = list  # type: ignore[attr-defined]
+
+
+_patch_transformers_compat()
+
+# ── Surya OCR singletons (0.17.x API) ────────────────────────────────────────
 _surya_lock = threading.Lock()
 _det_predictor = None
 _rec_predictor = None
@@ -35,6 +69,94 @@ _qwen_processor = None
 _qwen_loaded = False
 
 QWEN_MODEL_ID = os.getenv("QWEN_MODEL_ID", "/workspace/models/qwen2-vl-7b")
+
+
+# ── Fast native extraction for digital PDFs (RunPod-local, no Surya/Qwen) ────
+_ACORD_REGEX_PATTERNS: Dict[str, str] = {
+    "policy_number": r"(?:Policy(?:\s+No\.?|\s+Number)?)\s*[:\-]\s*([A-Z0-9\-]{4,40})",
+    "effective_date": r"(?:Effective|Eff\.?\s*Date)\s*[:\-]\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})",
+    "expiration_date": r"(?:Expiration|Exp(?:iry)?\.?\s*Date)\s*[:\-]\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})",
+    "named_insured": r"(?:NAMED\s+INSURED|Name\s+of\s+Insured)\s*[:\-]?\s*(.{3,80})",
+    "mailing_address": r"(?:Mailing\s+Address|Address)\s*[:\-]\s*(.{5,100})",
+    "producer_name": r"(?:PRODUCER|Producer|Agency Name)\s*[:\-]\s*(.{3,80})",
+    "producer_contact": r"(?:Contact\s+Name|Contact)\s*[:\-]\s*(.{3,60})",
+    "producer_phone": r"(?:Phone|Ph\.?)\s*[:\-]\s*([\d\s\(\)\-\+\.]{7,20})",
+    "producer_fax": r"(?:Fax)\s*[:\-]\s*([\d\s\(\)\-\+\.]{7,20})",
+    "producer_email": r"(?:E-?Mail|Email)\s*[:\-]\s*([\w\.\+\-]+@[\w\.\-]+\.\w{2,})",
+    "insurer_a": r"INSURER\s+A\s*[:\-]\s*(.{3,80})",
+    "insurer_b": r"INSURER\s+B\s*[:\-]\s*(.{3,80})",
+    "insurer_c": r"INSURER\s+C\s*[:\-]\s*(.{3,80})",
+    "naic_code": r"NAIC\s*#?\s*[:\-]?\s*(\d{5})",
+    "certificate_number": r"(?:Certificate\s+(?:No\.?|Number))\s*[:\-]\s*([A-Z0-9\-]{4,30})",
+    "description_of_ops": r"(?:DESCRIPTION\s+OF\s+OPERATIONS)[^\n]*\n(.{10,500})",
+    "certificate_holder": r"(?:CERTIFICATE\s+HOLDER)\s*[:\-]?\s*(.{5,200})",
+    "gl_each_occurrence": r"(?:Each\s+Occurrence)\s*\$?\s*([\d,]+)",
+    "gl_general_aggregate": r"(?:General\s+Aggregate)\s*\$?\s*([\d,]+)",
+    "auto_combined_limit": r"(?:Combined\s+Single\s+Limit)\s*\$?\s*([\d,]+)",
+    "umbrella_each_occ": r"(?:UMBRELLA|EXCESS).*?Each\s+Occurrence\s*\$?\s*([\d,]+)",
+    "wc_el_each_accident": r"E\.L\.\s+Each\s+Accident\s*\$?\s*([\d,]+)",
+}
+
+
+def _extract_digital_native(pdf_path: str, preextracted_text: str = "") -> tuple[Dict[str, Any], str]:
+    """Fast digital extraction using local PDF text/widgets/tables + regex (no VLM)."""
+    import fitz  # PyMuPDF
+
+    fields: Dict[str, Any] = {}
+    raw_text = preextracted_text
+
+    # Layer 1 + 2: PyMuPDF widgets + text
+    try:
+        doc = fitz.open(pdf_path)
+        for page in doc:
+            for widget in page.widgets() or []:
+                name = (widget.field_name or "").strip()
+                value = widget.field_value
+                if name and value is not None:
+                    val = str(value).strip()
+                    if val and val not in {"Off", ""}:
+                        fields[name] = val
+        if not raw_text:
+            pages_text = []
+            for page in doc:
+                text = (page.get_text("text") or "").strip()
+                if text:
+                    pages_text.append(text)
+            raw_text = "\n\n--- Page Break ---\n\n".join(pages_text)
+        doc.close()
+    except Exception:
+        pass
+
+    # Layer 3: pdfplumber tables/KV
+    try:
+        import pdfplumber
+
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                for table in page.extract_tables() or []:
+                    for row in table:
+                        if not row or len(row) < 2:
+                            continue
+                        key = str(row[0] or "").strip().rstrip(":").strip()
+                        val = str(row[1] or "").strip()
+                        if key and val and not key.isdigit() and key not in fields:
+                            fields[key] = val
+    except Exception:
+        pass
+
+    # Layer 4: regex enrich
+    if raw_text:
+        for field_key, pattern in _ACORD_REGEX_PATTERNS.items():
+            if field_key in fields:
+                continue
+            m = re.search(pattern, raw_text, re.IGNORECASE | re.DOTALL)
+            if not m:
+                continue
+            value = (m.group(1) or "").strip().split("\n")[0].strip()
+            if value:
+                fields[field_key] = value
+
+    return fields, raw_text
 
 
 # ── Model loaders ─────────────────────────────────────────────────────────────
@@ -64,7 +186,7 @@ def _load_docling() -> None:
         from docling.datamodel.base_models import InputFormat
 
         pipeline_options = PdfPipelineOptions()
-        pipeline_options.do_ocr = True           # needed for scanned PDFs
+        pipeline_options.do_ocr = True
         pipeline_options.do_table_structure = True
 
         _docling_converter = DocumentConverter(
@@ -81,12 +203,19 @@ def _load_qwen() -> None:
         if _qwen_loaded:
             return
         import torch
-        from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+        from transformers import AutoConfig, AutoProcessor, Qwen2VLForConditionalGeneration
+
+        # Load config first and patch fields missing from older model checkpoints
+        # that transformers 4.57 now requires during weight initialisation.
+        config = AutoConfig.from_pretrained(QWEN_MODEL_ID)
+        if hasattr(config, "vision_config") and not hasattr(config.vision_config, "initializer_range"):
+            config.vision_config.initializer_range = 0.02
 
         _qwen_processor = AutoProcessor.from_pretrained(QWEN_MODEL_ID)
         _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
             QWEN_MODEL_ID,
-            dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            config=config,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
             device_map="auto",
         )
         _qwen_model.eval()
@@ -139,9 +268,12 @@ def _run_docling(pdf_path: str) -> Dict[str, Any]:
         tables: List[str] = []
         for table in getattr(doc, "tables", []):
             try:
-                tables.append(table.export_to_markdown())
+                tables.append(table.export_to_markdown(doc))
             except Exception:
-                pass
+                try:
+                    tables.append(table.export_to_markdown())
+                except Exception:
+                    pass
 
         # Extract KV pairs when Docling's layout parser detects them
         kv_pairs: Dict[str, str] = {}
@@ -276,8 +408,10 @@ def _run_qwen_extraction(
 ) -> Dict[str, Any]:
     _load_qwen()
     import torch
+    from qwen_vl_utils import process_vision_info
 
-    page_images = images[:2]
+    # Send up to 4 pages so multi-page ACORD forms (125, 140, etc.) are fully covered
+    page_images = images[:4]
 
     # Build reference context from both arms
     context_parts: List[str] = []
@@ -311,28 +445,21 @@ def _run_qwen_extraction(
         messages, tokenize=False, add_generation_prompt=True
     )
 
-    image_inputs = [
-        item["image"]
-        for msg in messages
-        if isinstance(msg.get("content"), list)
-        for item in msg["content"]
-        if item.get("type") == "image"
-    ]
+    # process_vision_info handles PIL image resizing/normalization for Qwen2-VL
+    image_inputs, video_inputs = process_vision_info(messages)
 
     inputs = _qwen_processor(
         text=[text_input],
-        images=image_inputs if image_inputs else None,
+        images=image_inputs,
+        videos=video_inputs,
         padding=True,
         return_tensors="pt",
-    )
-
-    device = next(_qwen_model.parameters()).device
-    inputs = {k: v.to(device) for k, v in inputs.items()}
+    ).to(_qwen_model.device)
 
     with torch.no_grad():
         generated_ids = _qwen_model.generate(**inputs, max_new_tokens=3072)
 
-    trimmed = [out[len(inp):] for inp, out in zip(inputs["input_ids"], generated_ids)]
+    trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
     output_text = _qwen_processor.batch_decode(
         trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
     )[0]
@@ -356,16 +483,28 @@ def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
     if not Path(pdf_path).exists():
         return {"error": f"File not found: {pdf_path}"}
 
-    images = _pdf_to_images(pdf_path)
-    if not images:
-        return {"error": "No pages found in PDF"}
-
     # Detect digital vs scanned
     import fitz as _fitz
     _doc = _fitz.open(pdf_path)
     _embedded = "".join(p.get_text("text") for p in _doc).strip()
     _doc.close()
     pdf_type = "digital" if len(_embedded) > 100 else "scanned"
+
+    # Fast path for digital PDFs: RunPod-local native extraction only.
+    if pdf_type == "digital":
+        fields, raw_text = _extract_digital_native(pdf_path, preextracted_text=_embedded)
+        return {
+            "form_type_detected": f"acord{form_type}",
+            "pdf_type": "digital",
+            "extracted_json": fields,
+            "full_text": raw_text,
+            "markdown": "",
+            "source": "runpod_native",
+        }
+
+    images = _pdf_to_images(pdf_path)
+    if not images:
+        return {"error": "No pages found in PDF"}
 
     # ── Step 1: Surya + Docling in parallel ───────────────────────────────────
     surya_ocr_text: str = ""

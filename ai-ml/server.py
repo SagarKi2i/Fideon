@@ -1,7 +1,7 @@
 """
 Fideon RunPod Server
 ====================
-Deploy this entire runpod/ folder to /workspace/runpod/ on the pod.
+Deploy this entire ai-ml/ folder to /workspace/ai-ml/ on the pod.
 
 Endpoints:
   GET  /health                        — liveness
@@ -36,9 +36,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# Ensure runpod/fine_tuning is resolved before any /workspace/fine_tuning that
+# Ensure ai-ml/fine_tuning is resolved before any /workspace/fine_tuning that
 # may exist from the backend. Insert the directory containing this file (i.e.
-# /workspace/runpod) at the front of sys.path so `import fine_tuning` always
+# /workspace/ai-ml) at the front of sys.path so `import fine_tuning` always
 # picks up the correct QLoRA pipeline package.
 _THIS_DIR = str(Path(__file__).parent.resolve())
 if _THIS_DIR not in sys.path:
@@ -198,7 +198,7 @@ def _run_ocr_job(job_id: str, pdf_path: str) -> None:
         job["status"] = "loading_model"
         job["loading_model_at"] = datetime.now(timezone.utc).isoformat()
 
-        from runpod.surya_runner import run_surya_on_pdf  # lazy: heavy import
+        from surya_runner import run_surya_on_pdf  # lazy: heavy import
 
         job["status"] = "processing"
         job["processing_at"] = datetime.now(timezone.utc).isoformat()
@@ -337,9 +337,9 @@ async def extract_acord(
         ft = ft[5:]
 
     import asyncio
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
-    from runpod.extractor import run_full_extraction
+    from extractor import run_full_extraction
 
     result = await loop.run_in_executor(_executor, run_full_extraction, pdf_path, ft)
 
