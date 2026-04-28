@@ -367,7 +367,7 @@ async def generate_text(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     import asyncio
 
     prompt: str = body.get("prompt", "")
-    max_new_tokens: int = int(body.get("max_new_tokens", 512))
+    max_new_tokens: int = int(body.get("max_new_tokens", 2048))
     temperature: float = float(body.get("temperature", 0.3))
 
     if not prompt.strip():

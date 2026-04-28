@@ -17,24 +17,25 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _PROMPT_TEMPLATE = """\
-You are an insurance document analyst. Given the extracted structured fields from an ACORD insurance certificate, write a clear, natural language summary of the document.
+You are a senior insurance document analyst. You have been given the structured fields extracted from an ACORD insurance form and the raw document text. Write a thorough, professional natural language summary that a claims adjuster or broker could use to understand the document at a glance.
 
-Rules:
-- Write in flowing paragraphs (no bullet points, no headings, no JSON, no markdown)
-- Mention the insured, the insurer, the policy period, and all coverage types with their limits
-- Mention the certificate holder and any special provisions (additional insured, waiver of subrogation, cancellation notice)
-- Use plain English dollar amounts (e.g. "one million dollars" or "$1,000,000")
-- If a value is missing or empty, skip that detail — do not say "not provided"
-- Do NOT reproduce the raw OCR text verbatim
-- Length: 3–7 paragraphs
+STRICT RULES:
+- Write in flowing paragraphs only — no bullet points, no numbered lists, no headings, no JSON, no markdown
+- Cover every section that has data: named insured and address, producer/agent, insurers, policy numbers, effective and expiration dates, each coverage type with its exact limits and deductibles, additional insureds, certificate holders, special conditions, and cancellation provisions
+- Use exact dollar figures as written on the form (e.g. "$1,000,000" or "$2,000,000 aggregate")
+- If a field is truly blank or absent, omit it — never write "not provided" or "N/A"
+- Do NOT reproduce raw OCR text verbatim — synthesise the information into professional prose
+- Write at least 5 paragraphs: (1) parties and purpose, (2) general liability coverage, (3) auto and workers comp / employers liability, (4) umbrella / excess and any other coverages, (5) certificate holder, additional insured status, and special provisions
+- If a coverage section has no data, skip that paragraph entirely
+- Tone: factual, precise, professional
 
 EXTRACTED FIELDS (JSON):
 {fields_json}
 
-RAW TEXT (for context only):
+RAW DOCUMENT TEXT (use for any detail not in the fields):
 {raw_text}
 
-Write the natural language summary now:"""
+Write the detailed natural language summary now:"""
 
 
 async def generate_nl_summary(extracted: dict[str, Any], raw_text: str) -> Optional[str]:
@@ -48,8 +49,8 @@ async def generate_nl_summary(extracted: dict[str, Any], raw_text: str) -> Optio
     if not enabled:
         return None
 
-    fields_json = json.dumps(extracted, indent=2, ensure_ascii=False)[:6000]
-    raw_snippet = (raw_text or "")[:3000]
+    fields_json = json.dumps(extracted, indent=2, ensure_ascii=False)[:8000]
+    raw_snippet = (raw_text or "")[:5000]
     prompt = _PROMPT_TEMPLATE.format(fields_json=fields_json, raw_text=raw_snippet)
 
     # Prefer the external RunPod generate URL; fall back to the local offline URL.
@@ -77,7 +78,7 @@ async def generate_nl_summary(extracted: dict[str, Any], raw_text: str) -> Optio
                     json={
                         "prompt": prompt,
                         "model": model or "default",
-                        "max_new_tokens": 1024,
+                        "max_new_tokens": 2048,
                         "temperature": 0.3,
                         "raw": True,
                     },
@@ -97,10 +98,10 @@ async def generate_nl_summary(extracted: dict[str, Any], raw_text: str) -> Optio
                     json={
                         "model": model or "default",
                         "messages": [
-                            {"role": "system", "content": "You are an insurance document analyst."},
+                            {"role": "system", "content": "You are a senior insurance document analyst."},
                             {"role": "user", "content": prompt},
                         ],
-                        "max_tokens": 1024,
+                        "max_tokens": 2048,
                         "temperature": 0.3,
                     },
                 )
@@ -109,7 +110,7 @@ async def generate_nl_summary(extracted: dict[str, Any], raw_text: str) -> Optio
                 text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
 
         summary = (text or "").strip()
-        return summary if len(summary) > 50 else None
+        return summary if len(summary) > 100 else None
 
     except Exception as exc:
         logger.warning("ACORD[nl_summary] generation failed (non-fatal): %s", exc)
