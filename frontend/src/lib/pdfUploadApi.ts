@@ -75,19 +75,10 @@ async function authHeader(): Promise<Record<string, string>> {
 
 // ── Upload ─────────────────────────────────────────────────────────────────────
 
-// ── Smart extraction (detect type → branch digital/scanned) ──────────────────
+// ── Smart extraction (detect type → always upload to RunPod) ─────────────────
 
-export type SmartExtractDigitalResult = {
-  pdf_type: "digital";
-  form_type_detected: string;
-  extracted_json: Record<string, any>;
-  full_text: string;
-  source: "local" | "claude";
-  natural_language_summary?: string;
-};
-
-export type SmartExtractScannedResult = {
-  pdf_type: "scanned";
+export type SmartExtractResult = {
+  pdf_type: "digital" | "scanned";
   upload_id: string;
   filename: string;
   size_bytes: number;
@@ -95,14 +86,11 @@ export type SmartExtractScannedResult = {
   form_type: string;
 };
 
-export type SmartExtractResult = SmartExtractDigitalResult | SmartExtractScannedResult;
-
 /**
  * Unified PDF entry point.
- * - Digital PDF: backend detects type, extracts text with PyMuPDF, calls Claude API.
- *   Returns full extraction result immediately — no RunPod upload.
- * - Scanned PDF: backend detects type, uploads to RunPod.
- *   Returns {pdf_type:"scanned", upload_id} — caller must then call triggerFullExtraction.
+ * - Backend detects digital/scanned for metadata.
+ * - Backend uploads to RunPod for both types.
+ * - Returns {pdf_type, upload_id, ...}; caller then calls triggerFullExtraction(upload_id).
  */
 export async function smartExtractPdf(
   file: File,

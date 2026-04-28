@@ -147,9 +147,10 @@ def promote_adapter(
     1. Upload merged HF model   → SeaweedFS  finetuned/v{version}/
     2. Quantize                 → GGUF Q5_K_M + Q4_K_M (skipped if llama.cpp absent)
     3. Upload quantized GGUFs   → SeaweedFS  quantized/v{version}/
-    4. Update registry          → promote_version() with all SeaweedFS paths
-    5. Write model card
-    6. Send alert
+    4. Register GGUFs           → Supabase adapter_registry (Electron delivery)
+    5. Update registry          → promote_version() with all SeaweedFS paths
+    6. Write model card
+    7. Send alert
     """
     from fine_tuning.registry.version_registry import VersionRegistry
     from fine_tuning.registry.model_card import write_model_card
@@ -196,7 +197,7 @@ def promote_adapter(
     else:
         print("[orchestrator] No GGUF S3 keys — skipping adapter_registry registration.")
 
-    # ── 6. Update local registry ─────────────────────────────────────────────
+    # ── 5. Update local registry ─────────────────────────────────────────────
     registry.promote_version(
         version=version,
         merged_model_path=merged_model_path,
@@ -209,7 +210,7 @@ def promote_adapter(
         },
     )
 
-    # ── 7. Write model card ──────────────────────────────────────────────────
+    # ── 6. Write model card ──────────────────────────────────────────────────
     write_model_card(
         merged_model_path,
         meta={
@@ -222,7 +223,7 @@ def promote_adapter(
         },
     )
 
-    # ── 8. Alert ─────────────────────────────────────────────────────────────
+    # ── 7. Alert ─────────────────────────────────────────────────────────────
     alerter.send_promotion(
         adapter_id=adapter_id,
         version=version,

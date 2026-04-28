@@ -1,39 +1,39 @@
-# Fideon RunPod PDF Upload + Fine-tuning Server
-# NOTE: For pod deployment, upload the runpod/ folder to /workspace/runpod/
-#       and run:  bash /workspace/runpod/setup.sh
-#
-# Build:  docker build -t fideon-runpod .
-# Run:    docker run --gpus all -p 8080:8080 \
-#           -e SEAWEEDFS_ENDPOINT=... \
-#           -e SEAWEEDFS_ACCESS_KEY=... \
-#           -e SEAWEEDFS_SECRET_KEY=... \
-#           -e SEAWEEDFS_BUCKET=my-bucket \
-#           fideon-runpod
-
 FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 
-WORKDIR /workspace
+WORKDIR /app
 
-# Install Python dependencies
-COPY requirements.txt ./runpod/requirements.txt
-RUN pip install --no-cache-dir -r runpod/requirements.txt
+# Install cloudflared + dependencies
+RUN apt-get update && apt-get install -y curl git && \
+    mkdir -p --mode=0755 /usr/share/keyrings && \
+    curl -fsSL https://pkg.cloudflare.com/cloudflare-public-v2.gpg | \
+    tee /usr/share/keyrings/cloudflare-public-v2.gpg >/dev/null && \
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-public-v2.gpg] \
+    https://pkg.cloudflare.com/cloudflared any main" | \
+    tee /etc/apt/sources.list.d/cloudflared.list && \
+    apt-get update && apt-get install -y cloudflared && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Copy entire runpod package
-COPY . ./runpod/
+# Install Python packages
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-RUN chmod +x /workspace/runpod/start.sh /workspace/runpod/setup.sh
+# Copy all code
+COPY . .
 
-# Build llama.cpp with CUDA (for quantization)
-RUN bash /workspace/runpod/setup.sh --skip-pip
+# Permissions
+RUN chmod +x startup.sh setup.sh
 
-# Create data directories
+# Build llama.cpp
+RUN bash setup.sh --skip-pip
+
+# Create directories
 RUN mkdir -p /workspace/uploads \
              /workspace/fine_tuning/training_samples \
-             /workspace/fine_tuning/models
+             /workspace/fine_tuning/models \
+             /workspace/logs
 
-EXPOSE 8080
+EXPOSE 8000
 
-ENV UPLOAD_DIR=/workspace/uploads
-ENV UPLOAD_SERVER_PORT=8080
+ENV PYTHONUNBUFFERED=1
 
-CMD ["/workspace/runpod/start.sh"]
+CMD ["/app/startup.sh"]

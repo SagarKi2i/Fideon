@@ -135,7 +135,7 @@ Create `/workspace/start_backend.sh` on the pod:
 ```bash
 #!/bin/bash
 mkdir -p /workspace/uploads
-cd /workspace/ai-ml
+cd /workspace
 nohup python -m uvicorn server:app \
   --host 0.0.0.0 --port 8080 --log-level info \
   > /workspace/server.log 2>&1 &
