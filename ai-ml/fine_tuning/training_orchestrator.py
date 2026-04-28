@@ -36,12 +36,20 @@ def _register_gguf_in_supabase(
     Upsert each uploaded GGUF artifact into Supabase adapter_registry so that
     Electron's GET /api/v1/adapter/latest picks it up for download.
 
+    Schema (from migrations/20260411000000_adapter_registry.sql):
+      domain, adapter_version, filename, quant_level, sha256, size_bytes,
+      blob_key, min_electron_ver, canary_pct, rollback_safe, is_available, blocked
+
+    Unique constraint: (domain, adapter_version, quant_level)
+
     Non-fatal — logs a warning and returns if Supabase is not configured.
     """
     supabase_url = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
     supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
     domain       = os.getenv("FT_DOMAIN", "acord").strip()
     canary_pct   = int(os.getenv("FT_REGISTRY_CANARY_PCT", "100"))
+    # adapter_version: "1.{N}.0" matches SLM v1.N naming, e.g. version=13 → "1.13.0"
+    adapter_version = os.getenv("FT_ADAPTER_VERSION", f"1.{version}.0").strip()
 
     if not supabase_url or not supabase_key:
         print(
@@ -56,7 +64,6 @@ def _register_gguf_in_supabase(
         print("[orchestrator] httpx not installed — skipping adapter_registry registration.")
         return
 
-    adapter_version = f"v{version}"
     gguf_path = Path(gguf_dir)
     headers = {
         "apikey": supabase_key,
@@ -76,8 +83,8 @@ def _register_gguf_in_supabase(
                 h.update(chunk)
         return h.hexdigest()
 
-    def _parse_quant(filename: str) -> str:
-        low = filename.lower()
+    def _parse_quant(fname: str) -> str:
+        low = fname.lower()
         for q in ["q5_k_m", "q4_k_m", "q8_0", "q6_k", "q3_k_m", "q2_k", "f16", "f32"]:
             if q in low:
                 return q
@@ -85,8 +92,8 @@ def _register_gguf_in_supabase(
 
     with httpx.Client(timeout=30) as client:
         for key in gguf_s3_keys:
-            filename  = key.split("/")[-1]
-            local_f   = gguf_path / filename
+            filename = key.split("/")[-1]        # e.g. "model-q5_k_m.gguf"
+            local_f  = gguf_path / filename
             if not local_f.exists():
                 print(f"[orchestrator] GGUF not found locally for registry: {filename}")
                 continue
@@ -94,28 +101,29 @@ def _register_gguf_in_supabase(
             sha256hex = _sha256(local_f)
             size      = local_f.stat().st_size
             row = {
-                "domain":          domain,
-                "adapter_version": adapter_version,
-                "quant_level":     quant,
-                "sha256":          f"sha256:{sha256hex}",
-                "size_bytes":      size,
-                "blob_key":        key,
-                "is_available":    True,
-                "blocked":         False,
-                "canary_pct":      canary_pct,
+                "domain":           domain,
+                "adapter_version":  adapter_version,
+                "filename":         filename,       # required column from migration
+                "quant_level":      quant,
+                "sha256":           f"sha256:{sha256hex}",
+                "size_bytes":       size,
+                "blob_key":         key,            # actual S3 key used to generate presigned URL
+                "is_available":     True,
+                "blocked":          False,
+                "canary_pct":       canary_pct,
                 "min_electron_ver": "0.0.0",
-                "rollback_safe":   True,
+                "rollback_safe":    True,
             }
             resp = client.post(url, headers=headers, json=row)
             if resp.is_success:
                 print(
-                    f"[orchestrator] adapter_registry: registered {domain}@{adapter_version} "
-                    f"quant={quant} blob={key}"
+                    f"[orchestrator] adapter_registry ✓ {domain}@{adapter_version} "
+                    f"quant={quant}  blob={key}"
                 )
             else:
                 print(
-                    f"[orchestrator] adapter_registry: FAILED to register {quant} "
-                    f"({resp.status_code}): {resp.text[:200]}"
+                    f"[orchestrator] adapter_registry FAILED {quant} "
+                    f"({resp.status_code}): {resp.text[:300]}"
                 )
 
 
