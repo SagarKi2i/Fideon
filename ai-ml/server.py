@@ -535,6 +535,7 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
     # ── Build chat-format samples and append to version store ─────────────────
     snapshot_path: Optional[str] = None
     ingested = 0
+    ingested_ids: set = set()   # only successfully processed samples get marked "used"
     for sample in samples:
         try:
             chat_row = build_training_sample_from_correction(
@@ -547,10 +548,11 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
                 retrain_threshold=threshold,
             )
             ingested += 1
+            ingested_ids.add(sample.get("sample_id"))
             if outcome.version_snapshot_path:
                 snapshot_path = outcome.version_snapshot_path
         except Exception as exc:
-            print(f"[finetune/start] skipping sample {sample.get('sample_id')}: {exc}")
+            print(f"[finetune/start] skipping sample {sample.get('sample_id')} (stays pending for retry): {exc}")
 
     if not snapshot_path:
         # Force a snapshot from whatever is pending now (manual trigger bypasses threshold)
@@ -583,8 +585,8 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
                 "ingested": ingested,
             }
 
-    # ── Mark ingested samples as "used" so they are not re-ingested next cycle ──
-    used_ids = {s.get("sample_id") for s in samples}
+    # ── Mark successfully ingested samples as "used" — skipped ones stay pending ──
+    used_ids = ingested_ids
     all_samples = _load_training_samples()
     used_at = datetime.now(timezone.utc).isoformat()
     updated_samples = []
