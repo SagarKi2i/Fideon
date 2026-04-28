@@ -113,5 +113,9 @@ async def generate_nl_summary(extracted: dict[str, Any], raw_text: str) -> Optio
         return summary if len(summary) > 100 else None
 
     except Exception as exc:
-        logger.warning("ACORD[nl_summary] generation failed (non-fatal): %s", exc)
+        logger.warning(
+            "ACORD[nl_summary] generation failed (non-fatal): %s — "
+            "check RUNPOD_GENERATE_URL=%s is reachable and pod is running updated server.py",
+            exc, offline_url or chat_url,
+        )
         return None

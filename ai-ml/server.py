@@ -374,23 +374,28 @@ async def generate_text(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="prompt is required")
 
     def _infer() -> str:
-        from extractor import _load_qwen, _qwen_model, _qwen_processor
+        import extractor as _ext
         import torch
 
-        _load_qwen()
+        # _load_qwen() sets extractor._qwen_model / _qwen_processor as module globals.
+        # Access them through the module after loading so we always get the live reference,
+        # not a None snapshot captured before the model was loaded.
+        _ext._load_qwen()
+        model     = _ext._qwen_model
+        processor = _ext._qwen_processor
 
         messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
-        text_input = _qwen_processor.apply_chat_template(
+        text_input = processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        inputs = _qwen_processor(
+        inputs = processor(
             text=[text_input],
             padding=True,
             return_tensors="pt",
-        ).to(_qwen_model.device)
+        ).to(model.device)
 
         with torch.no_grad():
-            generated_ids = _qwen_model.generate(
+            generated_ids = model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
@@ -398,7 +403,7 @@ async def generate_text(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
             )
 
         trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
-        return _qwen_processor.batch_decode(
+        return processor.batch_decode(
             trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )[0]
 
