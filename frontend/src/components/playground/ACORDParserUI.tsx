@@ -752,31 +752,13 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
                 </TabsContent>
               </Tabs>
 
-              <div className="flex items-center justify-between pt-3 border-t border-border/50 gap-3 flex-wrap">
+              <div className="flex items-center justify-start pt-3 border-t border-border/50">
                 <Button
                   variant="outline"
                   className="shrink-0 text-muted-foreground"
                   onClick={() => toast({ title: "Send to Review", description: "Review workflow coming soon." })}
                 >
                   Send to Review
-                </Button>
-                <Button
-                  onClick={async () => {
-                    if (ocrTab !== "markdown") {
-                      setOcrTab("markdown");
-                    } else {
-                      await handleSubmitAndTrain();
-                      setTimeout(() => setTrainSubmittedRunpod(false), 2000);
-                    }
-                  }}
-                  disabled={isSubmittingTrain}
-                  className="shrink-0 border-green-600 text-green-400 hover:bg-green-600/10 bg-transparent border"
-                >
-                  {isSubmittingTrain ? (
-                    <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Saving…</>
-                  ) : (
-                    <><FileCheck className="h-4 w-4 mr-2" />Edit &amp; Train</>
-                  )}
                 </Button>
               </div>
             </CardContent>
