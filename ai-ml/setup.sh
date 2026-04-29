@@ -37,14 +37,14 @@ apt-get update -qq && apt-get install -y -q build-essential cmake libgomp1 curl 
 export PATH=/usr/local/cuda/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
-if [[ -d /opt/llama.cpp ]]; then
+if [[ -d /workspace/llama.cpp ]]; then
   echo "  llama.cpp already cloned — pulling latest..."
-  git -C /opt/llama.cpp pull --ff-only || true
+  git -C /workspace/llama.cpp pull --ff-only || true
 else
-  git clone --depth 1 https://github.com/ggerganov/llama.cpp /opt/llama.cpp
+  git clone --depth 1 https://github.com/ggerganov/llama.cpp /workspace/llama.cpp
 fi
 
-cd /opt/llama.cpp
+cd /workspace/llama.cpp
 cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release -j$(nproc)
 cp build/bin/llama-quantize /usr/local/bin/
@@ -52,8 +52,8 @@ cp build/bin/llama-quantize /usr/local/bin/
 # ── 3. llama.cpp Python dependencies (needed by convert_hf_to_gguf.py) ───────
 echo ""
 echo "[3/4] Installing llama.cpp Python requirements..."
-if [[ -f /opt/llama.cpp/requirements.txt ]]; then
-  pip install -q -r /opt/llama.cpp/requirements.txt
+if [[ -f /workspace/llama.cpp/requirements.txt ]]; then
+  pip install -q -r /workspace/llama.cpp/requirements.txt
 fi
 # Ensure gguf package is available (converter dependency)
 pip install -q gguf
@@ -61,7 +61,7 @@ pip install -q gguf
 # Wrap convert_hf_to_gguf.py as a callable command
 cat > /usr/local/bin/llama-convert-hf-to-gguf <<'WRAPPER'
 #!/usr/bin/env bash
-exec python3 /opt/llama.cpp/convert_hf_to_gguf.py "$@"
+exec python3 /workspace/llama.cpp/convert_hf_to_gguf.py "$@"
 WRAPPER
 chmod +x /usr/local/bin/llama-convert-hf-to-gguf
 
