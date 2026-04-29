@@ -1,16 +1,48 @@
 import hashlib
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
 import httpx
+import jwt as pyjwt
 import structlog
 from fastapi import HTTPException, Request
 
 _audit_log = structlog.get_logger("audit_log")
 
-from .config import SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL
+from .config import SUPABASE_ANON_KEY, SUPABASE_JWT_SECRET, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL
+
+# ── C1: Multi-tenant table registry ──────────────────────────────────────────
+# Tables that hold per-tenant data. Every service-key query on these tables
+# MUST include tenant_id=eq.<id> to prevent cross-tenant data leakage.
+# Add a table here when you create a migration that adds a tenant_id column.
+MULTI_TENANT_TABLES: frozenset[str] = frozenset({
+    "app_users",
+    "devices",
+    "documents",
+    "activated_models",
+    "workflows",
+    "training_jobs",
+    "audit_logs",
+    "auth_audit",
+    "agent_pipelines",
+    "agent_schedules",
+    "chat_conversations",
+    "chat_messages",
+    "decision_reviews",
+    "device_analytics",
+    "device_licenses",
+    "device_models",
+    "policy_comparisons",
+    "pod_activation_requests",
+    "training_feedback",
+    "visual_workflows",
+    "workflow_runs",
+    "acord_extraction_runs",
+    "acord_extract_jobs",
+    "acord_extraction_feedback",
+})
 
 
 def service_headers(json_body: bool = True) -> Dict[str, str]:
@@ -27,6 +59,33 @@ async def verify_user(authorization: Optional[str]) -> Dict[str, Any]:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Unauthorized")
     token = authorization.split(" ", 1)[1]
+
+    # Fast path: verify JWT signature locally — zero network calls.
+    # Falls back to Supabase HTTP call if JWT_SECRET is not configured.
+    if SUPABASE_JWT_SECRET:
+        try:
+            payload = pyjwt.decode(
+                token,
+                SUPABASE_JWT_SECRET,
+                algorithms=["HS256"],
+                options={"verify_aud": False},
+            )
+            user_id = payload.get("sub")
+            if not user_id:
+                raise HTTPException(status_code=401, detail="Unauthorized")
+            return {
+                "id": user_id,
+                "email": payload.get("email", ""),
+                "app_metadata": payload.get("app_metadata", {}),
+                "user_metadata": payload.get("user_metadata", {}),
+                "role": payload.get("role", "authenticated"),
+            }
+        except pyjwt.ExpiredSignatureError:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        except pyjwt.InvalidTokenError:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Slow path: SUPABASE_JWT_SECRET not set — call Supabase auth server.
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
             f"{SUPABASE_URL}/auth/v1/user",
@@ -161,6 +220,64 @@ async def postgrest_delete(table: str, query: str) -> None:
         )
     if resp.status_code >= 400:
         raise HTTPException(status_code=500, detail=resp.text)
+
+
+# ── C1: Tenant-scoped PostgREST helpers ──────────────────────────────────────
+# These wrappers enforce tenant_id on every query so a missing filter can never
+# silently return cross-tenant rows even when the service role key is used.
+
+def _assert_tenant_id(tenant_id: Optional[str], table: str) -> str:
+    """Raise ValueError at call time if tenant_id is missing for a multi-tenant table."""
+    if table in MULTI_TENANT_TABLES and not tenant_id:
+        raise ValueError(
+            f"tenant_scoped_get/insert/patch called on multi-tenant table '{table}' "
+            "without a tenant_id. Pass tenant_id from get_user_context() — never derive "
+            "it from user input."
+        )
+    return tenant_id or ""
+
+
+async def tenant_scoped_get(
+    table: str,
+    query: str,
+    tenant_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """
+    postgrest_get with mandatory tenant_id filter.
+    Appends &tenant_id=eq.<id> automatically — callers must NOT add it themselves.
+    """
+    _assert_tenant_id(tenant_id, table)
+    scoped_query = f"{query}&tenant_id=eq.{quote(tenant_id, safe='')}"
+    return await postgrest_get(table, scoped_query)
+
+
+async def tenant_scoped_insert(
+    table: str,
+    payload: Dict[str, Any],
+    tenant_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """
+    postgrest_insert with mandatory tenant_id injected into the payload.
+    Prevents accidentally creating rows that belong to no tenant.
+    """
+    _assert_tenant_id(tenant_id, table)
+    scoped_payload = {**payload, "tenant_id": tenant_id}
+    return await postgrest_insert(table, scoped_payload)
+
+
+async def tenant_scoped_patch(
+    table: str,
+    query: str,
+    payload: Dict[str, Any],
+    tenant_id: Optional[str],
+) -> None:
+    """
+    postgrest_patch with mandatory tenant_id filter.
+    Prevents a patch from accidentally touching another tenant's rows.
+    """
+    _assert_tenant_id(tenant_id, table)
+    scoped_query = f"{query}&tenant_id=eq.{quote(tenant_id, safe='')}"
+    return await postgrest_patch(table, scoped_query, payload)
 
 
 async def get_device_by_token(device_token: str) -> Dict[str, Any]:

@@ -30,9 +30,54 @@ let tray: Tray | null = null;
 let isQuitting = false;
 let deviceHeartbeatStopper: (() => void) | null = null;
 
+function envBool(name: string, fallback = false): boolean {
+  const raw = (process.env[name] ?? "").trim().toLowerCase();
+  if (!raw) return fallback;
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
 function electronApiBase(): string {
   const raw = process.env.ELECTRON_API_BASE_URL?.replace(/\/+$/, "") ?? "http://localhost:8000";
   return raw.replace(/\/+$/, "");
+}
+
+/**
+ * Packaged builds may still embed an old NEXT_PUBLIC_API_URL (e.g. a dead QA IP).
+ * Rewrite matching renderer HTTP(S) requests to {@link electronApiBase} without touching the Next bundle.
+ * Set ELECTRON_RENDERER_API_REWRITE_ORIGINS to a comma-separated list of origins (no trailing slash), e.g.
+ * `http://13.68.145.18:8080,https://legacy.example.com`
+ */
+function registerRendererApiRewrite(sess: typeof session.defaultSession) {
+  const targetBase = electronApiBase();
+  const raw = process.env.ELECTRON_RENDERER_API_REWRITE_ORIGINS ?? "";
+  const origins = raw
+    .split(",")
+    .map((s) => s.trim().replace(/\/+$/, ""))
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+
+  if (origins.length === 0) {
+    return;
+  }
+
+  sess.webRequest.onBeforeRequest((details, callback) => {
+    if (details.resourceType === "mainFrame") {
+      callback({});
+      return;
+    }
+    const url = details.url;
+    for (const origin of origins) {
+      if (url === origin || url.startsWith(`${origin}/`)) {
+        const suffix = url.slice(origin.length);
+        const pathPart = suffix.startsWith("/") ? suffix : suffix ? `/${suffix}` : "";
+        const newUrl = pathPart ? `${targetBase}${pathPart}` : targetBase;
+        log(`[main] renderer API rewrite: ${url} -> ${newUrl}`);
+        callback({ redirectURL: newUrl });
+        return;
+      }
+    }
+    callback({});
+  });
 }
 
 async function readJsonSafe(res: Response): Promise<any> {
@@ -260,6 +305,7 @@ function createTray() {
 }
 
 async function createWindow() {
+  const disableWebSecurity = envBool("ELECTRON_DISABLE_WEB_SECURITY", false);
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -269,6 +315,9 @@ async function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // Electron-only QA escape hatch when renderer CORS blocks local backend.
+      // Keep disabled by default; enable explicitly in electron/.env when needed.
+      webSecurity: !disableWebSecurity,
     },
   });
 
@@ -372,6 +421,8 @@ async function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  registerRendererApiRewrite(session.defaultSession);
+
   if (isProd && nextRsc) {
     // Production: intercept localhostUrl and serve Next internally (no open port).
     await nextRsc.createInterceptor({ session: session.defaultSession });

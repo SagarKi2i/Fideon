@@ -47,9 +47,28 @@ export interface InstallResult {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+function wrapFsError(err: NodeJS.ErrnoException, filePath: string): Error {
+  if (err.code === "EPERM" || err.code === "EACCES") {
+    return new Error(
+      `Permission denied accessing "${filePath}".\n` +
+      `This is usually caused by antivirus software (e.g. Windows Defender) locking the file.\n` +
+      `Fix: add "${path.dirname(filePath)}" to your antivirus exclusion list, ` +
+      `delete any partial .gguf files in that folder, then retry.`,
+    );
+  }
+  if (err.code === "ENOSPC") {
+    return new Error(`Disk full — not enough space to download the model to "${filePath}".`);
+  }
+  return err;
+}
+
 function modelsDir(): string {
   const dir = path.join(app.getPath("userData"), "fideon-models");
-  fs.mkdirSync(dir, { recursive: true });
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (err: any) {
+    throw wrapFsError(err as NodeJS.ErrnoException, dir);
+  }
   return dir;
 }
 
@@ -60,6 +79,7 @@ function authedHeaders(deviceJwt: string): Record<string, string> {
 /**
  * Download a URL to a local file, calling onProgress with byte counts.
  * Follows up to 5 redirects. Uses http/https for streaming progress.
+ * Destroys the request if no data arrives within SOCKET_IDLE_TIMEOUT_MS.
  */
 async function downloadFile(
   url: string,
@@ -68,64 +88,76 @@ async function downloadFile(
   onProgress: (received: number, total: number) => void,
 ): Promise<void> {
   const MAX_REDIRECTS = 5;
+  const SOCKET_IDLE_TIMEOUT_MS = 60_000;
 
   const doRequest = (currentUrl: string, redirectsLeft: number): Promise<void> =>
     new Promise((resolve, reject) => {
       const proto = currentUrl.startsWith("https://") ? https : http;
-      const file = fs.createWriteStream(destPath);
+      let file: fs.WriteStream;
+      try {
+        file = fs.createWriteStream(destPath);
+      } catch (err: any) {
+        reject(wrapFsError(err as NodeJS.ErrnoException, destPath));
+        return;
+      }
       let received = 0;
 
-      proto
-        .get(currentUrl, (res) => {
-          // Follow redirects
-          if (
-            res.statusCode &&
-            res.statusCode >= 300 &&
-            res.statusCode < 400 &&
-            res.headers.location
-          ) {
-            file.destroy();
-            if (redirectsLeft <= 0) {
-              reject(new Error(`Too many redirects downloading ${currentUrl}`));
-              return;
-            }
-            const next = res.headers.location.startsWith("http")
-              ? res.headers.location
-              : new URL(res.headers.location, currentUrl).toString();
-            resolve(doRequest(next, redirectsLeft - 1));
-            return;
-          }
-
-          if (res.statusCode !== 200) {
-            file.destroy();
-            reject(new Error(`Download failed: HTTP ${String(res.statusCode)} for ${currentUrl}`));
-            return;
-          }
-
-          res.on("data", (chunk: Buffer) => {
-            received += chunk.length;
-            onProgress(received, totalBytes);
-          });
-
-          res.pipe(file);
-
-          file.on("finish", () => resolve());
-
-          file.on("error", (err) => {
-            fs.unlink(destPath, () => {});
-            reject(err);
-          });
-
-          res.on("error", (err) => {
-            file.destroy();
-            fs.unlink(destPath, () => {});
-            reject(err);
-          });
-        })
-        .on("error", (err) => {
+      const req = proto.get(currentUrl, (res) => {
+        // Follow redirects
+        if (
+          res.statusCode &&
+          res.statusCode >= 300 &&
+          res.statusCode < 400 &&
+          res.headers.location
+        ) {
           file.destroy();
+          if (redirectsLeft <= 0) {
+            reject(new Error(`Too many redirects downloading ${currentUrl}`));
+            return;
+          }
+          const next = res.headers.location.startsWith("http")
+            ? res.headers.location
+            : new URL(res.headers.location, currentUrl).toString();
+          resolve(doRequest(next, redirectsLeft - 1));
+          return;
+        }
+
+        if (res.statusCode !== 200) {
+          file.destroy();
+          reject(new Error(`Download failed: HTTP ${String(res.statusCode)} for ${currentUrl}`));
+          return;
+        }
+
+        res.on("data", (chunk: Buffer) => {
+          received += chunk.length;
+          onProgress(received, totalBytes);
+        });
+
+        res.pipe(file);
+
+        file.on("finish", () => resolve());
+
+        file.on("error", (err: NodeJS.ErrnoException) => {
+          fs.unlink(destPath, () => {});
+          reject(wrapFsError(err, destPath));
+        });
+
+        res.on("error", (err) => {
+          file.destroy();
+          fs.unlink(destPath, () => {});
           reject(err);
         });
+      });
+
+      // Kill stalled connections — no data for 60 s means the download is hung.
+      req.setTimeout(SOCKET_IDLE_TIMEOUT_MS, () => {
+        req.destroy(new Error(`Download stalled: no data received for ${SOCKET_IDLE_TIMEOUT_MS / 1000}s`));
+      });
+
+      req.on("error", (err) => {
+        file.destroy();
+        reject(err);
+      });
     });
 
   return doRequest(url, MAX_REDIRECTS);
@@ -240,72 +272,110 @@ export async function downloadAndInstall(opts: {
   // Derive a stable Ollama model name: e.g. "broker-1.2.0-q5_k_m"
   const modelName = `${domain}-${version}-${quant}`;
   const dir = path.join(modelsDir(), domain, version);
-  fs.mkdirSync(dir, { recursive: true });
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (err: any) {
+    throw wrapFsError(err as NodeJS.ErrnoException, dir);
+  }
 
+  // Use .tmp extension during download so antivirus (e.g. Windows Defender managed
+  // via Group Policy) does not lock the file mid-stream. The final .gguf only
+  // exists after an atomic rename, which is too fast to acquire a scan lock.
+  const ggufTmp  = path.join(dir, `model-${quant}.gguf.tmp`);
+  const sigTmp   = path.join(dir, `model-${quant}.gguf.sig.tmp`);
   const ggufPath = path.join(dir, `model-${quant}.gguf`);
   const sigPath  = path.join(dir, `model-${quant}.gguf.sig`);
   const modelfilePath = path.join(dir, "Modelfile");
 
-  // ── Step 1: Get fresh presigned URL ──────────────────────────────────────
+  // ── Steps 1-4: Download GGUF + .sig (retried up to 3 times) ─────────────
+  // Presigned URLs are re-fetched on each attempt so expiry is never a factor.
   const urlParams = new URLSearchParams({ domain, version, quant });
-  const urlRes = await fetch(`${apiBase}/api/v1/adapter/download-url?${urlParams.toString()}`, {
-    headers: authedHeaders(deviceJwt),
-  });
-  if (!urlRes.ok) {
-    throw new Error(`Failed to get download URL: HTTP ${urlRes.status}`);
-  }
-  const { url: ggufUrl } = (await urlRes.json()) as { url: string };
-
-  // ── Step 2: Get presigned URL for .sig file ───────────────────────────────
   const sigParams = new URLSearchParams({ domain, version, quant, sig: "true" });
-  const sigUrlRes = await fetch(`${apiBase}/api/v1/adapter/download-url?${sigParams.toString()}`, {
-    headers: authedHeaders(deviceJwt),
-  });
-  if (!sigUrlRes.ok) {
-    throw new Error(`Failed to get sig download URL: HTTP ${sigUrlRes.status}`);
+  const MAX_DOWNLOAD_ATTEMPTS = 3;
+  let lastDownloadError: Error | undefined;
+
+  for (let attempt = 1; attempt <= MAX_DOWNLOAD_ATTEMPTS; attempt++) {
+    try {
+      if (attempt > 1) {
+        const delay = 2_000 * attempt;
+        onProgress({ phase: "downloading", detail: `Retry ${attempt}/${MAX_DOWNLOAD_ATTEMPTS} in ${delay / 1000}s…` });
+        await new Promise<void>((r) => setTimeout(r, delay));
+      }
+
+      // Remove stale .tmp files from a previous attempt (they carry no useful data).
+      for (const stale of [ggufTmp, sigTmp]) {
+        try { if (fs.existsSync(stale)) fs.unlinkSync(stale); } catch { /* ignore */ }
+      }
+
+      const urlRes = await fetch(`${apiBase}/api/v1/adapter/download-url?${urlParams.toString()}`, {
+        headers: authedHeaders(deviceJwt),
+      });
+      if (!urlRes.ok) throw new Error(`Failed to get download URL: HTTP ${urlRes.status}`);
+      const { url: ggufUrl } = (await urlRes.json()) as { url: string };
+
+      const sigUrlRes = await fetch(`${apiBase}/api/v1/adapter/download-url?${sigParams.toString()}`, {
+        headers: authedHeaders(deviceJwt),
+      });
+      if (!sigUrlRes.ok) throw new Error(`Failed to get sig download URL: HTTP ${sigUrlRes.status}`);
+      const { url: sigUrl } = (await sigUrlRes.json()) as { url: string };
+
+      onProgress({ phase: "downloading", bytesReceived: 0, totalBytes: sizeBytes, percent: 0 });
+      await downloadFile(ggufUrl, ggufTmp, sizeBytes, (received, total) => {
+        onProgress({
+          phase: "downloading",
+          bytesReceived: received,
+          totalBytes: total,
+          percent: Math.floor((received / total) * 100),
+        });
+      });
+
+      onProgress({ phase: "downloading", detail: "Downloading signature file…" });
+      await downloadFile(sigUrl, sigTmp, 0, () => {});
+
+      lastDownloadError = undefined;
+      break;
+    } catch (err: any) {
+      lastDownloadError = err as Error;
+    }
   }
-  const { url: sigUrl } = (await sigUrlRes.json()) as { url: string };
 
-  // ── Step 3: Download GGUF ────────────────────────────────────────────────
-  onProgress({ phase: "downloading", bytesReceived: 0, totalBytes: sizeBytes, percent: 0 });
+  if (lastDownloadError) {
+    // Best-effort cleanup of .tmp files — ignore if a lock is still held.
+    for (const stale of [ggufTmp, sigTmp]) {
+      try { if (fs.existsSync(stale)) fs.unlinkSync(stale); } catch { /* non-fatal */ }
+    }
+    throw lastDownloadError;
+  }
 
-  await downloadFile(ggufUrl, ggufPath, sizeBytes, (received, total) => {
-    onProgress({
-      phase: "downloading",
-      bytesReceived: received,
-      totalBytes: total,
-      percent: Math.floor((received / total) * 100),
-    });
-  });
-
-  // ── Step 4: Download .sig file ───────────────────────────────────────────
-  onProgress({ phase: "downloading", detail: "Downloading signature file..." });
-  await downloadFile(sigUrl, sigPath, 0, () => {});
-
-  // ── Step 5: Verify SHA-256 ───────────────────────────────────────────────
+  // ── Step 5: Verify SHA-256 (on the .tmp file before rename) ─────────────
   onProgress({ phase: "verifying", detail: "Verifying SHA-256..." });
 
-  const actualHex = await sha256File(ggufPath);
+  const actualHex = await sha256File(ggufTmp);
   const expectedHex = sha256Expected.replace(/^sha256:/, "");
   if (actualHex !== expectedHex) {
-    fs.rmSync(dir, { recursive: true, force: true });
+    for (const stale of [ggufTmp, sigTmp]) {
+      try { if (fs.existsSync(stale)) fs.unlinkSync(stale); } catch { /* non-fatal */ }
+    }
     throw new Error(
       `SHA-256 mismatch — file may be corrupted.\nExpected: ${expectedHex}\nGot:      ${actualHex}`,
     );
   }
 
-  // ── Step 6: Verify GPG signature (best-effort) ───────────────────────────
+  // ── Step 6: Verify GPG signature (best-effort, still on .tmp) ───────────
   onProgress({ phase: "verifying", detail: "Verifying GPG signature..." });
-  const gpgOk = await verifyGpgSig(ggufPath, sigPath);
+  const gpgOk = await verifyGpgSig(ggufTmp, sigTmp);
   if (!gpgOk) {
-    // gpg not installed on this machine — SHA-256 is sufficient for integrity
     onProgress({ phase: "verifying", detail: "GPG not available — skipping signature check" });
   }
+
+  // ── Step 6b: Atomic rename .tmp → final paths ────────────────────────────
+  // Rename is near-instant so antivirus cannot acquire a scan lock on the .gguf.
+  fs.renameSync(ggufTmp, ggufPath);
+  fs.renameSync(sigTmp,  sigPath);
 
   // ── Step 7: Import into Ollama ───────────────────────────────────────────
   onProgress({ phase: "installing", detail: `Running ollama create ${modelName}...` });
 
-  // Ensure the local Ollama server is up before running the CLI import.
   await requireOllamaRunning();
 
   fs.writeFileSync(modelfilePath, `FROM ${ggufPath}\n`, "utf8");

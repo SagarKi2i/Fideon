@@ -13,6 +13,7 @@ export interface TrainingFeedback {
   feedback_type: string;
   is_used_for_training: boolean;
   created_at: string;
+  form_type?: string;
 }
 
 export interface TrainingJob {
@@ -79,6 +80,7 @@ function saveLocalFeedback(fb: Omit<TrainingFeedback, 'id' | 'device_id' | 'is_u
     device_id: 'local',
     is_used_for_training: false,
     created_at: new Date().toISOString(),
+    form_type: (fb as any).form_type ?? undefined,
   };
   const existing = getLocalFeedback();
   existing.unshift(entry);
@@ -122,6 +124,7 @@ export async function submitFeedback(data: {
   corrected_response?: string;
   rating?: number;
   feedback_type?: string;
+  form_type?: string;
 }): Promise<{ success: boolean; feedback_id: string }> {
   const token = getDeviceToken();
   if (!token) {
@@ -133,7 +136,8 @@ export async function submitFeedback(data: {
       corrected_response: data.corrected_response || null,
       rating: data.rating || null,
       feedback_type: data.feedback_type || 'correction',
-    });
+      form_type: data.form_type,
+    } as any);
     return { success: true, feedback_id: entry.id };
   }
   return trainingRequest('submit-feedback', undefined, data);
@@ -169,21 +173,22 @@ export async function createTrainingJob(data: {
   const token = getDeviceToken();
   if (!token) {
     const localFeedback = getLocalFeedback().filter((f: any) => f.model_id === data.model_id && !f.is_used_for_training);
+    const runpodJobId = (data.config as any)?.runpod_job_id ?? null;
     const job: TrainingJob = {
       id: crypto.randomUUID(),
       device_id: 'local',
       model_id: data.model_id,
-      status: 'completed',
+      status: 'running',
       training_type: data.training_type || 'fine-tune',
-      config: data.config || {},
-      metrics: { samples: localFeedback.length, epochs: 3, loss: +(Math.random() * 0.1 + 0.01).toFixed(4) },
+      config: { ...(data.config || {}), runpod_job_id: runpodJobId },
+      metrics: {},
       feedback_count: localFeedback.length,
       started_at: new Date().toISOString(),
-      completed_at: new Date().toISOString(),
+      completed_at: null,
       error_message: null,
       created_at: new Date().toISOString(),
     };
-    // Mark feedback as used
+    // Mark feedback as used so count resets to 0
     const allFb = getLocalFeedback();
     const usedIds = new Set(localFeedback.map((f: any) => f.id));
     const updated = allFb.map((f: any) => usedIds.has(f.id) ? { ...f, is_used_for_training: true } : f);

@@ -245,7 +245,17 @@ export function GlobalAdminRoleManager({ currentUserRole }: Props) {
       setNewUserConfirmPassword("");
       setShowCreateForm(false);
     } catch (error: any) {
-      toast({ title: "Create user failed", description: error.message || "Could not create user.", variant: "destructive" });
+      const msg: string = error?.message || "";
+      const isSeatLimit =
+        error?.status === 409 &&
+        (msg.toLowerCase().includes("seat limit") || msg.toLowerCase().includes("user limit"));
+      toast({
+        title: isSeatLimit ? "Seat limit reached" : "Create user failed",
+        description: isSeatLimit
+          ? "This tenant has reached its user seat limit. Upgrade the plan to add more users."
+          : msg || "Could not create user.",
+        variant: "destructive",
+      });
     } finally {
       setCreating(false);
     }
