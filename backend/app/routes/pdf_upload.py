@@ -297,7 +297,11 @@ async def extract_acord_from_upload(
         result["extracted_json"] = runpod_fields
         log.info("acord_extract.llm_supplement_skipped", upload_id=upload_id)
 
-    nl_summary = await generate_nl_summary(result["extracted_json"], raw_text)
+    # Use NL summary from pod's /extract response if the updated extractor.py is deployed;
+    # fall back to the backend's separate /generate call for pods still on the old server.
+    nl_summary = result.get("natural_language_summary") or await generate_nl_summary(
+        result["extracted_json"], raw_text
+    )
     if nl_summary:
         result["natural_language_summary"] = nl_summary
     return result

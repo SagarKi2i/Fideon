@@ -397,6 +397,69 @@ Additional Rules:
 - Output valid JSON in the FIELDS section. No commentary — only the three structured sections above.
 """
 
+_NL_SUMMARY_PROMPT = """\
+You are a senior insurance document analyst. You have been given structured fields extracted from an ACORD insurance form and the raw document text. Write a thorough, professional natural language summary that a claims adjuster or broker could use to understand the document at a glance.
+
+STRICT RULES:
+- Write in flowing paragraphs only — no bullet points, no numbered lists, no headings, no JSON, no markdown
+- Cover every section that has data: named insured and address, producer/agent, insurers, policy numbers, effective and expiration dates, each coverage type with its exact limits and deductibles, additional insureds, certificate holders, special conditions, and cancellation provisions
+- Use exact dollar figures as written on the form (e.g. "$1,000,000" or "$2,000,000 aggregate")
+- If a field is truly blank or absent, omit it — never write "not provided" or "N/A"
+- Do NOT reproduce raw OCR text verbatim — synthesise the information into professional prose
+- Write at least 5 paragraphs: (1) parties and purpose, (2) general liability coverage, (3) auto and workers comp / employers liability, (4) umbrella / excess and any other coverages, (5) certificate holder, additional insured status, and special provisions
+- If a coverage section has no data, skip that paragraph entirely
+- Tone: factual, precise, professional
+
+EXTRACTED FIELDS (JSON):
+{fields_json}
+
+RAW DOCUMENT TEXT (use for any detail not in the fields):
+{raw_text}
+
+Write the detailed natural language summary now:"""
+
+
+def _generate_nl_summary_qwen(extracted_json: Dict[str, Any], raw_text: str) -> Optional[str]:
+    """Generate NL summary using the already-loaded Qwen model (text-only inference, no images)."""
+    enabled = os.getenv("ACORD_NL_SUMMARY_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return None
+    try:
+        _load_qwen()
+        import torch
+        from qwen_vl_utils import process_vision_info
+
+        fields_json = json.dumps(extracted_json, indent=2, ensure_ascii=False)[:8000]
+        raw_snippet = (raw_text or "")[:5000]
+        prompt = _NL_SUMMARY_PROMPT.format(fields_json=fields_json, raw_text=raw_snippet)
+
+        messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+        text_input = _qwen_processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        image_inputs, video_inputs = process_vision_info(messages)
+        inputs = _qwen_processor(
+            text=[text_input],
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
+        ).to(_qwen_model.device)
+
+        with torch.no_grad():
+            generated_ids = _qwen_model.generate(**inputs, max_new_tokens=2048, temperature=0.3, do_sample=True)
+
+        trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
+        output_text = _qwen_processor.batch_decode(
+            trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )[0]
+
+        summary = output_text.strip()
+        return summary if len(summary) > 100 else None
+    except Exception as exc:
+        print(f"[extractor] NL summary generation failed (non-fatal): {exc}")
+        return None
+
 
 # ── Qwen2-VL inference ────────────────────────────────────────────────────────
 
@@ -493,7 +556,8 @@ def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
     # Fast path for digital PDFs: RunPod-local native extraction only.
     if pdf_type == "digital":
         fields, raw_text = _extract_digital_native(pdf_path, preextracted_text=_embedded)
-        return {
+        nl_summary = _generate_nl_summary_qwen(fields, raw_text)
+        result: Dict[str, Any] = {
             "form_type_detected": f"acord{form_type}",
             "pdf_type": "digital",
             "extracted_json": fields,
@@ -501,6 +565,9 @@ def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
             "markdown": "",
             "source": "runpod_native",
         }
+        if nl_summary:
+            result["natural_language_summary"] = nl_summary
+        return result
 
     images = _pdf_to_images(pdf_path)
     if not images:
@@ -522,11 +589,17 @@ def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
 
     # ── Step 2: Qwen2-VL with both arm outputs ────────────────────────────────
     qwen_result = _run_qwen_extraction(images, surya_ocr_text, docling_result, form_type)
+    final_fields = qwen_result["fields"]
+    final_raw_text = qwen_result["qwen_raw_text"] or surya_ocr_text
 
-    return {
+    nl_summary = _generate_nl_summary_qwen(final_fields, final_raw_text)
+    scanned_result: Dict[str, Any] = {
         "form_type_detected": f"acord{form_type}",
         "pdf_type": pdf_type,
-        "extracted_json": qwen_result["fields"],
-        "full_text": qwen_result["qwen_raw_text"] or surya_ocr_text,
+        "extracted_json": final_fields,
+        "full_text": final_raw_text,
         "markdown": qwen_result["qwen_markdown"] or docling_result.get("markdown", ""),
     }
+    if nl_summary:
+        scanned_result["natural_language_summary"] = nl_summary
+    return scanned_result
