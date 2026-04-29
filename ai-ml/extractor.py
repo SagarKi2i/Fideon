@@ -346,56 +346,209 @@ def _parse_qwen_output(text: str) -> Tuple[Optional[Dict], str, str]:
     return parsed, raw_text, qwen_markdown
 
 
-# ── Qwen2-VL prompt ───────────────────────────────────────────────────────────
+# ── Qwen2-VL prompt (split to avoid escaping JSON braces in the output format example) ────
 
-_PROMPT_TEMPLATE = """\
-You are an expert insurance document parser. You are given page images of an ACORD form,
-plus pre-processed outputs from two independent parsers (Surya OCR and Docling).
+_PROMPT_INSTRUCTIONS = """\
+You are an expert insurance document parser. You are given:
+1. MULTIPLE IMAGES — one per page of an insurance document (provided in order: Page 1, Page 2, ... Page N)
+2. RAW TEXT from Surya OCR — concatenated across all pages
+3. RAW TEXT from Docling — structured document parser output across all pages
 
-Use ALL inputs — the images (ground truth), Surya OCR text, Docling markdown, and Docling KV pairs —
-to produce three outputs:
+The document may be ANY type of insurance document, including but not limited to:
+  - ACORD Forms (ACORD 25, 125, 126, 127, 130, 140, etc.)
+  - Policy Declaration Pages (Auto, Home, Commercial, Life, Health, etc.)
+  - Certificate of Insurance
+  - Endorsements / Riders
+  - Insurance Binders
+  - Evidence of Property Insurance
+  - Loss Runs / Claims History Reports
+  - Premium Finance Agreements
+  - Insurance Schedules / Summaries
+  - Umbrella / Excess Liability Policies
+  - Workers Compensation Policies
+  - Inland Marine / Floater Schedules
+  - Any other insurance-related document
 
+STEP 1 — DOCUMENT IDENTIFICATION:
+Before extracting any fields, first identify:
+  - Document Type (e.g., "ACORD 25 – Certificate of Liability Insurance", "Auto Policy Declaration", "Endorsement – Additional Insured")
+  - Issuing Organization (e.g., insurer name, agency, or platform)
+  - Form Number and Edition Date if printed on the document
+  - Total number of pages
+  - Line of Business (e.g., Commercial General Liability, Personal Auto, Homeowners, Workers Comp, Life, Health)
+  - Whether the document is a standalone form or part of a larger policy package
+
+Use this identification to dynamically determine which fields and sections to extract in STEP 2.
+
+STEP 2 — FIELD EXTRACTION:
+Extract ALL fields relevant to the identified document type. Do not limit extraction to a fixed field list — adapt based on what is actually present on the document.
+
+Common field categories across document types (extract all that apply):
+  PARTIES: Named Insured / Policyholder, Additional Insureds, Insurer / Company, Agency / Broker / Producer, Mortgagee / Loss Payee, Certificate Holder
+  POLICY IDENTIFIERS: Policy Number, Endorsement Number, Certificate Number, Binder Number, Claim Number
+  DATES: Policy Effective Date, Policy Expiration Date, Issue Date, Endorsement Effective Date, Date of Loss
+  COVERAGE DETAILS: Line of Business / Coverage Type, Coverage Parts, Limits of Liability, Deductibles, Sublimits, Exclusions, Endorsements attached
+  FINANCIAL: Total Premium, Per-coverage Premium breakdown, Taxes and Fees, Finance Charge / APR, Minimum Earned Premium
+  INSURED PROPERTY / RISK: Mailing Address, Risk / Property Location, Vehicle(s), Driver(s), Property Description, Occupancy Type, Schedule of Values
+  CHECKBOXES & ELECTIONS: All checkbox fields with their labels and states, Election options
+  REMARKS & CONDITIONS: Special Conditions, Endorsement Text, Remarks / Notes
+
+STEP 3 — OUTPUT GENERATION:
+Produce the three outputs: FIELDS:, then RAW TEXT:, then MARKDOWN:"""
+
+_PROMPT_OUTPUT_FORMAT = """\
 ---
+OUTPUT FORMAT (follow exactly)
+---
+
 FIELDS:
-{{
-  "Agency": "...",
-  "Agency Customer ID": "...",
-  "Date": "...",
-  "Insured Name": "...",
-  "Mailing Address": "...",
-  "City": "...",
-  "State": "...",
-  "ZIP Code": "...",
-  "Phone": "...",
-  "Policy Number": "...",
-  "Effective Date": "...",
-  "Expiration Date": "...",
-  "Company": "...",
-  "Coverage Type": "...",
-  "Premium": "...",
-  ... (include ALL other fields visible on the form, even if blank — use "" for empty fields)
-}}
+{
+  "document_identification": {
+    "document_type": "...",
+    "form_number": "...",
+    "edition_date": "...",
+    "issuing_organization": "...",
+    "line_of_business": "...",
+    "total_pages": 1,
+    "is_standalone": true,
+    "part_of_policy_package": null
+  },
+  "extraction_meta": {
+    "sources_used": ["image", "surya_ocr", "docling"],
+    "conflicts_detected": [],
+    "low_confidence_fields": [],
+    "cross_page_fields": [],
+    "blank_pages": [],
+    "handwritten_fields": []
+  },
+  "parties": {
+    "named_insured": {"value": "...", "page": 1, "confidence": "high"},
+    "additional_insureds": [],
+    "insurer": {"value": "...", "page": 1, "confidence": "high"},
+    "agency": {"value": "...", "page": 1, "confidence": "high"},
+    "broker_producer": {"value": "...", "page": 1, "confidence": "medium"},
+    "mortgagee_loss_payee": {"value": "...", "page": 1, "confidence": "high"},
+    "certificate_holder": {"value": "...", "page": 1, "confidence": "high"}
+  },
+  "policy_identifiers": {
+    "policy_number": {"value": "...", "page": 1, "confidence": "high"},
+    "endorsement_number": {"value": "...", "page": 1, "confidence": "high"},
+    "certificate_number": {"value": "...", "page": 1, "confidence": "high"},
+    "binder_number": {"value": "...", "page": 1, "confidence": "medium"}
+  },
+  "dates": {
+    "effective_date": {"value": "...", "page": 1, "confidence": "high"},
+    "expiration_date": {"value": "...", "page": 1, "confidence": "high"},
+    "issue_date": {"value": "...", "page": 1, "confidence": "high"},
+    "endorsement_effective_date": {"value": "...", "page": 1, "confidence": "medium"}
+  },
+  "insured_address": {
+    "mailing_address": {"value": "...", "page": 1, "confidence": "high"},
+    "city": {"value": "...", "page": 1, "confidence": "high"},
+    "state": {"value": "...", "page": 1, "confidence": "high"},
+    "zip_code": {"value": "...", "page": 1, "confidence": "high"},
+    "risk_location": {"value": "...", "page": 1, "confidence": "medium"}
+  },
+  "coverages": [
+    {
+      "coverage_name": "...",
+      "limit": "...",
+      "deductible": "...",
+      "premium": "...",
+      "sublimit": "...",
+      "page": 1,
+      "confidence": "high"
+    }
+  ],
+  "financial_summary": {
+    "total_premium": {"value": "...", "page": 1, "confidence": "high"},
+    "taxes_and_fees": {"value": "...", "page": 1, "confidence": "medium"},
+    "minimum_earned_premium": {"value": "...", "page": 1, "confidence": "low"}
+  },
+  "vehicles": [],
+  "drivers": [],
+  "properties": [],
+  "checkboxes": [
+    {
+      "label": "...",
+      "checked": true,
+      "mark_type": "tick",
+      "page": 1,
+      "confidence": "high"
+    }
+  ],
+  "remarks_and_conditions": [
+    {"text": "...", "page": 1, "confidence": "medium"}
+  ],
+  "additional_fields": {}
+}
 
 RAW TEXT:
-<full verbatim text extracted from the form, line by line, preserving reading order top-to-bottom>
+=== PAGE 1 ===
+<Fused verbatim text for page 1 from image + Surya OCR + Docling, preserving reading order.
+Where sources agree, use that text. Where they disagree, use the most legible/complete version
+and annotate with [reconciled] if needed.>
 
 MARKDOWN:
-<clean markdown of the entire document — preserve tables as markdown tables, use ## for section headers>
+# Insurance Document Summary
+
+> Document Type: [identified document type]
+> Issuing Organization: [insurer / agency name]
+> Form / Policy Number: [form number and/or policy number]
+> Total Pages: N
+> Line of Business: [e.g., Commercial General Liability]
+> Overall Confidence: High / Medium / Low
+
 ---
 
-Checkbox Rules (IMPORTANT):
-- Checked if it contains a tick (✓), X, cross (×), filled square (■), filled circle (●), or any handwritten mark.
-- Unchecked only if the box is completely empty.
-- Represent as: true (checked) / false (unchecked).
-- Treat X marks and tick marks equally as "checked".
+## General Information
+| Field | Value | Page | Confidence |
+|-------|-------|------|------------|
+| Document Type | ... | 1 | high |
+| Policy Number | ... | 1 | high |
+| Effective Date | ... | 1 | high |
+| Expiration Date | ... | 1 | high |
 
-Additional Rules:
-- If a field label is visible but the value is empty or illegible, include the key with "".
-- Do not skip any field, checkbox, or section header.
-- For tables (coverage schedules, vehicle lists, etc.), represent each row as a nested object in an array.
-- When Docling and Surya disagree on a value, prefer what you can verify directly in the image.
-- Output valid JSON in the FIELDS section. No commentary — only the three structured sections above.
-"""
+## Named Insured & Parties
+| Field | Value | Page | Confidence |
+|-------|-------|------|------------|
+| Named Insured | ... | 1 | high |
+| Insurer / Company | ... | 1 | high |
+| Agency / Broker | ... | 1 | high |
+| Certificate Holder | ... | 1 | high |
+
+## Coverage Summary
+| Coverage | Limit | Deductible | Premium | Page | Confidence |
+|----------|-------|------------|---------|------|------------|
+| ... | ... | ... | ... | 1 | high |
+
+## Checkboxes & Elections
+| Option | Status | Page |
+|--------|--------|------|
+| <label> | Checked (tick) | 1 |
+| <label> | Unchecked | 1 |
+
+## Remarks / Special Conditions
+(Verbatim text from remarks or conditions boxes.)
+
+## Extraction Notes
+| Issue Type | Detail |
+|------------|--------|
+| Document Identified As | [document type and reasoning] |
+| Source Conflict | <field>: Surya vs Docling disagreement — image used as tiebreaker |
+
+---
+
+RULES:
+- ALWAYS begin with document identification before any field extraction.
+- Dynamically include or exclude sections based on what is actually present. Do not render empty sections.
+- Process pages sequentially; merge continuation tables across pages.
+- Repeated header fields across pages: extract once, note page range if identical, flag as conflict if values differ.
+- Blank/boilerplate-only pages: note in extraction_meta.blank_pages, skip detailed extraction.
+- Endorsement pages: extract as a named section under "endorsements" in FIELDS.
+- Checkbox CHECKED if it contains: tick (✓), X, cross (×), filled square (■), circle (●), or any handwritten mark. UNCHECKED only if completely empty. Image is primary; OCR is supporting evidence.
+- Confidence: "low" = one source only, "medium" = two sources agree or partial image confirmation, "high" = all three agree or image + one OCR agree clearly.
+- Output ONLY the three blocks (FIELDS, RAW TEXT, MARKDOWN) — no commentary outside them."""
 
 _NL_SUMMARY_PROMPT = """\
 You are a senior insurance document analyst. You have been given structured fields extracted from an ACORD insurance form and the raw document text. Write a thorough, professional natural language summary that a claims adjuster or broker could use to understand the document at a glance.
@@ -473,29 +626,25 @@ def _run_qwen_extraction(
     import torch
     from qwen_vl_utils import process_vision_info
 
-    # Send up to 4 pages so multi-page ACORD forms (125, 140, etc.) are fully covered
+    # Send up to 4 pages so multi-page forms (125, 140, etc.) are fully covered
     page_images = images[:4]
 
-    # Build reference context from both arms
-    context_parts: List[str] = []
+    # Build INPUT CONTEXT section injected between instructions and output format
+    context_parts: List[str] = [f"IMAGES: Pages 1 to {len(page_images)} (attached in order above)"]
     if surya_ocr_text.strip():
-        context_parts.append(
-            f"=== Surya OCR text (line-by-line) ===\n{surya_ocr_text[:2500]}"
-        )
-    if docling_result.get("markdown", "").strip():
-        context_parts.append(
-            f"=== Docling structured markdown (tables + layout) ===\n{docling_result['markdown'][:2500]}"
-        )
-    if docling_result.get("kv_pairs"):
+        context_parts.append(f"SURYA OCR TEXT (all pages):\n{surya_ocr_text[:4000]}")
+    docling_md = docling_result.get("markdown", "").strip()
+    if docling_md:
+        context_parts.append(f"DOCLING TEXT (all pages):\n{docling_md[:4000]}")
+    elif docling_result.get("kv_pairs"):
         kv_str = "\n".join(f"{k}: {v}" for k, v in list(docling_result["kv_pairs"].items())[:60])
-        context_parts.append(f"=== Docling KV pairs ===\n{kv_str}")
+        context_parts.append(f"DOCLING KV PAIRS:\n{kv_str}")
     if docling_result.get("tables"):
         tables_str = "\n\n".join(docling_result["tables"][:5])
-        context_parts.append(f"=== Docling extracted tables ===\n{tables_str[:1500]}")
+        context_parts.append(f"DOCLING TABLES:\n{tables_str[:1500]}")
 
-    prompt = _PROMPT_TEMPLATE
-    if context_parts:
-        prompt += "\n\n" + "\n\n".join(context_parts)
+    context_section = "---\nINPUT CONTEXT\n---\n\n" + "\n\n".join(context_parts)
+    prompt = _PROMPT_INSTRUCTIONS + "\n\n" + context_section + "\n\n" + _PROMPT_OUTPUT_FORMAT
 
     content: List[Dict[str, Any]] = [
         {"type": "image", "image": img} for img in page_images
