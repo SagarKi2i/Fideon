@@ -9,7 +9,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKIP_PIP=0
-for arg in "$@"; do [[ "$arg" == "--skip-pip" ]] && SKIP_PIP=1; done
+SKIP_VERIFY=0
+for arg in "$@"; do
+  [[ "$arg" == "--skip-pip" ]]    && SKIP_PIP=1
+  [[ "$arg" == "--skip-verify" ]] && SKIP_VERIFY=1
+done
 
 echo "================================================================"
 echo " Fideon RunPod Setup"
@@ -64,16 +68,20 @@ chmod +x /usr/local/bin/llama-convert-hf-to-gguf
 echo "✓ llama.cpp built with CUDA"
 
 # ── 4. Verify ─────────────────────────────────────────────────────────────────
-echo ""
-echo "[4/4] Verifying..."
-python3 -c "import torch; print(f'✓ torch {torch.__version__}  |  CUDA: {torch.cuda.is_available()}')"
-python3 -c "import transformers; print(f'✓ transformers {transformers.__version__}')"
-python3 -c "import peft; print(f'✓ peft {peft.__version__}')"
-python3 -c "import bitsandbytes; print(f'✓ bitsandbytes {bitsandbytes.__version__}')"
-python3 -c "import boto3; print(f'✓ boto3 {boto3.__version__}')"
-python3 -c "import gguf; print(f'✓ gguf (llama.cpp converter dependency)')"
-llama-quantize --help > /dev/null && echo "✓ llama-quantize (CUDA)"
-llama-convert-hf-to-gguf --help > /dev/null && echo "✓ llama-convert-hf-to-gguf"
+if [[ "$SKIP_VERIFY" -eq 0 ]]; then
+  echo ""
+  echo "[4/4] Verifying..."
+  python3 -c "import torch; print(f'✓ torch {torch.__version__}  |  CUDA: {torch.cuda.is_available()}')"
+  python3 -c "import transformers; print(f'✓ transformers {transformers.__version__}')"
+  python3 -c "import peft; print(f'✓ peft {peft.__version__}')"
+  python3 -c "import bitsandbytes; print(f'✓ bitsandbytes {bitsandbytes.__version__}')"
+  python3 -c "import boto3; print(f'✓ boto3 {boto3.__version__}')"
+  python3 -c "import gguf; print(f'✓ gguf (llama.cpp converter dependency)')"
+  llama-quantize --help > /dev/null && echo "✓ llama-quantize (CUDA)"
+  llama-convert-hf-to-gguf --help > /dev/null && echo "✓ llama-convert-hf-to-gguf"
+else
+  echo "[4/4] Skipping verification (--skip-verify)"
+fi
 
 echo ""
 echo "================================================================"
