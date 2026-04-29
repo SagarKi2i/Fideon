@@ -13,21 +13,12 @@ RUN apt-get update && apt-get install -y curl git build-essential cmake libgomp1
     apt-get update && apt-get install -y cloudflared && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install Python packages
+# Copy code + requirements (pip install happens at first boot into /workspace/venv)
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy all code
 COPY . .
 
 # Permissions
 RUN chmod +x startup.sh setup.sh
-
-# Create directories
-RUN mkdir -p /workspace/uploads \
-             /workspace/fine_tuning/training_samples \
-             /workspace/fine_tuning/models \
-             /workspace/logs
 
 EXPOSE 8000
 
