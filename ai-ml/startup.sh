@@ -12,6 +12,19 @@ log "Starting Fideon AI-ML Server..."
 mkdir -p /workspace/.cache/datalab
 export DATALAB_CACHE_PATH=/workspace/.cache/datalab
 
+# ── Python venv: create once on volume, reuse forever ─────────────────────────
+if [ ! -f "/workspace/venv/bin/activate" ]; then
+    log "First boot: creating venv and installing packages to /workspace/venv..."
+    python3 -m venv /workspace/venv
+    /workspace/venv/bin/pip install --upgrade pip
+    /workspace/venv/bin/pip install -r /app/requirements.txt
+    log "Packages installed to /workspace/venv"
+else
+    log "venv already exists at /workspace/venv — skipping install"
+fi
+
+source /workspace/venv/bin/activate
+
 # ── llama.cpp: compile once on GPU pod, reuse forever from /workspace ─────────
 LLAMA_BIN="/workspace/llama.cpp/build/bin/llama-quantize"
 
@@ -29,10 +42,10 @@ WRAPPER
     chmod +x /usr/local/bin/llama-convert-hf-to-gguf
 fi
 
-# ── Start FastAPI ──────────────────────────────────────────────────────────────
+# ── Start FastAPI using venv ───────────────────────────────────────────────────
 log "Starting FastAPI..."
 cd /app
-uvicorn server:app --host 0.0.0.0 --port 8000 >> "$LOG" 2>&1 &
+/workspace/venv/bin/uvicorn server:app --host 0.0.0.0 --port 8000 >> "$LOG" 2>&1 &
 
 sleep 5
 
