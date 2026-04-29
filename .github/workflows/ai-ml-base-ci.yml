@@ -1,16 +1,6 @@
 name: AI-ML Base Image Build & Push
 
 on:
-  push:
-    branches:
-      - 'v*-dev'
-      - 'v*-staging'
-      - 'v1'
-    paths:
-      - 'ai-ml/setup.sh'
-      - 'ai-ml/Dockerfile.base'
-      - '.github/workflows/ai-ml-base-ci.yml'
-
   workflow_dispatch:
 
 concurrency:
