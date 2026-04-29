@@ -100,6 +100,28 @@ export default function Training() {
     status: string; phase?: string; version?: number; error?: string; eval_scores?: Record<string, any>;
   } | null>(null);
 
+  // Mark training_feedback rows for ACORD model as used after a completed training run.
+  // Also updates local-storage feedback so the badge reflects the new state without a reload.
+  const markAcordFeedbackAsUsed = async () => {
+    try {
+      await supabase
+        .from("training_feedback")
+        .update({ is_used_for_training: true })
+        .eq("model_id", "acord_form_understanding")
+        .eq("is_used_for_training", false);
+    } catch {
+      // Supabase unavailable — update localStorage fallback
+    }
+    // Update localStorage items too so the badge flips instantly
+    const local = JSON.parse(localStorage.getItem("local_training_feedback") || "[]");
+    const updated = local.map((f: any) =>
+      (f.model_id === "acord_form_understanding" && !f.is_used_for_training)
+        ? { ...f, is_used_for_training: true }
+        : f
+    );
+    localStorage.setItem("local_training_feedback", JSON.stringify(updated));
+  };
+
   const refreshLocalAcordCount = async () => {
     try {
       const count = await getAcordTrainingCount();
@@ -186,6 +208,8 @@ export default function Training() {
         setRunpodJobStatus(rpStatus);
         const terminal = ["completed", "failed", "gate_failed"].includes(rpStatus.status);
         if (terminal) {
+          // Mark ACORD feedback as used so the badge flips to "Fine-tune Completed"
+          if (rpStatus.status === "completed") await markAcordFeedbackAsUsed();
           // Persist final status into localStorage
           const allJobs = getLocalJobs();
           const updated = allJobs.map((j: any) =>
@@ -309,26 +333,43 @@ export default function Training() {
     setFinetuneStatus(null);
 
     try {
-      // Step 1: Load submitted samples from Supabase
+      // Step 1: Load submitted samples from Supabase (ACORD Parser corrections)
       setFinetuneStatus("Loading training samples from database…");
       const samples = await getAcordTrainingSamples();
 
-      if (samples.length === 0) {
+      // Step 1b: Also include any ACORD feedback submitted via the Feedback form
+      // (training_feedback table, model_id = acord_form_understanding, not yet used)
+      const acordFormFeedback = feedback.filter(
+        (f: any) =>
+          (f.model_id === "acord_form_understanding" ||
+            f.model_id?.toLowerCase().includes("acord")) &&
+          !f.is_used_for_training &&
+          f.corrected_response
+      );
+
+      const totalSamples = samples.length + acordFormFeedback.length;
+      if (totalSamples === 0) {
         setFinetuneStatus("No training samples found. Save a correction from the ACORD Parser first.");
         toast({ title: "No samples", description: "Save at least one correction before fine-tuning.", variant: "destructive" });
         return;
       }
 
       // Step 2: Sync samples to RunPod pod filesystem
-      setFinetuneStatus(`Syncing ${samples.length} sample(s) to RunPod…`);
-      const syncResult = await syncFeedbacksToRunpod(
-        samples.map((s) => ({
+      setFinetuneStatus(`Syncing ${totalSamples} sample(s) to RunPod…`);
+      const syncResult = await syncFeedbacksToRunpod([
+        ...samples.map((s) => ({
           prompt: s.prompt,
           original_response: s.original_response,
           corrected_response: s.corrected_response,
           form_type: s.form_type,
-        }))
-      );
+        })),
+        ...acordFormFeedback.map((f: any) => ({
+          prompt: f.prompt,
+          original_response: f.original_response,
+          corrected_response: f.corrected_response,
+          form_type: "25",
+        })),
+      ]);
 
       if (syncResult.failed > 0 && syncResult.synced === 0) {
         const msg = "Could not reach RunPod. Start the server on the pod:\ncd /workspace/ai-ml && python -m uvicorn server:app --host 0.0.0.0 --port 8000";
@@ -587,6 +628,32 @@ export default function Training() {
 
         {/* Feedback Tab */}
         <TabsContent value="feedback" className="space-y-4">
+          {/* Fine-tune completion banner — shown when the latest job finished successfully */}
+          {isJobDone && (
+            <div className="flex items-center gap-3 p-4 rounded-lg bg-green-500/10 border border-green-500/30">
+              <CheckCircle2 className="h-5 w-5 text-green-500 shrink-0" />
+              <div>
+                <p className="text-sm font-semibold text-green-600 dark:text-green-400">
+                  Fine-tune Completed
+                  {runpodJobStatus?.version != null && ` — Model v${runpodJobStatus.version} promoted`}
+                </p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Your ACORD Form Understanding feedback has been used to train the model. All used samples are now marked below.
+                </p>
+              </div>
+            </div>
+          )}
+          {isJobFailed && (
+            <div className="flex items-center gap-3 p-4 rounded-lg bg-red-500/10 border border-red-500/30">
+              <XCircle className="h-5 w-5 text-red-500 shrink-0" />
+              <div>
+                <p className="text-sm font-semibold text-red-600 dark:text-red-400">Fine-tune Failed</p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  {runpodJobStatus?.error ?? "The training job did not complete. Check the Local Training tab for details."}
+                </p>
+              </div>
+            </div>
+          )}
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -642,6 +709,14 @@ export default function Training() {
                 <Upload className="h-4 w-4 mr-2" />
                 Submit Feedback
               </Button>
+              {(feedbackModelId === "acord_form_understanding" ||
+                activatedModels.find((m) => m.model_id === feedbackModelId)
+                  ?.model_name?.toLowerCase().includes("acord")) && (
+                <p className="text-xs text-green-600 dark:text-green-400 flex items-center gap-1.5">
+                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                  This feedback will be included in your next Local Training run for ACORD Form Understanding.
+                </p>
+              )}
             </CardContent>
           </Card>
 
@@ -672,8 +747,13 @@ export default function Training() {
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2 mb-1 flex-wrap">
                               <Badge variant="outline">{fb.model_id}</Badge>
-                              <Badge variant={fb.is_used_for_training ? "default" : "secondary"}>
-                                {fb.is_used_for_training ? "Used" : "Available"}
+                              <Badge
+                                variant={fb.is_used_for_training ? "default" : "secondary"}
+                                className={fb.is_used_for_training ? "bg-green-600/90 text-white border-0" : ""}
+                              >
+                                {fb.is_used_for_training ? (
+                                  <><CheckCircle2 className="h-3 w-3 mr-1" />Fine-tune Completed</>
+                                ) : "Available"}
                               </Badge>
                               {fb.feedback_type === "correction" && (
                                 <ThumbsUp className="h-3 w-3 text-green-500" />
