@@ -8,6 +8,10 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG"; }
 
 log "Starting Fideon AI-ML Server..."
 
+# ── Persist Surya/Datalab model cache to /workspace ───────────────────────────
+mkdir -p /workspace/.cache/datalab
+export DATALAB_CACHE_PATH=/workspace/.cache/datalab
+
 # ── llama.cpp: compile once on GPU pod, reuse forever from /workspace ─────────
 LLAMA_BIN="/workspace/llama.cpp/build/bin/llama-quantize"
 
