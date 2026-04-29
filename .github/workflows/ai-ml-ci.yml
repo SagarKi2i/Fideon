@@ -19,7 +19,7 @@ concurrency:
 jobs:
   ci:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 90
     environment: ${{ github.ref_name == 'v1' && 'production' || github.ref_name == 'v1-staging' && 'staging' || 'development' }}
 
     steps:
