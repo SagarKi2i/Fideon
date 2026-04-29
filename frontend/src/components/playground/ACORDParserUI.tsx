@@ -205,22 +205,36 @@ function fieldsToMarkdown(
   fields: Array<{ key: string; value: string }>,
   formType: string,
   pdfType: string,
+  rawText?: string,
 ): string {
   const formLabel = formType.replace(/^acord/i, "");
   const pdfLabel = pdfType === "scanned" ? "Scanned PDF" : pdfType === "digital" ? "Digital PDF" : pdfType || "Unknown";
-  const rows = fields.map(
+  // Exclude raw_text from the field table — it gets its own section below
+  const tableFields = fields.filter((f) => f.key !== "raw_text");
+  const rows = tableFields.map(
     (f) => `| ${f.key.replace(/\|/g, "\\|")} | ${String(f.value).replace(/\|/g, "\\|")} |`
   );
-  return [
+  const parts = [
     `## ACORD ${formLabel} — Extracted Fields`,
     ``,
     `**PDF Type:** ${pdfLabel}  `,
-    `**Total Fields:** ${fields.length}`,
+    `**Total Fields:** ${tableFields.length}`,
     ``,
     `| Field | Value |`,
     `|-------|-------|`,
     ...rows,
-  ].join("\n");
+  ];
+  if (rawText && rawText.trim()) {
+    parts.push(
+      ``,
+      `## Raw Extracted Text`,
+      ``,
+      "```",
+      rawText.trim(),
+      "```",
+    );
+  }
+  return parts.join("\n");
 }
 
 function parseMarkdownTableToJson(markdown: string): Record<string, string> {
@@ -305,7 +319,8 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
       const result = await triggerFullExtraction(uploadId, formType);
       setExtractionState({ phase: "completed", result });
       const fields = flattenAcordFields(result);
-      setMarkdownEditText(fieldsToMarkdown(fields, result.form_type_detected || formType, result.pdf_type || smartResult.pdf_type));
+      const fullRawText = result.full_text ?? result.raw_text ?? "";
+      setMarkdownEditText(fieldsToMarkdown(fields, result.form_type_detected || formType, result.pdf_type || smartResult.pdf_type, fullRawText));
       setProcessingPhase("done");
       const fieldCount = Object.keys(
         result.extracted_json ?? result.extracted_fields ?? result.fields ?? {}

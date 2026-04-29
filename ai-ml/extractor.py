@@ -613,8 +613,8 @@ def _generate_nl_summary_qwen(extracted_json: Dict[str, Any], raw_text: str) -> 
         import torch
         from qwen_vl_utils import process_vision_info
 
-        fields_json = json.dumps(extracted_json, indent=2, ensure_ascii=False)[:12000]
-        raw_snippet = (raw_text or "")[:6000]
+        fields_json = json.dumps(extracted_json, indent=2, ensure_ascii=False)[:20000]
+        raw_snippet = (raw_text or "")[:20000]
         prompt = _NL_SUMMARY_PROMPT.format(fields_json=fields_json, raw_text=raw_snippet)
 
         messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
@@ -660,19 +660,21 @@ def _run_qwen_extraction(
     # Send up to 4 pages so multi-page forms (125, 140, etc.) are fully covered
     page_images = images[:4]
 
-    # Build INPUT CONTEXT section injected between instructions and output format
+    # Build INPUT CONTEXT section injected between instructions and output format.
+    # Large windows: Qwen2-VL 7B has ~32K token context; images occupy ~2K tokens,
+    # leaving ~30K tokens (~120K chars) for text — use as much as the document needs.
     context_parts: List[str] = [f"IMAGES: Pages 1 to {len(page_images)} (attached in order above)"]
     if surya_ocr_text.strip():
-        context_parts.append(f"SURYA OCR TEXT (all pages):\n{surya_ocr_text[:4000]}")
+        context_parts.append(f"SURYA OCR TEXT (all pages):\n{surya_ocr_text[:20000]}")
     docling_md = docling_result.get("markdown", "").strip()
     if docling_md:
-        context_parts.append(f"DOCLING TEXT (all pages):\n{docling_md[:4000]}")
+        context_parts.append(f"DOCLING TEXT (all pages):\n{docling_md[:12000]}")
     elif docling_result.get("kv_pairs"):
-        kv_str = "\n".join(f"{k}: {v}" for k, v in list(docling_result["kv_pairs"].items())[:60])
+        kv_str = "\n".join(f"{k}: {v}" for k, v in list(docling_result["kv_pairs"].items())[:120])
         context_parts.append(f"DOCLING KV PAIRS:\n{kv_str}")
     if docling_result.get("tables"):
-        tables_str = "\n\n".join(docling_result["tables"][:5])
-        context_parts.append(f"DOCLING TABLES:\n{tables_str[:1500]}")
+        tables_str = "\n\n".join(docling_result["tables"][:10])
+        context_parts.append(f"DOCLING TABLES:\n{tables_str[:4000]}")
 
     context_section = "---\nINPUT CONTEXT\n---\n\n" + "\n\n".join(context_parts)
     prompt = _PROMPT_INSTRUCTIONS + "\n\n" + context_section + "\n\n" + _PROMPT_OUTPUT_FORMAT
@@ -736,6 +738,9 @@ def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
     # Fast path for digital PDFs: RunPod-local native extraction only.
     if pdf_type == "digital":
         fields, raw_text = _extract_digital_native(pdf_path, preextracted_text=_embedded)
+        # Embed the complete raw text inside extracted_json so it appears in the
+        # Fields/JSON/Markdown tabs and is stored in fine-tuning samples.
+        fields["raw_text"] = raw_text
         nl_summary = _generate_nl_summary_qwen(fields, raw_text)
         result: Dict[str, Any] = {
             "form_type_detected": f"acord{form_type}",
@@ -770,7 +775,11 @@ def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
     # ── Step 2: Qwen2-VL with both arm outputs ────────────────────────────────
     qwen_result = _run_qwen_extraction(images, surya_ocr_text, docling_result, form_type)
     final_fields = qwen_result["fields"]
+    # full_text: prefer Qwen's fused RAW TEXT (higher quality); fall back to complete Surya OCR
     final_raw_text = qwen_result["qwen_raw_text"] or surya_ocr_text
+    # Always embed the complete Surya OCR text inside extracted_json so it appears in
+    # the Fields/JSON/Markdown tabs and is stored in fine-tuning samples.
+    final_fields["raw_text"] = surya_ocr_text or final_raw_text
 
     nl_summary = _generate_nl_summary_qwen(final_fields, final_raw_text)
     scanned_result: Dict[str, Any] = {

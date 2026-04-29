@@ -80,8 +80,8 @@ async def generate_nl_summary(extracted: dict[str, Any], raw_text: str) -> Optio
     if not enabled:
         return None
 
-    fields_json = json.dumps(extracted, indent=2, ensure_ascii=False)[:12000]
-    raw_snippet = (raw_text or "")[:6000]
+    fields_json = json.dumps(extracted, indent=2, ensure_ascii=False)[:20000]
+    raw_snippet = (raw_text or "")[:20000]
     prompt = _PROMPT_TEMPLATE.format(fields_json=fields_json, raw_text=raw_snippet)
 
     # Prefer the external RunPod generate URL; fall back to the local offline URL.
