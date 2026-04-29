@@ -277,7 +277,7 @@ def run_cycle(
     from fine_tuning.evaluation.deepeval_runner import run_deepeval
     from fine_tuning.evaluation.forgetting_eval import ForgettingEvaluator
     from fine_tuning.evaluation.eval_gate import run_eval_gate
-    from fine_tuning.training_orchestrator import promote_adapter
+    # promote_adapter is NOT called here — user must click "Share Gradients" to upload to SeaweedFS
 
     started_at = _utc_now()
     cycle_id   = str(uuid.uuid4())[:12]
@@ -356,7 +356,10 @@ def run_cycle(
 
             # ── 6. Train (QLoRA SFT) ──────────────────────────────────────────
             _update("training")
-            print(f"[job_runner] Starting QLoRA training — version={new_version} …")
+            # H100 SXM 80 GB: inference model (BF16 ~14 GB) + training model (BF16 ~14 GB)
+            # + merge peak (~28 GB) totals ~56 GB — well within 80 GB. No VRAM unload needed.
+            # Extractions continue serving normally throughout the training window.
+            print(f"[job_runner] Starting BF16 LoRA training — version={new_version} …")
             adapter_path = run_training(
                 config=config,
                 dataset_path=build_result.train_jsonl_path,
@@ -434,25 +437,58 @@ def run_cycle(
                 version=new_version,
             )
 
-            # ── 9. Promote (registry + SeaweedFS + model card + alert) ────────
-            _update("promoting")
+            # ── 9. Local-only promote + write pending_shares/v{N}.json ──────────
+            # SeaweedFS upload is deferred — user must click "Share Gradients".
+            # Each training run gets its own file so multiple runs can accumulate
+            # and ALL are uploaded when the user clicks Share Gradients.
+            _update("pending_share")
             training_meta = {
-                "backend":       "qlora_hf",
-                "fingerprint":   build_result.fingerprint,
-                "job_id":        job_id,
-                "base_model":    base_model,
-                "replay_fraction": replay_fraction,
+                "backend":           "qlora_hf",
+                "fingerprint":       build_result.fingerprint,
+                "job_id":            job_id,
+                "base_model":        base_model,
+                "replay_fraction":   replay_fraction,
+                "seaweedfs_pending": True,
             }
-            promote_adapter(
-                adapter_id=job_id,
-                registry_path=reg_path,
+
+            # Update local version_registry so _resolve_active_model_path()
+            # picks up the merged model on pod restart.
+            VersionRegistry(reg_path).promote_version(
                 version=new_version,
                 merged_model_path=merge_result.output_path,
                 adapter_path=adapter_path,
                 eval_scores=gate.scores,
                 training_meta=training_meta,
-                base_model=base_model,
             )
+
+            # Each version gets its own pending file — never overwritten.
+            _PENDING_SHARE_DIR = Path("/workspace/fine_tuning/pending_shares")
+            _PENDING_SHARE_DIR.mkdir(parents=True, exist_ok=True)
+            (_PENDING_SHARE_DIR / f"v{new_version}.json").write_text(
+                json.dumps({
+                    "job_id":            job_id,
+                    "registry_path":     reg_path,
+                    "version":           new_version,
+                    "merged_model_path": merge_result.output_path,
+                    "adapter_path":      adapter_path,
+                    "eval_scores":       gate.scores,
+                    "training_meta":     training_meta,
+                    "base_model":        base_model,
+                    "created_at":        _utc_now(),
+                }, indent=2),
+                encoding="utf-8",
+            )
+            pending_count = len(list(_PENDING_SHARE_DIR.glob("*.json")))
+            print(f"[job_runner] Weights v{new_version} ready at {merge_result.output_path}. "
+                  f"({pending_count} version(s) pending 'Share Gradients')")
+
+            # Hot-swap inference immediately so next extraction uses fine-tuned weights.
+            try:
+                import extractor as _ext
+                _ext.reload_qwen_model(merge_result.output_path)
+                print(f"[job_runner] Extractor hot-swapped to fine-tuned model v{new_version}")
+            except Exception as _swap_exc:
+                print(f"[job_runner] Model hot-swap warning (non-fatal): {_swap_exc}")
 
         # ── Done ──────────────────────────────────────────────────────────────
         finished_at = _utc_now()
@@ -467,7 +503,7 @@ def run_cycle(
             "merged_model_path":  merge_result.output_path,
             "eval_scores":        gate.scores,
         })
-        print(f"[job_runner] Cycle complete — SLM v1.{new_version} promoted.")
+        print(f"[job_runner] Cycle complete — SLM v1.{new_version} ready. Click 'Share Gradients' to upload to SeaweedFS.")
 
         return CycleResult(
             status="completed",

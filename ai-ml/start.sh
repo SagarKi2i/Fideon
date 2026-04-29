@@ -8,6 +8,15 @@ set -e
 UPLOAD_DIR=${UPLOAD_DIR:-/workspace/uploads}
 PORT=${UPLOAD_SERVER_PORT:-8080}
 
+# /workspace/bin persists across pod restarts — add it to PATH so
+# llama-quantize and llama-convert-hf-to-gguf are always discoverable.
+export PATH="/workspace/bin:$PATH"
+
+if ! command -v llama-quantize &>/dev/null; then
+  echo "[start.sh] WARNING: llama-quantize not found in /workspace/bin."
+  echo "[start.sh] Run: bash /workspace/ai-ml/setup.sh --skip-pip"
+fi
+
 mkdir -p "$UPLOAD_DIR"
 echo "[start.sh] Upload dir: $UPLOAD_DIR"
 echo "[start.sh] Starting Fideon RunPod Upload Server on port $PORT"

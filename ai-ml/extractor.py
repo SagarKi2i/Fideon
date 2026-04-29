@@ -70,6 +70,59 @@ _qwen_loaded = False
 
 QWEN_MODEL_ID = os.getenv("QWEN_MODEL_ID", "/workspace/models/qwen2-vl-7b")
 
+# Mutable pointer to whichever model is active (base or latest fine-tuned).
+# _load_qwen() resolves the best available path on first load; reload_qwen_model()
+# hot-swaps it after each successful fine-tuning cycle.
+_active_model_path: str = QWEN_MODEL_ID
+
+
+
+def _resolve_active_model_path() -> str:
+    """
+    Return the best available model path at load time:
+      1. Already explicitly set via reload_qwen_model() (non-default _active_model_path)
+      2. Latest promoted merged model in version_registry.json (if on disk)
+      3. QWEN_MODEL_ID (original base model)
+    """
+    global _active_model_path
+    if _active_model_path != QWEN_MODEL_ID:
+        # Explicit override already set — honour it.
+        return _active_model_path
+
+    registry_file = Path("/workspace/fine_tuning/registry/version_registry.json")
+    if registry_file.exists():
+        try:
+            reg = json.loads(registry_file.read_text(encoding="utf-8"))
+            current_base = reg.get("current_base")
+            if current_base and Path(current_base).exists() and (Path(current_base) / "config.json").exists():
+                print(f"[extractor] Fine-tuned model found in registry → {current_base}")
+                _active_model_path = current_base
+                return current_base
+        except Exception as exc:
+            print(f"[extractor] Registry read warning (using base model): {exc}")
+
+    return QWEN_MODEL_ID
+
+
+def reload_qwen_model(new_model_path: str) -> None:
+    """
+    Hot-swap the Qwen model to a newly-promoted fine-tuned version.
+    Called by job_runner.py after each successful promote_adapter().
+    Thread-safe — waits for any in-progress inference to finish before swapping.
+    On H100 SXM 80 GB, training and inference run simultaneously so this is
+    called only at the end of the cycle to pick up the improved weights.
+    """
+    global _qwen_model, _qwen_processor, _qwen_loaded, _active_model_path
+    print(f"[extractor] Hot-swapping Qwen model → {new_model_path}")
+    with _qwen_lock:
+        _qwen_model = None
+        _qwen_processor = None
+        _qwen_loaded = False
+        _active_model_path = new_model_path
+    # Re-load outside the lock so _load_qwen() can acquire it normally.
+    _load_qwen()
+    print(f"[extractor] Qwen model hot-swap complete (now using fine-tuned weights)")
+
 
 # ── Fast native extraction for digital PDFs (RunPod-local, no Surya/Qwen) ────
 _ACORD_REGEX_PATTERNS: Dict[str, str] = {
@@ -205,19 +258,36 @@ def _load_qwen() -> None:
         import torch
         from transformers import AutoConfig, AutoProcessor, Qwen2VLForConditionalGeneration
 
-        # Load config first and patch fields missing from older model checkpoints
-        # that transformers 4.57 now requires during weight initialisation.
-        config = AutoConfig.from_pretrained(QWEN_MODEL_ID)
+        model_path = _resolve_active_model_path()
+        print(f"[extractor] Loading Qwen model from: {model_path}")
+
+        # Patch missing fields from older checkpoints that transformers 4.57+ requires.
+        config = AutoConfig.from_pretrained(model_path)
         if hasattr(config, "vision_config") and not hasattr(config.vision_config, "initializer_range"):
             config.vision_config.initializer_range = 0.02
 
-        _qwen_processor = AutoProcessor.from_pretrained(QWEN_MODEL_ID)
-        _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
-            QWEN_MODEL_ID,
-            config=config,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto",
-        )
+        _qwen_processor = AutoProcessor.from_pretrained(model_path)
+
+        # H100 SXM: BF16 is natively faster than FP16 on H100 tensor cores.
+        # Flash Attention 2 accelerates long-context inference (8-page documents)
+        # using H100's HBM3 bandwidth. Falls back to default attention if not installed.
+        _dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+        _load_kw: Dict[str, Any] = {
+            "config": config,
+            "torch_dtype": _dtype,
+            "device_map": "auto",
+        }
+        try:
+            _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
+                model_path, attn_implementation="flash_attention_2", **_load_kw
+            )
+            print("[extractor] Flash Attention 2 enabled")
+        except Exception:
+            _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
+                model_path, **_load_kw
+            )
+            print("[extractor] Flash Attention 2 unavailable — using default attention")
+
         _qwen_model.eval()
         _qwen_loaded = True
 
@@ -658,7 +728,10 @@ def _run_qwen_extraction(
     from qwen_vl_utils import process_vision_info
 
     # Send up to 4 pages so multi-page forms (125, 140, etc.) are fully covered
-    page_images = images[:4]
+    # H100 SXM 80 GB: process up to 8 pages (vs 4 on smaller GPUs).
+    # Each page ~2K vision tokens; 8 pages still fits within Qwen2-VL's 32K context
+    # alongside the OCR text and instructions.
+    page_images = images[:8]
 
     # Build INPUT CONTEXT section injected between instructions and output format.
     # Large windows: Qwen2-VL 7B has ~32K token context; images occupy ~2K tokens,
@@ -702,7 +775,7 @@ def _run_qwen_extraction(
     ).to(_qwen_model.device)
 
     with torch.no_grad():
-        generated_ids = _qwen_model.generate(**inputs, max_new_tokens=3072)
+        generated_ids = _qwen_model.generate(**inputs, max_new_tokens=4096)
 
     trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
     output_text = _qwen_processor.batch_decode(

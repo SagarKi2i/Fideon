@@ -44,6 +44,7 @@ _THIS_DIR = str(Path(__file__).parent.resolve())
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
+import threading
 import uvicorn
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -54,6 +55,7 @@ from fastapi.responses import Response
 # ---------------------------------------------------------------------------
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "/workspace/uploads"))
 TRAINING_SAMPLES_FILE = Path(os.getenv("TRAINING_SAMPLES_FILE", "/workspace/training_samples.jsonl"))
+PENDING_SHARE_DIR = Path("/workspace/fine_tuning/pending_shares")
 PORT = int(os.getenv("UPLOAD_SERVER_PORT", "8080"))
 OCR_WORKERS = int(os.getenv("OCR_WORKERS", "1"))  # 1 GPU → 1 worker
 
@@ -64,6 +66,10 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 # ---------------------------------------------------------------------------
 _uploads: Dict[str, Dict[str, Any]] = {}
 _ocr_jobs: Dict[str, Dict[str, Any]] = {}
+
+# Share-gradients jobs (user-triggered SeaweedFS upload after local training)
+_share_jobs: Dict[str, Dict[str, Any]] = {}
+_share_jobs_lock = threading.Lock()
 
 # Thread pool for background OCR (GPU work runs in a thread, not async)
 _executor = ThreadPoolExecutor(max_workers=OCR_WORKERS)
@@ -679,6 +685,404 @@ def list_registry_versions() -> Dict[str, Any]:
         }
     except Exception as exc:
         return {"error": str(exc), "versions": []}
+
+
+# ---------------------------------------------------------------------------
+# Federated Learning — FedAvg aggregation across all SeaweedFS weight versions
+# ---------------------------------------------------------------------------
+
+_fed_jobs: Dict[str, Dict[str, Any]] = {}
+_fed_jobs_lock = threading.Lock()
+
+
+def _set_fed_job(job_id: str, data: Dict[str, Any]) -> None:
+    with _fed_jobs_lock:
+        _fed_jobs[job_id] = data
+
+
+def _update_fed_job(job_id: str, phase: str, **kwargs: Any) -> None:
+    with _fed_jobs_lock:
+        if job_id in _fed_jobs:
+            _fed_jobs[job_id]["phase"] = phase
+            _fed_jobs[job_id].update(kwargs)
+
+
+def _fedavg_safetensors(model_dirs: List[str], output_dir: str) -> None:
+    """
+    Average safetensors weights across model_dirs → output_dir (FedAvg with equal weights).
+    Falls back to copying the latest model if safetensors/torch are unavailable.
+    """
+    import shutil as _shutil
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+
+    if len(model_dirs) == 1:
+        _shutil.copytree(model_dirs[0], output_dir, dirs_exist_ok=True)
+        print("[fedavg] Single model — copied without averaging.")
+        return
+
+    try:
+        from safetensors import safe_open
+        from safetensors.torch import save_file
+        import torch
+    except ImportError:
+        print("[fedavg] safetensors/torch not available — falling back to latest model copy.")
+        _shutil.copytree(model_dirs[-1], output_dir, dirs_exist_ok=True)
+        return
+
+    last_dir = Path(model_dirs[-1])
+    # Copy all non-weight files (config.json, tokenizer, etc.) from the latest model
+    for f in last_dir.iterdir():
+        if f.suffix == ".safetensors":
+            continue
+        dest = output / f.name
+        if f.is_dir():
+            _shutil.copytree(str(f), str(dest), dirs_exist_ok=True)
+        else:
+            _shutil.copy2(str(f), str(dest))
+
+    shards = sorted(last_dir.glob("*.safetensors"))
+    if not shards:
+        _shutil.copytree(model_dirs[-1], output_dir, dirs_exist_ok=True)
+        return
+
+    print(f"[fedavg] Averaging {len(model_dirs)} models across {len(shards)} shard(s)…")
+    for shard in shards:
+        all_tensors: Dict[str, list] = {}
+        for mdir in model_dirs:
+            shard_path = Path(mdir) / shard.name
+            if not shard_path.exists():
+                continue
+            with safe_open(str(shard_path), framework="pt") as f:
+                for key in f.keys():
+                    all_tensors.setdefault(key, []).append(f.get_tensor(key))
+        averaged = {k: torch.stack(vs).mean(dim=0) for k, vs in all_tensors.items() if vs}
+        save_file(averaged, str(output / shard.name))
+        print(f"[fedavg]   Averaged shard: {shard.name}")
+
+    print(f"[fedavg] Done — aggregated model written to {output_dir}")
+
+
+def _run_federated_job(job_id: str) -> None:
+    """Background thread: download all SeaweedFS versions, FedAvg, upload result."""
+    import shutil as _shutil
+    import tempfile
+
+    try:
+        from fine_tuning.seaweedfs_client import SeaweedFSClient
+        seaweed = SeaweedFSClient()
+
+        # ── 1. Discover all available fine-tuned versions ────────────────────
+        _update_fed_job(job_id, "discovering_versions")
+        latest = seaweed.get_latest_finetuned_version()
+        if latest is None:
+            raise RuntimeError("No fine-tuned weights found in SeaweedFS. Run Local Training first.")
+
+        versions_available: List[int] = []
+        try:
+            client = seaweed._boto_client()
+            for v in range(max(1, latest - 9), latest + 1):   # check up to last 10 versions
+                resp = client.list_objects_v2(
+                    Bucket=seaweed._bucket, Prefix=f"finetuned/v{v}/", MaxKeys=1
+                )
+                if resp.get("Contents"):
+                    versions_available.append(v)
+        except Exception as exc:
+            print(f"[federated] Version discovery error (using latest only): {exc}")
+            versions_available = [latest]
+
+        if not versions_available:
+            versions_available = [latest]
+
+        _update_fed_job(job_id, "downloading_weights", versions_aggregated=versions_available)
+        print(f"[federated] Aggregating versions: {versions_available}")
+
+        # ── 2. Download all versions ─────────────────────────────────────────
+        tmp_dir = Path(tempfile.mkdtemp(prefix="fedavg_"))
+        try:
+            model_dirs: List[str] = []
+            for v in versions_available:
+                local_dir = str(tmp_dir / f"v{v}")
+                seaweed.download_finetuned_model(v, local_dir)
+                model_dirs.append(local_dir)
+
+            # ── 3. FedAvg aggregation ─────────────────────────────────────────
+            _update_fed_job(job_id, "aggregating")
+            agg_dir = str(tmp_dir / "aggregated")
+            _fedavg_safetensors(model_dirs, agg_dir)
+
+            # ── 4. Quantize aggregated model → GGUF ──────────────────────────
+            _update_fed_job(job_id, "quantizing")
+            gguf_dir = str(tmp_dir / "gguf")
+            try:
+                from fine_tuning.quantization.quantizer import run_quantization
+                quant_results = run_quantization(agg_dir, gguf_dir, latest + 1)
+                print(f"[federated] Quantization produced {len(quant_results)} GGUF(s)")
+            except Exception as exc:
+                print(f"[federated] Quantization failed (non-fatal): {exc}")
+                quant_results = {}
+
+            # ── 5. Upload aggregated model + GGUFs as new version ─────────────
+            _update_fed_job(job_id, "uploading")
+            new_version = latest + 1
+            seaweed.upload_hf_model(agg_dir, new_version)
+            gguf_s3_keys: List[str] = []
+            if quant_results:
+                try:
+                    gguf_s3_keys = seaweed.upload_quantized(gguf_dir, new_version)
+                    print(f"[federated] GGUF(s) uploaded for v{new_version}")
+                except Exception as exc:
+                    print(f"[federated] GGUF upload failed (non-fatal): {exc}")
+
+            # Register GGUFs in Supabase adapter_registry so Electron devices
+            # can discover and download the globally aggregated model.
+            if gguf_s3_keys:
+                try:
+                    from fine_tuning.training_orchestrator import _register_gguf_in_supabase
+                    _register_gguf_in_supabase(gguf_s3_keys, new_version, gguf_dir)
+                except Exception as exc:
+                    print(f"[federated] adapter_registry registration failed (non-fatal): {exc}")
+
+            # ── Done ──────────────────────────────────────────────────────────
+            _set_fed_job(job_id, {
+                **_fed_jobs.get(job_id, {}),
+                "status": "completed",
+                "phase": "done",
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "version": new_version,
+                "versions_aggregated": versions_available,
+            })
+            print(f"[federated] Aggregation complete — new version v{new_version} in SeaweedFS.")
+        finally:
+            _shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    except Exception as exc:
+        import traceback
+        print(f"[federated] Job {job_id} FAILED: {exc}\n{traceback.format_exc()[-1000:]}")
+        with _fed_jobs_lock:
+            if job_id in _fed_jobs:
+                _fed_jobs[job_id].update({
+                    "status": "failed",
+                    "phase": "done",
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "error": str(exc),
+                })
+
+
+def _run_share_job(job_id: str, pending_entries: List[tuple]) -> None:
+    """
+    Background thread: upload all pending weight versions to SeaweedFS.
+    pending_entries: list of (file_path: Path, pending: Dict) tuples, one per training run.
+    Processes sequentially. Deletes each file after successful upload.
+    Stops on first failure (undeleted file stays for retry).
+    """
+    def _upd(phase: str, **kw: Any) -> None:
+        with _share_jobs_lock:
+            if job_id in _share_jobs:
+                _share_jobs[job_id]["phase"] = phase
+                _share_jobs[job_id].update(kw)
+
+    try:
+        from fine_tuning.training_orchestrator import promote_adapter
+
+        uploaded_versions: List[int] = []
+        for file_path, pending in pending_entries:
+            version = pending.get("version", "?")
+            _upd(f"uploading_v{version}")
+            print(f"[share-gradients] Uploading v{version} ({file_path.name})…")
+            promote_adapter(
+                adapter_id=pending["job_id"],
+                registry_path=pending["registry_path"],
+                version=pending["version"],
+                merged_model_path=pending["merged_model_path"],
+                adapter_path=pending["adapter_path"],
+                eval_scores=pending.get("eval_scores", {}),
+                training_meta=pending.get("training_meta", {}),
+                base_model=pending.get("base_model", ""),
+            )
+            # Delete only after confirmed success — next run won't re-upload
+            file_path.unlink(missing_ok=True)
+            uploaded_versions.append(version)
+            print(f"[share-gradients] v{version} uploaded and cleared.")
+
+        with _share_jobs_lock:
+            _share_jobs[job_id].update({
+                "status":            "completed",
+                "phase":             "done",
+                "finished_at":       datetime.now(timezone.utc).isoformat(),
+                "uploaded_versions": uploaded_versions,
+                "version":           uploaded_versions[-1] if uploaded_versions else None,
+            })
+        print(f"[share-gradients] All done — uploaded: {uploaded_versions}")
+
+    except Exception as exc:
+        import traceback
+        print(f"[share-gradients] FAILED: {exc}\n{traceback.format_exc()[-1000:]}")
+        with _share_jobs_lock:
+            if job_id in _share_jobs:
+                _share_jobs[job_id].update({
+                    "status":      "failed",
+                    "phase":       "done",
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "error":       str(exc),
+                })
+
+
+@app.post("/share-gradients")
+async def share_gradients_endpoint(body: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """
+    Upload ALL locally-merged fine-tuned weight versions to SeaweedFS.
+    Must be called manually by the user after Local Training completes.
+    Reads every *.json file from /workspace/fine_tuning/pending_shares/ written by job_runner.
+    Each version gets its own file — none are overwritten, all are uploaded.
+    """
+    import asyncio
+
+    if not PENDING_SHARE_DIR.exists():
+        return {
+            "status":  "no_pending",
+            "message": "No weights ready to share. Complete Local Training first.",
+        }
+
+    def _version_key(p: Path) -> int:
+        try:
+            return int(p.stem.lstrip("v"))
+        except ValueError:
+            return 0
+
+    pending_files = sorted(PENDING_SHARE_DIR.glob("*.json"), key=_version_key)
+    if not pending_files:
+        return {
+            "status":  "no_pending",
+            "message": "No weights ready to share. Complete Local Training first.",
+        }
+
+    pending_entries: List[tuple] = []
+    for fp in pending_files:
+        try:
+            pending_entries.append((fp, json.loads(fp.read_text(encoding="utf-8"))))
+        except Exception as exc:
+            print(f"[share-gradients] Skipping unreadable file {fp.name}: {exc}")
+
+    if not pending_entries:
+        return {"status": "error", "message": "Pending share files exist but could not be read."}
+
+    versions = [p.get("version") for _, p in pending_entries]
+    job_id = str(uuid.uuid4())
+    with _share_jobs_lock:
+        _share_jobs[job_id] = {
+            "job_id":            job_id,
+            "status":            "running",
+            "phase":             "starting",
+            "started_at":        datetime.now(timezone.utc).isoformat(),
+            "finished_at":       None,
+            "pending_versions":  versions,
+            "uploaded_versions": [],
+            "error":             None,
+        }
+
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(_executor, _run_share_job, job_id, pending_entries)
+
+    return {
+        "status":           "queued",
+        "job_id":           job_id,
+        "pending_versions": versions,
+        "message": (
+            f"Uploading {len(pending_entries)} version(s) {versions} to SeaweedFS. "
+            f"Poll GET /share-gradients/jobs/{job_id}."
+        ),
+    }
+
+
+@app.get("/share-gradients/status")
+def share_gradients_status() -> Dict[str, Any]:
+    """Return whether there are pending weights ready to share."""
+    if not PENDING_SHARE_DIR.exists():
+        return {"has_pending": False, "pending_count": 0, "pending_versions": []}
+
+    def _version_key(p: Path) -> int:
+        try:
+            return int(p.stem.lstrip("v"))
+        except ValueError:
+            return 0
+
+    pending_files = sorted(PENDING_SHARE_DIR.glob("*.json"), key=_version_key)
+    pending_versions: List[int] = []
+    for fp in pending_files:
+        try:
+            data = json.loads(fp.read_text(encoding="utf-8"))
+            v = data.get("version")
+            if v is not None:
+                pending_versions.append(v)
+        except Exception:
+            pass
+
+    return {
+        "has_pending":      len(pending_files) > 0,
+        "pending_count":    len(pending_files),
+        "pending_versions": pending_versions,
+    }
+
+
+@app.get("/share-gradients/jobs/{job_id}")
+def get_share_gradients_job(job_id: str) -> Dict[str, Any]:
+    """Poll the status of a share-gradients job."""
+    with _share_jobs_lock:
+        job = _share_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Share-gradients job '{job_id}' not found")
+    return job
+
+
+@app.post("/federated/start")
+async def start_federated(body: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """
+    Collect all fine-tuned weight versions from SeaweedFS and run FedAvg aggregation.
+    Returns immediately with job_id; poll GET /federated/jobs/{job_id} for status.
+    """
+    import asyncio
+    from fine_tuning.seaweedfs_client import SeaweedFSClient
+
+    seaweed = SeaweedFSClient()
+    latest = seaweed.get_latest_finetuned_version()
+    if latest is None:
+        return {
+            "status": "no_weights",
+            "message": "No fine-tuned weights found in SeaweedFS. Complete Local Training first.",
+            "versions_found": 0,
+        }
+
+    job_id = str(uuid.uuid4())
+    _set_fed_job(job_id, {
+        "job_id": job_id,
+        "status": "running",
+        "phase": "starting",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": None,
+        "error": None,
+        "version": None,
+        "versions_aggregated": [],
+    })
+
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(_executor, _run_federated_job, job_id)
+
+    return {
+        "status": "queued",
+        "job_id": job_id,
+        "message": f"Federated aggregation started. Poll GET /federated/jobs/{job_id} for progress.",
+    }
+
+
+@app.get("/federated/jobs/{job_id}")
+def get_federated_job(job_id: str) -> Dict[str, Any]:
+    """Return current status of a federated aggregation job."""
+    with _fed_jobs_lock:
+        job = _fed_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Federated job '{job_id}' not found")
+    return job
 
 
 # ---------------------------------------------------------------------------

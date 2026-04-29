@@ -16,10 +16,13 @@ from typing import Any, Dict, Optional
 SUPPORTED_FORM_TYPES = {"25", "27", "80", "85", "90", "125", "126", "130", "140"}
 
 SYSTEM_PROMPT = (
-    "You are an expert insurance document parser specialising in ACORD forms. "
-    "Given raw OCR text from an ACORD form, extract ALL fields and return a single "
-    "valid JSON object. Use \"\" for blank fields. Represent checkboxes as true/false. "
-    "Represent table rows as arrays of objects. Output ONLY the JSON — no commentary."
+    "You are an expert insurance document parser. "
+    "Given raw OCR text from an insurance document, extract all fields. "
+    "Output exactly three sections in order: "
+    "FIELDS: (a JSON object of all extracted fields), "
+    "RAW TEXT: (the source OCR text), "
+    "MARKDOWN: (a summary table). "
+    "No commentary outside these sections."
 )
 
 
@@ -38,26 +41,39 @@ def _canonical_form_key(form_type: str) -> str:
     elif ft.startswith("acord"):
         ft = ft[5:]
     if ft not in SUPPORTED_FORM_TYPES:
-        raise CorrectionValidationError(
-            f"Unsupported form type '{form_type}'. "
-            f"Supported: {sorted(SUPPORTED_FORM_TYPES)}"
-        )
+        # Default to "25" so the sample is never silently dropped due to an
+        # unrecognised form type — a bad form type is not a reason to skip training.
+        print(f"[ingest] Unknown form type '{form_type}' — defaulting to '25'")
+        ft = "25"
     return ft
 
 
-def _flatten_field_values(fields: Any) -> Dict[str, Any]:
+def _flatten_field_values(fields: Any, _prefix: str = "") -> Dict[str, Any]:
     """
-    Accept corrected_fields in either flat or {value, confidence} form and
-    return a flat dict of {field_name: value}.
+    Recursively flatten nested Qwen schema into a flat {field_name: value} dict.
+
+    Handles three shapes:
+      {"named_insured": "ABC"}                          → flat string values (old format)
+      {"named_insured": {"value": "ABC", ...}}          → one-level leaf nodes
+      {"parties": {"named_insured": {"value": "ABC"}}}  → deep nested groups (new format)
     """
     if not isinstance(fields, dict):
         return {}
     out: Dict[str, Any] = {}
     for k, v in fields.items():
-        if isinstance(v, dict) and "value" in v:
-            out[k] = v["value"]
-        else:
-            out[k] = v
+        full_key = f"{_prefix}.{k}" if _prefix else k
+        if isinstance(v, dict):
+            if "value" in v:
+                # Leaf node: {"value": "...", "confidence": "...", "page": N}
+                out[full_key] = v["value"]
+            else:
+                # Group node — recurse
+                out.update(_flatten_field_values(v, _prefix=full_key))
+        elif isinstance(v, list):
+            if v:
+                out[full_key] = str(v)
+        elif v is not None:
+            out[full_key] = v
     return out
 
 
@@ -114,9 +130,21 @@ def build_training_sample_from_correction(
 
     user_content = (
         f"ACORD Form {form_type}\n\n"
-        f"OCR TEXT:\n{raw_text or '(no text)'}"
+        f"SURYA OCR TEXT (all pages):\n{raw_text or '(no text)'}"
     )
-    assistant_content = json.dumps(merged, ensure_ascii=False, indent=2)
+    fields_json = json.dumps(merged, ensure_ascii=False, indent=2)
+    # Assistant output matches the exact format _parse_qwen_output() expects:
+    # FIELDS: {json}  RAW TEXT: {ocr}  MARKDOWN: {summary}
+    # Without this, fine-tuning teaches the model to drop the FIELDS: marker,
+    # breaking the inference parser.
+    assistant_content = (
+        f"FIELDS:\n{fields_json}\n\n"
+        f"RAW TEXT:\n{raw_text or ''}\n\n"
+        f"MARKDOWN:\n"
+        f"# ACORD Form {form_type} — Extracted Fields\n\n"
+        f"| Field | Value |\n|-------|-------|\n"
+        + "".join(f"| {k} | {v} |\n" for k, v in list(merged.items())[:30])
+    )
 
     return {
         "messages": [

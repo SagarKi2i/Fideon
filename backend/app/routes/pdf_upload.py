@@ -287,12 +287,15 @@ async def extract_acord_from_upload(
     # internal extraction missed them (e.g. truncated context, partial model output).
     llm_fields = await _llm_extract_from_raw_text(raw_text, form_type_hint=form_type)
     if llm_fields:
-        # RunPod values win over LLM when both exist and RunPod value is non-null.
+        # Merge strategy: LLM fills gaps, RunPod (fine-tuned) wins for any field it extracted.
+        # LLM is used as a baseline; RunPod's non-null/non-empty values always override it
+        # so that corrections learned through fine-tuning are never silently overridden.
+        merged_fields = dict(llm_fields)
         for k, v in runpod_fields.items():
-            if k not in llm_fields or llm_fields[k] is None:
-                llm_fields[k] = v
-        result["extracted_json"] = llm_fields
-        log.info("acord_extract.llm_supplement_done", upload_id=upload_id, field_count=len(llm_fields))
+            if v is not None and v != "" and v != [] and v != {}:
+                merged_fields[k] = v
+        result["extracted_json"] = merged_fields
+        log.info("acord_extract.llm_supplement_done", upload_id=upload_id, field_count=len(merged_fields))
     else:
         result["extracted_json"] = runpod_fields
         log.info("acord_extract.llm_supplement_skipped", upload_id=upload_id)
@@ -398,3 +401,67 @@ async def start_finetune(
     result = await _runpod_post("/finetune/start", json=body)
     log.info("finetune.queued", status=result.get("status"), samples=result.get("total_samples"))
     return result
+
+
+# ── POST /api/v1/pdf/federated/start ─────────────────────────────────────────
+@router.post("/api/v1/pdf/federated/start")
+async def start_federated(
+    body: Dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """
+    Trigger federated aggregation on the pod.
+    Pod collects all fine-tuned weight versions from SeaweedFS and runs FedAvg.
+    Returns immediately with job_id; poll GET /api/v1/pdf/federated/jobs/{job_id}.
+    """
+    await verify_user(authorization)
+    log.info("federated.start_requested")
+    result = await _runpod_post("/federated/start", json=body, timeout=30.0)
+    log.info("federated.queued", status=result.get("status"))
+    return result
+
+
+# ── GET /api/v1/pdf/federated/jobs/{job_id} ──────────────────────────────────
+@router.get("/api/v1/pdf/federated/jobs/{job_id}")
+async def get_federated_job_status(
+    job_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Poll the status of a federated aggregation job launched via POST /federated/start."""
+    await verify_user(authorization)
+    return await _runpod_get(f"/federated/jobs/{job_id}")
+
+
+# ── POST /api/v1/pdf/share-gradients ─────────────────────────────────────────
+@router.post("/api/v1/pdf/share-gradients")
+async def share_gradients(
+    body: Dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Upload locally-trained weights to SeaweedFS. Reads pending_share.json from pod."""
+    await verify_user(authorization)
+    log.info("share_gradients.start_requested")
+    result = await _runpod_post("/share-gradients", json=body, timeout=30.0)
+    log.info("share_gradients.queued", status=result.get("status"))
+    return result
+
+
+# ── GET /api/v1/pdf/share-gradients/status ───────────────────────────────────
+@router.get("/api/v1/pdf/share-gradients/status")
+async def get_share_gradients_status(
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Check if there are locally trained weights pending upload to SeaweedFS."""
+    await verify_user(authorization)
+    return await _runpod_get("/share-gradients/status")
+
+
+# ── GET /api/v1/pdf/share-gradients/jobs/{job_id} ────────────────────────────
+@router.get("/api/v1/pdf/share-gradients/jobs/{job_id}")
+async def get_share_gradients_job(
+    job_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Poll the status of a share-gradients upload job."""
+    await verify_user(authorization)
+    return await _runpod_get(f"/share-gradients/jobs/{job_id}")

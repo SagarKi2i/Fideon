@@ -8,9 +8,19 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG"; }
 
 log "Starting Fideon AI-ML Server..."
 
+# /workspace/bin persists across pod restarts (system volume resets, /workspace does not).
+# This ensures llama-quantize and llama-convert-hf-to-gguf are always in PATH.
+export PATH="/workspace/bin:$PATH"
+log "PATH includes /workspace/bin (llama.cpp binaries)"
+
+# Warn if quantization tools are missing — operator needs to re-run setup.sh
+if ! command -v llama-quantize &>/dev/null; then
+  log "WARNING: llama-quantize not found. Run: bash /workspace/ai-ml/setup.sh --skip-pip"
+fi
+
 # Start FastAPI
 log "Starting FastAPI..."
-cd /app
+cd /workspace/ai-ml
 uvicorn server:app --host 0.0.0.0 --port 8000 >> "$LOG" 2>&1 &
 
 sleep 5
