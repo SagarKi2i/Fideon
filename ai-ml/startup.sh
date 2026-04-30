@@ -79,6 +79,22 @@ if [ $READY -eq 0 ] && kill -0 $UVICORN_PID 2>/dev/null; then
     log "FastAPI still starting — proceeding anyway"
 fi
 
+# ── Start JupyterLab ──────────────────────────────────────────────────────────
+if command -v jupyter &>/dev/null; then
+    log "Starting JupyterLab on port 8888..."
+    jupyter lab \
+        --ip=0.0.0.0 \
+        --port=8888 \
+        --no-browser \
+        --allow-root \
+        --ServerApp.token='' \
+        --ServerApp.password='' \
+        --ServerApp.root_dir=/workspace >> "$LOG" 2>&1 &
+    log "JupyterLab started"
+else
+    log "jupyter not found — skipping JupyterLab"
+fi
+
 # ── Start Cloudflare tunnel ────────────────────────────────────────────────────
 if [ -z "${CLOUDFLARE_TUNNEL_TOKEN}" ]; then
     log "CLOUDFLARE_TUNNEL_TOKEN not set — tunnel skipped"
@@ -91,9 +107,10 @@ else
 fi
 
 log "========================================"
-log "Server:  http://localhost:8000"
-log "Public:  https://gpu-api.fideonai.fyi"
-log "Logs:    /workspace/logs/startup.log"
+log "Server:    http://localhost:8000"
+log "Public:    https://gpu-api.fideonai.fyi"
+log "Jupyter:   http://localhost:8888"
+log "Logs:      /workspace/logs/startup.log"
 log "========================================"
 
 wait
