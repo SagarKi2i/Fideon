@@ -478,6 +478,36 @@ export default function Training() {
           }
         }
 
+        // Backfill metrics for completed jobs that are missing training_loss —
+        // happens when a job completed before this fix or when the page was
+        // refreshed before the polling loop persisted the final metrics.
+        // Silently skips if pod is offline or job is no longer in pod memory.
+        const completedMissingMetrics = localJb.filter(
+          (j: any) =>
+            j.status === 'completed' &&
+            (j.config as any)?.runpod_job_id &&
+            (j.metrics as any)?.training_loss == null
+        );
+        for (const job of completedMissingMetrics) {
+          try {
+            const rpStatus = await getRunpodJobStatus((job.config as any).runpod_job_id);
+            if (rpStatus.eval_scores?.training_loss != null) {
+              const updatedJobs = localJb.map((j: any) =>
+                j.id === job.id
+                  ? {
+                      ...j,
+                      metrics: { ...rpStatus.eval_scores, version: rpStatus.version ?? (j.metrics as any)?.version },
+                    }
+                  : j
+              );
+              localStorage.setItem('local_training_jobs', JSON.stringify(updatedJobs));
+              localJb = updatedJobs;
+            }
+          } catch {
+            // Pod offline or job evicted from memory — skip silently
+          }
+        }
+
         setFeedback(localFb);
         setJobs(localJb);
         setStats({
@@ -1548,11 +1578,21 @@ export default function Training() {
                           {job.metrics && (job.metrics as any).version && (
                             <p className="text-xs font-medium">v{(job.metrics as any).version}</p>
                           )}
-                          {job.metrics && (job.metrics as any).training_loss != null && (
-                            <p>Loss: {Number((job.metrics as any).training_loss).toFixed(4)}</p>
+                          {job.status === "completed" && (
+                            <p>
+                              Loss:{" "}
+                              {(job.metrics as any)?.training_loss != null
+                                ? Number((job.metrics as any).training_loss).toFixed(4)
+                                : "—"}
+                            </p>
                           )}
-                          {job.metrics && (job.metrics as any).num_epochs != null && (
-                            <p>Epochs: {(job.metrics as any).num_epochs}</p>
+                          {job.status === "completed" && (
+                            <p>
+                              Epochs:{" "}
+                              {(job.metrics as any)?.num_epochs != null
+                                ? (job.metrics as any).num_epochs
+                                : "—"}
+                            </p>
                           )}
                         </div>
                       </div>
