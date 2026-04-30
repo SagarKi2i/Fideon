@@ -103,15 +103,13 @@ class SeaweedFSClient:
                 print(f"[seaweedfs]   FAILED after 3 attempts: {rel} — {last_exc}")
 
         if failed:
-            # Training succeeded — don't mark job as failed just because SeaweedFS is down.
-            # The merged model is still on disk; next cycle will re-upload.
-            # Do NOT write latest.txt — an incomplete upload must not be used as base model.
-            print(
-                f"[seaweedfs] WARNING: {len(failed)} file(s) failed to upload to {prefix}. "
-                f"Model is preserved on disk. SeaweedFS may be full or unhealthy. "
+            # Raise so training_orchestrator.promote_adapter() does not register this
+            # version with an incomplete S3 path. The merged model is still on disk.
+            raise RuntimeError(
+                f"[seaweedfs] {len(failed)} file(s) failed to upload to {prefix} after 3 attempts. "
+                f"SeaweedFS may be full or unhealthy. "
                 f"Failed files: {', '.join(failed)}"
             )
-            return prefix
 
         # Only mark as latest when ALL files uploaded successfully
         client.put_object(
