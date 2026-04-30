@@ -18,16 +18,16 @@ if [ ! -f "$VENV/bin/activate" ]; then
     log "First boot: creating venv at $VENV (~5-10 min)..."
     python3 -m venv "$VENV"
     "$VENV/bin/pip" install --upgrade pip --quiet
-    if "$VENV/bin/pip" install -r /app/requirements.txt --quiet; then
+    if "$VENV/bin/pip" install -r /app/requirements.txt --quiet 2>>"$LOG"; then
         log "Packages installed to venv"
     else
-        log_err "pip install failed — some packages may be missing"
+        log_err "pip install failed — check $LOG for details"
     fi
 else
     log "venv exists — checking for missing packages..."
-    "$VENV/bin/pip" install -q --no-deps -r /app/requirements.txt 2>/dev/null || \
-    "$VENV/bin/pip" install -q -r /app/requirements.txt 2>/dev/null || \
-    log_err "pip sync failed — continuing with existing packages"
+    if ! "$VENV/bin/pip" install -q -r /app/requirements.txt 2>>"$LOG"; then
+        log_err "pip sync failed — continuing with existing packages (check $LOG)"
+    fi
 fi
 
 source "$VENV/bin/activate"
@@ -38,8 +38,8 @@ if [ ! -f "$LLAMA_BIN" ]; then
     log "First boot: compiling llama.cpp with CUDA (~10-15 min)..."
     if bash /app/setup.sh --skip-pip --skip-verify; then
         [ -f /workspace/llama.cpp/requirements.txt ] && \
-            "$VENV/bin/pip" install -q -r /workspace/llama.cpp/requirements.txt 2>/dev/null || true
-        "$VENV/bin/pip" install -q gguf 2>/dev/null || true
+            "$VENV/bin/pip" install -q -r /workspace/llama.cpp/requirements.txt 2>>"$LOG" || true
+        "$VENV/bin/pip" install -q gguf 2>>"$LOG" || true
         log "llama.cpp compiled and cached"
     else
         log_err "llama.cpp compile failed — quantization will be unavailable"
@@ -47,7 +47,7 @@ if [ ! -f "$LLAMA_BIN" ]; then
 else
     log "llama.cpp already compiled — linking binaries..."
     cp "$LLAMA_BIN" /usr/local/bin/llama-quantize
-    "$VENV/bin/pip" install -q gguf 2>/dev/null || true
+    "$VENV/bin/pip" install -q gguf 2>>"$LOG" || true
     cat > /usr/local/bin/llama-convert-hf-to-gguf <<'WRAPPER'
 #!/usr/bin/env bash
 exec python3 /workspace/llama.cpp/convert_hf_to_gguf.py "$@"
@@ -61,25 +61,25 @@ cd /app
 "$VENV/bin/uvicorn" server:app --host 0.0.0.0 --port 8000 >> "$LOG" 2>&1 &
 UVICORN_PID=$!
 
-log "Waiting for FastAPI (up to 30s)..."
+log "Waiting for FastAPI (up to 60s)..."
 READY=0
-for i in $(seq 1 30); do
+for i in $(seq 1 60); do
     if ! kill -0 $UVICORN_PID 2>/dev/null; then
-        log_err "FastAPI process died — check logs above"
+        log_err "FastAPI process died on attempt $i — check $LOG for the Python traceback"
         break
     fi
-    if curl -sf http://localhost:8000/ > /dev/null 2>&1 || \
-       curl -sf http://localhost:8000/health > /dev/null 2>&1 || \
-       curl -sf http://localhost:8000/docs > /dev/null 2>&1; then
+    # Accept any HTTP response (even 404) — connection refused returns code 000
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/ 2>/dev/null)
+    if [ "$HTTP_CODE" != "000" ] && [ -n "$HTTP_CODE" ]; then
         READY=1
-        log "FastAPI is ready"
+        log "FastAPI is ready (HTTP $HTTP_CODE)"
         break
     fi
     sleep 1
 done
 
 if [ $READY -eq 0 ] && kill -0 $UVICORN_PID 2>/dev/null; then
-    log "FastAPI still starting — proceeding anyway"
+    log "Warning: FastAPI health check timed out after 60s — proceeding anyway (server may still be loading)"
 fi
 
 # ── Start FileBrowser (port 8080) ─────────────────────────────────────────────
@@ -130,14 +130,18 @@ if [ -z "${CLOUDFLARE_TUNNEL_TOKEN}" ]; then
     log_err "CLOUDFLARE_TUNNEL_TOKEN not set — tunnel skipped (set it in RunPod pod env vars)"
 else
     log "Starting Cloudflare tunnel..."
-    cloudflared tunnel run \
-        --token "${CLOUDFLARE_TUNNEL_TOKEN}" >> "$LOG" 2>&1 &
+    # --no-autoupdate prevents cloudflared from trying to self-update inside the container
+    # tee -a makes tunnel output visible in RunPod container logs AND the log file
+    cloudflared tunnel --no-autoupdate run \
+        --token "${CLOUDFLARE_TUNNEL_TOKEN}" 2>&1 | tee -a "$LOG" &
     TUNNEL_PID=$!
-    sleep 5
+    sleep 10
     if kill -0 $TUNNEL_PID 2>/dev/null; then
         log "Cloudflare tunnel running — Live: https://gpu-api.fideonai.fyi"
     else
-        log_err "Cloudflare tunnel crashed — check token and cloudflared logs"
+        log_err "Cloudflare tunnel process exited — check above log lines for the reason"
+        log_err "Common causes: invalid token, token already in use, network issue"
+        log_err "Verify token at: https://one.dash.cloudflare.com -> Zero Trust -> Tunnels"
     fi
 fi
 
@@ -150,4 +154,11 @@ log "Public:       https://gpu-api.fideonai.fyi"
 log "Logs:         /workspace/logs/startup.log"
 log "========================================"
 
-wait
+# ── Keep container alive, restart if FastAPI dies ─────────────────────────────
+while true; do
+    if ! kill -0 $UVICORN_PID 2>/dev/null; then
+        log_err "FastAPI (uvicorn) has exited unexpectedly — container will exit and restart"
+        exit 1
+    fi
+    sleep 30
+done
