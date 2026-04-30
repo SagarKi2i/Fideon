@@ -8,7 +8,7 @@ Bucket layout:
 
 Required env vars (all optional — if SEAWEEDFS_ENDPOINT is unset, uploads are no-ops):
   SEAWEEDFS_ENDPOINT   — e.g. http://seaweedfs-gateway:8333
-  SEAWEEDFS_BUCKET     — bucket name (default: fideon-adapters)
+  SEAWEEDFS_BUCKET     — bucket name (default: my-bucket)
   SEAWEEDFS_ACCESS_KEY — S3 access key
   SEAWEEDFS_SECRET_KEY — S3 secret key
 """
