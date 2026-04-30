@@ -4,37 +4,46 @@ set -e
 LOG="/workspace/logs/startup.log"
 mkdir -p /workspace/logs
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG"; }
+log()     { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"        | tee -a "$LOG"; }
+log_err() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $1" | tee -a "$LOG" >&2; }
 
 log "Starting Fideon AI-ML Server..."
 
-# ── Persist Surya/Datalab model cache to /workspace ───────────────────────────
+# ── Persist Surya/Datalab model cache ─────────────────────────────────────────
 mkdir -p /workspace/.cache/datalab
 export DATALAB_CACHE_PATH=/workspace/.cache/datalab
 
 # ── Python venv: create once on volume, reuse forever ─────────────────────────
-if [ ! -f "/workspace/venv/bin/activate" ]; then
-    log "First boot: creating venv and installing packages to /workspace/venv..."
-    python3 -m venv /workspace/venv
-    /workspace/venv/bin/pip install --upgrade pip
-    /workspace/venv/bin/pip install -r /app/requirements.txt
-    log "Packages installed to /workspace/venv"
+VENV=/workspace/venv
+if [ ! -f "$VENV/bin/activate" ]; then
+    log "First boot: creating venv at $VENV (~5-10 min)..."
+    python3 -m venv "$VENV"
+    "$VENV/bin/pip" install --upgrade pip --quiet
+    "$VENV/bin/pip" install -r /app/requirements.txt --quiet
+    log "Packages installed to venv"
 else
-    log "venv already exists at /workspace/venv — skipping install"
+    log "venv exists — checking for missing packages..."
+    "$VENV/bin/pip" install -q --no-deps -r /app/requirements.txt 2>/dev/null || \
+    "$VENV/bin/pip" install -q -r /app/requirements.txt
 fi
 
-source /workspace/venv/bin/activate
+source "$VENV/bin/activate"
 
-# ── llama.cpp: compile once on GPU pod, reuse forever from /workspace ─────────
+# ── llama.cpp: compile once on GPU pod, reuse forever ─────────────────────────
 LLAMA_BIN="/workspace/llama.cpp/build/bin/llama-quantize"
-
 if [ ! -f "$LLAMA_BIN" ]; then
-    log "First boot: compiling llama.cpp with CUDA (~10-15 min on RunPod GPU)..."
+    log "First boot: compiling llama.cpp with CUDA (~10-15 min)..."
     bash /app/setup.sh --skip-pip --skip-verify
-    log "llama.cpp compiled and stored in /workspace/llama.cpp"
+    # Install llama.cpp Python deps into venv (not system pip)
+    [ -f /workspace/llama.cpp/requirements.txt ] && \
+        "$VENV/bin/pip" install -q -r /workspace/llama.cpp/requirements.txt
+    "$VENV/bin/pip" install -q gguf
+    log "llama.cpp compiled and cached"
 else
     log "llama.cpp already compiled — linking binaries..."
     cp "$LLAMA_BIN" /usr/local/bin/llama-quantize
+    # Ensure gguf is in venv
+    "$VENV/bin/pip" install -q gguf 2>/dev/null || true
     cat > /usr/local/bin/llama-convert-hf-to-gguf <<'WRAPPER'
 #!/usr/bin/env bash
 exec python3 /workspace/llama.cpp/convert_hf_to_gguf.py "$@"
@@ -42,21 +51,41 @@ WRAPPER
     chmod +x /usr/local/bin/llama-convert-hf-to-gguf
 fi
 
-# ── Start FastAPI using venv ───────────────────────────────────────────────────
+# ── Start FastAPI ──────────────────────────────────────────────────────────────
 log "Starting FastAPI..."
 cd /app
-/workspace/venv/bin/uvicorn server:app --host 0.0.0.0 --port 8000 >> "$LOG" 2>&1 &
+"$VENV/bin/uvicorn" server:app --host 0.0.0.0 --port 8000 >> "$LOG" 2>&1 &
+UVICORN_PID=$!
 
-sleep 5
+# Wait up to 30s for FastAPI to be ready
+log "Waiting for FastAPI..."
+READY=0
+for i in $(seq 1 30); do
+    if ! kill -0 $UVICORN_PID 2>/dev/null; then
+        log_err "FastAPI crashed — check logs above"
+        break
+    fi
+    if curl -sf http://localhost:8000/ > /dev/null 2>&1 || \
+       curl -sf http://localhost:8000/health > /dev/null 2>&1 || \
+       curl -sf http://localhost:8000/docs > /dev/null 2>&1; then
+        READY=1
+        log "FastAPI is ready"
+        break
+    fi
+    sleep 1
+done
+
+if [ $READY -eq 0 ] && kill -0 $UVICORN_PID 2>/dev/null; then
+    log "FastAPI still starting — proceeding anyway"
+fi
 
 # ── Start Cloudflare tunnel ────────────────────────────────────────────────────
 if [ -z "${CLOUDFLARE_TUNNEL_TOKEN}" ]; then
-    log "CLOUDFLARE_TUNNEL_TOKEN not set -- tunnel skipped"
+    log "CLOUDFLARE_TUNNEL_TOKEN not set — tunnel skipped"
 else
     log "Starting Cloudflare tunnel..."
     cloudflared tunnel run \
-        --token "${CLOUDFLARE_TUNNEL_TOKEN}" \
-        --no-autoupdate >> "$LOG" 2>&1 &
+        --token "${CLOUDFLARE_TUNNEL_TOKEN}" >> "$LOG" 2>&1 &
     sleep 3
     log "Live: https://gpu-api.fideonai.fyi"
 fi
