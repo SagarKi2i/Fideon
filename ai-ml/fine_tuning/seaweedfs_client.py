@@ -27,7 +27,7 @@ _MULTIPART_CHUNK     = 256 * 1024 * 1024  # 256 MB chunks — fewer parts = fewe
 class SeaweedFSClient:
     def __init__(self) -> None:
         self._endpoint   = os.getenv("SEAWEEDFS_ENDPOINT", "").strip().rstrip("/")
-        self._bucket     = os.getenv("SEAWEEDFS_BUCKET", "fideon-adapters").strip()
+        self._bucket     = os.getenv("SEAWEEDFS_BUCKET", "my-bucket").strip()
         self._access_key = os.getenv("SEAWEEDFS_ACCESS_KEY", "").strip()
         self._secret_key = os.getenv("SEAWEEDFS_SECRET_KEY", "").strip()
 

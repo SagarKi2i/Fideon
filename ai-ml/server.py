@@ -725,10 +725,11 @@ def _fedavg_safetensors(model_dirs: List[str], output_dir: str) -> None:
         from safetensors import safe_open
         from safetensors.torch import save_file
         import torch
-    except ImportError:
-        print("[fedavg] safetensors/torch not available — falling back to latest model copy.")
-        _shutil.copytree(model_dirs[-1], output_dir, dirs_exist_ok=True)
-        return
+    except ImportError as _ie:
+        raise ImportError(
+            "safetensors and torch are required for FedAvg aggregation. "
+            f"Install them with: pip install safetensors torch\nOriginal error: {_ie}"
+        ) from _ie
 
     last_dir = Path(model_dirs[-1])
     # Copy all non-weight files (config.json, tokenizer, etc.) from the latest model
@@ -811,6 +812,14 @@ def _run_federated_job(job_id: str) -> None:
             agg_dir = str(tmp_dir / "aggregated")
             _fedavg_safetensors(model_dirs, agg_dir)
 
+            # B7: verify aggregated model is valid before uploading
+            _agg_path = Path(agg_dir)
+            if not (_agg_path / "config.json").exists():
+                raise RuntimeError(
+                    f"FedAvg output at {agg_dir} is missing config.json — "
+                    "aggregation may have failed silently. Aborting upload."
+                )
+
             # ── 4. Quantize aggregated model → GGUF ──────────────────────────
             _update_fed_job(job_id, "quantizing")
             gguf_dir = str(tmp_dir / "gguf")
@@ -890,6 +899,20 @@ def _run_share_job(job_id: str, pending_entries: List[tuple]) -> None:
             version = pending.get("version", "?")
             _upd(f"uploading_v{version}")
             print(f"[share-gradients] Uploading v{version} ({file_path.name})…")
+
+            # B4: validate paths exist before calling promote_adapter
+            merged_model_path = pending.get("merged_model_path", "")
+            adapter_path = pending.get("adapter_path", "")
+            if not merged_model_path or not Path(merged_model_path).exists():
+                raise RuntimeError(
+                    f"v{version}: merged_model_path missing or not on disk: '{merged_model_path}'. "
+                    "The pod may have restarted and lost the merged weights."
+                )
+            if not adapter_path or not Path(adapter_path).exists():
+                raise RuntimeError(
+                    f"v{version}: adapter_path missing or not on disk: '{adapter_path}'."
+                )
+
             promote_adapter(
                 adapter_id=pending["job_id"],
                 registry_path=pending["registry_path"],

@@ -162,6 +162,7 @@ async def smart_extract_pdf(
     log.info("smart_extract.uploading_to_runpod", filename=filename, pdf_type=pdf_type)
     result = await _runpod_post(
         "/upload",
+        timeout=300.0,
         files={"file": (filename, content, file.content_type or "application/pdf")},
         params={"form_type": form_type},
     )

@@ -783,7 +783,10 @@ def _run_qwen_extraction(
     )[0]
 
     parsed, qwen_raw_text, qwen_markdown = _parse_qwen_output(output_text)
-    fields = parsed if parsed is not None else {"_raw_qwen_output": output_text}
+    if parsed is None:
+        print(f"[extractor] CRITICAL: Qwen output JSON parse failed.\nPreview:\n{output_text[:500]}")
+        raise RuntimeError("Qwen did not produce valid JSON in the FIELDS section. Check model output above.")
+    fields = parsed
     return {"fields": fields, "qwen_raw_text": qwen_raw_text, "qwen_markdown": qwen_markdown}
 
 
@@ -841,9 +844,21 @@ def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
 
         for future in as_completed([future_surya, future_docling]):
             if future is future_surya:
-                surya_ocr_text = future.result()
+                try:
+                    surya_ocr_text = future.result()
+                except Exception as exc:
+                    print(f"[extractor] WARNING: Surya OCR failed (proceeding with empty text): {exc}")
+                    surya_ocr_text = ""
             else:
-                docling_result = future.result()
+                try:
+                    docling_result = future.result()
+                except Exception as exc:
+                    print(f"[extractor] WARNING: Docling raised exception: {exc}")
+                    docling_result = {"markdown": "", "tables": [], "kv_pairs": {}}
+                else:
+                    if docling_result.get("error"):
+                        print(f"[extractor] WARNING: Docling failed: {docling_result['error']}")
+                        docling_result = {"markdown": "", "tables": [], "kv_pairs": {}}
 
     # ── Step 2: Qwen2-VL with both arm outputs ────────────────────────────────
     qwen_result = _run_qwen_extraction(images, surya_ocr_text, docling_result, form_type)

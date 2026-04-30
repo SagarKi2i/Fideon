@@ -163,11 +163,9 @@ def promote_adapter(
     seaweedfs_quantized_keys:   List[str]     = []
 
     # ── 1. Upload merged HF model → finetuned/v{N}/ ─────────────────────────
+    # Fatal: if upload fails, do not register the version with a null S3 prefix.
     print(f"[orchestrator] Uploading merged HF model (v{version}) to SeaweedFS …")
-    try:
-        seaweedfs_finetuned_prefix = seaweed.upload_hf_model(merged_model_path, version)
-    except Exception as exc:
-        print(f"[orchestrator] HF model upload failed (non-fatal): {exc}")
+    seaweedfs_finetuned_prefix = seaweed.upload_hf_model(merged_model_path, version)
 
     # ── 2. Quantize merged model → GGUF ─────────────────────────────────────
     gguf_output_dir = str(Path(merged_model_path).parent / f"{version}-gguf")

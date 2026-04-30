@@ -13,6 +13,12 @@ log "Starting Fideon AI-ML Server..."
 export PATH="/workspace/bin:$PATH"
 log "PATH includes /workspace/bin (llama.cpp binaries)"
 
+# Env var defaults — set here so uvicorn workers inherit them without needing
+# RunPod environment variables explicitly configured.
+export SEAWEEDFS_BUCKET="${SEAWEEDFS_BUCKET:-my-bucket}"
+export ACORD_NL_SUMMARY_ENABLED="${ACORD_NL_SUMMARY_ENABLED:-true}"
+log "SEAWEEDFS_BUCKET=${SEAWEEDFS_BUCKET}  ACORD_NL_SUMMARY_ENABLED=${ACORD_NL_SUMMARY_ENABLED}"
+
 # Warn if quantization tools are missing — operator needs to re-run setup.sh
 if ! command -v llama-quantize &>/dev/null; then
   log "WARNING: llama-quantize not found. Run: bash /workspace/ai-ml/setup.sh --skip-pip"

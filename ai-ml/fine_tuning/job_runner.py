@@ -183,6 +183,9 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
 
     # ── 1. SeaweedFS: latest fine-tuned version ───────────────────────────────
     seaweed_version = seaweed.get_latest_finetuned_version()
+    if seaweed_version is None:
+        print("[job_runner] WARNING: SeaweedFS returned no version (unreachable or no uploads yet). "
+              "Falling back to local registry or base model.")
     if seaweed_version is not None:
         cache_dir = f"/workspace/fine_tuning/models/finetuned/v{seaweed_version}"
         cache_path = Path(cache_dir)
@@ -371,6 +374,11 @@ def run_cycle(
             # ── 7. Evaluation ─────────────────────────────────────────────────
             _update("evaluating")
             eval_examples = _load_eval_examples_from_config(config)
+            if not eval_examples:
+                print(
+                    "[job_runner] WARNING: No eval examples loaded — gate will trivially pass. "
+                    "Add eval files to config.evaluation to enable real quality checks."
+                )
             print(f"[job_runner] Running local eval on {len(eval_examples)} examples …")
 
             local_result     = run_local_eval(adapter_path, config, eval_examples)
@@ -436,6 +444,14 @@ def run_cycle(
                 cycle_id=cycle_id,
                 version=new_version,
             )
+
+            # ── 8b. Validate merge output before writing pending share ─────────
+            _merged_path = Path(merge_result.output_path)
+            if not _merged_path.exists() or not (_merged_path / "config.json").exists():
+                raise RuntimeError(
+                    f"Merge output missing or incomplete at {merge_result.output_path}. "
+                    "Cannot write pending share — check AdapterMerger logs above."
+                )
 
             # ── 9. Local-only promote + write pending_shares/v{N}.json ──────────
             # SeaweedFS upload is deferred — user must click "Share Gradients".

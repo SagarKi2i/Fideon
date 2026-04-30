@@ -71,7 +71,8 @@ def _flatten_field_values(fields: Any, _prefix: str = "") -> Dict[str, Any]:
                 out.update(_flatten_field_values(v, _prefix=full_key))
         elif isinstance(v, list):
             if v:
-                out[full_key] = str(v)
+                import json as _json
+                out[full_key] = _json.dumps(v, ensure_ascii=False)
         elif v is not None:
             out[full_key] = v
     return out
