@@ -11,6 +11,8 @@ PORT=${UPLOAD_SERVER_PORT:-8080}
 # /workspace/bin persists across pod restarts — add it to PATH so
 # llama-quantize and llama-convert-hf-to-gguf are always discoverable.
 export PATH="/workspace/bin:$PATH"
+export SEAWEEDFS_BUCKET="${SEAWEEDFS_BUCKET:-my-bucket}"
+export ACORD_NL_SUMMARY_ENABLED="${ACORD_NL_SUMMARY_ENABLED:-true}"
 
 if ! command -v llama-quantize &>/dev/null; then
   echo "[start.sh] WARNING: llama-quantize not found in /workspace/bin."
