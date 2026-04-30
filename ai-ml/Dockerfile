@@ -13,6 +13,9 @@ RUN apt-get update && apt-get install -y curl git build-essential cmake libgomp1
     apt-get update && apt-get install -y cloudflared && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# Install FileBrowser (port 8080 file manager)
+RUN curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
+
 # Copy code + requirements (pip install happens at first boot into /workspace/venv)
 COPY requirements.txt .
 COPY . .

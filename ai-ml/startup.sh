@@ -79,6 +79,32 @@ if [ $READY -eq 0 ] && kill -0 $UVICORN_PID 2>/dev/null; then
     log "FastAPI still starting — proceeding anyway"
 fi
 
+# ── Start FileBrowser (port 8080) ─────────────────────────────────────────────
+if command -v filebrowser &>/dev/null; then
+    log "Starting FileBrowser on port 8080..."
+    mkdir -p /workspace/.filebrowser
+    filebrowser \
+        --address 0.0.0.0 \
+        --port 8080 \
+        --root /workspace \
+        --noauth \
+        --database /workspace/.filebrowser/filebrowser.db >> "$LOG" 2>&1 &
+    log "FileBrowser started"
+else
+    log "filebrowser not found — skipping"
+fi
+
+# ── Start ComfyUI (port 8188) ─────────────────────────────────────────────────
+if [ -d /workspace/ComfyUI ]; then
+    log "Starting ComfyUI on port 8188..."
+    "$VENV/bin/python" /workspace/ComfyUI/main.py \
+        --listen 0.0.0.0 \
+        --port 8188 >> "$LOG" 2>&1 &
+    log "ComfyUI started"
+else
+    log "ComfyUI not found at /workspace/ComfyUI — skipping"
+fi
+
 # ── Start JupyterLab ──────────────────────────────────────────────────────────
 if command -v jupyter &>/dev/null; then
     log "Starting JupyterLab on port 8888..."
@@ -107,10 +133,12 @@ else
 fi
 
 log "========================================"
-log "Server:    http://localhost:8000"
-log "Public:    https://gpu-api.fideonai.fyi"
-log "Jupyter:   http://localhost:8888"
-log "Logs:      /workspace/logs/startup.log"
+log "FastAPI:      http://localhost:8000"
+log "FileBrowser:  http://localhost:8080"
+log "ComfyUI:      http://localhost:8188"
+log "JupyterLab:   http://localhost:8888"
+log "Public:       https://gpu-api.fideonai.fyi"
+log "Logs:         /workspace/logs/startup.log"
 log "========================================"
 
 wait
