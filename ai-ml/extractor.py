@@ -774,20 +774,35 @@ def _run_qwen_extraction(
         return_tensors="pt",
     ).to(_qwen_model.device)
 
-    with torch.no_grad():
-        generated_ids = _qwen_model.generate(**inputs, max_new_tokens=4096)
+    # Two inference attempts — Qwen sampling is stochastic; a second draw usually
+    # succeeds when the first truncates or omits the FIELDS: JSON block.
+    # inputs is already on GPU so retrying costs only one extra generate() call.
+    failed_previews: List[str] = []
+    for attempt in range(1, 3):
+        with torch.no_grad():
+            generated_ids = _qwen_model.generate(**inputs, max_new_tokens=4096)
 
-    trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
-    output_text = _qwen_processor.batch_decode(
-        trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-    )[0]
+        trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
+        output_text = _qwen_processor.batch_decode(
+            trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )[0]
 
-    parsed, qwen_raw_text, qwen_markdown = _parse_qwen_output(output_text)
-    if parsed is None:
-        print(f"[extractor] CRITICAL: Qwen output JSON parse failed.\nPreview:\n{output_text[:500]}")
-        raise RuntimeError("Qwen did not produce valid JSON in the FIELDS section. Check model output above.")
-    fields = parsed
-    return {"fields": fields, "qwen_raw_text": qwen_raw_text, "qwen_markdown": qwen_markdown}
+        parsed, qwen_raw_text, qwen_markdown = _parse_qwen_output(output_text)
+        if parsed is not None:
+            if attempt > 1:
+                print(f"[extractor] Qwen parse succeeded on attempt {attempt}.")
+            return {"fields": parsed, "qwen_raw_text": qwen_raw_text, "qwen_markdown": qwen_markdown}
+
+        preview = output_text[:500]
+        failed_previews.append(f"Attempt {attempt}:\n{preview}")
+        print(f"[extractor] Attempt {attempt}/2: Qwen JSON parse failed.\nPreview:\n{preview}")
+        if attempt < 2:
+            print("[extractor] Retrying Qwen inference with same inputs…")
+
+    raise RuntimeError(
+        "Qwen did not produce valid JSON in the FIELDS section after 2 attempts. "
+        "Check model output above.\n\n" + "\n\n".join(failed_previews)
+    )
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
