@@ -371,6 +371,20 @@ def run_cycle(
                 base_model=base_model,
             )
 
+            # Read training metrics from adapter manifest written by run_training()
+            _train_stats: Dict[str, Any] = {}
+            try:
+                import json as _json
+                _manifest_path = Path(adapter_path) / "adapter_manifest.json"
+                if _manifest_path.exists():
+                    _m = _json.loads(_manifest_path.read_text(encoding="utf-8"))
+                    _train_stats = {
+                        "training_loss": _m.get("training_loss"),
+                        "num_epochs":    _m.get("num_epochs"),
+                    }
+            except Exception:
+                pass
+
             # ── 7. Evaluation ─────────────────────────────────────────────────
             _update("evaluating")
             eval_examples = _load_eval_examples_from_config(config)
@@ -517,7 +531,7 @@ def run_cycle(
             "version":            new_version,
             "adapter_path":       adapter_path,
             "merged_model_path":  merge_result.output_path,
-            "eval_scores":        gate.scores,
+            "eval_scores":        {**gate.scores, **_train_stats},
         })
         print(f"[job_runner] Cycle complete — SLM v1.{new_version} ready. Click 'Share Gradients' to upload to SeaweedFS.")
 

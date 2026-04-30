@@ -204,12 +204,15 @@ def run_training(
     )
 
     print("[train] Starting training …")
-    trainer.train()
+    train_output = trainer.train()
 
     adapter_path = output_dir
     print(f"[train] Saving adapter to {adapter_path} …")
     model.save_pretrained(adapter_path)
     processor.save_pretrained(adapter_path)
+
+    training_loss = round(float(train_output.training_loss), 4)
+    print(f"[train] Final training loss: {training_loss}  epochs: {training_args.num_train_epochs}")
 
     # Write adapter manifest
     manifest = {
@@ -220,6 +223,8 @@ def run_training(
         "lora_r": lora_config.r,
         "lora_alpha": lora_config.lora_alpha,
         "num_epochs": training_args.num_train_epochs,
+        "training_loss": training_loss,
+        "global_step": train_output.global_step,
         "learning_rate": training_args.learning_rate,
         "trained_at": datetime.now(timezone.utc).isoformat(),
     }

@@ -1548,8 +1548,11 @@ export default function Training() {
                           {job.metrics && (job.metrics as any).version && (
                             <p className="text-xs font-medium">v{(job.metrics as any).version}</p>
                           )}
-                          {job.metrics && (job.metrics as any).loss && (
-                            <p>Loss: {(job.metrics as any).loss}</p>
+                          {job.metrics && (job.metrics as any).training_loss != null && (
+                            <p>Loss: {Number((job.metrics as any).training_loss).toFixed(4)}</p>
+                          )}
+                          {job.metrics && (job.metrics as any).num_epochs != null && (
+                            <p>Epochs: {(job.metrics as any).num_epochs}</p>
                           )}
                         </div>
                       </div>
