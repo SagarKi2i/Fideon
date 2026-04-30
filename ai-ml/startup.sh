@@ -106,9 +106,10 @@ else
 fi
 
 # ── Start JupyterLab ──────────────────────────────────────────────────────────
-if command -v jupyter &>/dev/null; then
+JUPYTER_BIN="$VENV/bin/jupyter"
+if [ -f "$JUPYTER_BIN" ]; then
     log "Starting JupyterLab on port 8888..."
-    jupyter lab \
+    "$JUPYTER_BIN" lab \
         --ip=0.0.0.0 \
         --port=8888 \
         --no-browser \
@@ -118,7 +119,7 @@ if command -v jupyter &>/dev/null; then
         --ServerApp.root_dir=/workspace >> "$LOG" 2>&1 &
     log "JupyterLab started"
 else
-    log "jupyter not found — skipping JupyterLab"
+    log "jupyter not found in venv — skipping JupyterLab"
 fi
 
 # ── Start Cloudflare tunnel ────────────────────────────────────────────────────
