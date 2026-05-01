@@ -22,6 +22,9 @@ if [ ! -f "$VENV/bin/activate" ]; then
         log "pip not in new venv — bootstrapping via ensurepip..."
         "$VENV/bin/python" -m ensurepip --upgrade 2>>"$LOG" || \
             curl -sS https://bootstrap.pypa.io/get-pip.py | "$VENV/bin/python" 2>>"$LOG"
+        # ensurepip installs pip as a module but does NOT always create bin/pip script
+        # Running via -m pip creates the script wrapper
+        "$VENV/bin/python" -m pip install --upgrade pip --quiet 2>>"$LOG" || true
     fi
     "$VENV/bin/pip" install --upgrade pip --quiet 2>>"$LOG"
     if "$VENV/bin/pip" install -r /app/requirements.txt --quiet 2>>"$LOG"; then
