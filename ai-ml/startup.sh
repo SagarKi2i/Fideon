@@ -69,7 +69,7 @@ if [ ! -f "$LLAMA_BIN" ]; then
     fi
 else
     log "llama.cpp already compiled — linking binaries..."
-    cp "$LLAMA_BIN" /usr/local/bin/llama-quantize
+    cp "$LLAMA_BIN" /usr/local/bin/llama-quantize 2>>"$LOG" || true
     "$VENV/bin/pip" install -q gguf 2>>"$LOG" || true
     cat > /usr/local/bin/llama-convert-hf-to-gguf <<'WRAPPER'
 #!/usr/bin/env bash
@@ -183,13 +183,17 @@ log "Logs:         /workspace/logs/startup.log"
 log "========================================"
 
 # ── Keep container alive, auto-restart FastAPI on crash ───────────────────────
-# Exits the container only after MAX_RESTARTS consecutive failures so RunPod
-# doesn't spin forever on a fatal import error.
+# Exits only after MAX_RESTARTS *consecutive* failures. Counter resets after
+# STABLE_THRESHOLD healthy cycles (10 × 30s = 5 min) so transient crashes on
+# a long-running pod don't accumulate to a permanent shutdown.
 MAX_RESTARTS=5
 RESTART_COUNT=0
+STABLE_CYCLES=0
+STABLE_THRESHOLD=10
 while true; do
     sleep 30
     if ! kill -0 $UVICORN_PID 2>/dev/null; then
+        STABLE_CYCLES=0
         RESTART_COUNT=$((RESTART_COUNT + 1))
         if [ $RESTART_COUNT -gt $MAX_RESTARTS ]; then
             log_err "FastAPI has crashed $RESTART_COUNT times — giving up, exiting container"
@@ -200,5 +204,12 @@ while true; do
         sleep 5
         UVICORN_PID=$(_start_fastapi)
         log "FastAPI restarted (PID $UVICORN_PID)"
+    else
+        STABLE_CYCLES=$((STABLE_CYCLES + 1))
+        if [ $STABLE_CYCLES -ge $STABLE_THRESHOLD ] && [ $RESTART_COUNT -gt 0 ]; then
+            log "FastAPI stable for $((STABLE_CYCLES * 30))s — resetting crash counter"
+            RESTART_COUNT=0
+            STABLE_CYCLES=0
+        fi
     fi
 done
