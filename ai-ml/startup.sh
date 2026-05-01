@@ -39,6 +39,9 @@ else
         log "pip missing from existing venv — bootstrapping..."
         "$VENV/bin/python" -m ensurepip --upgrade 2>>"$LOG" || \
             curl -sS https://bootstrap.pypa.io/get-pip.py | "$VENV/bin/python" 2>>"$LOG"
+        # ensurepip installs pip as a module but does NOT always create bin/pip script
+        # Running via -m pip forces creation of the wrapper script
+        "$VENV/bin/python" -m pip install --upgrade pip --quiet 2>>"$LOG" || true
     fi
     if ! "$VENV/bin/pip" install -q -r /app/requirements.txt 2>>"$LOG"; then
         log_err "pip sync failed — continuing with existing packages (check $LOG)"
