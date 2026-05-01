@@ -13,37 +13,32 @@ mkdir -p /workspace/.cache/datalab
 export DATALAB_CACHE_PATH=/workspace/.cache/datalab
 
 # ── Python venv: create once on volume, reuse forever ─────────────────────────
+# Use "python -m pip" throughout — bin/pip script is not reliably created by
+# ensurepip on all base images, but the pip module is always present.
 VENV=/workspace/venv
+PY="$VENV/bin/python"
+# Redirect pip tmp dir to /workspace so large package extraction does not
+# fill the 5 GB container overlay disk
+mkdir -p /workspace/tmp
+export TMPDIR=/workspace/tmp
+
 if [ ! -f "$VENV/bin/activate" ]; then
     log "First boot: creating venv at $VENV (~5-10 min)..."
     python3 -m venv "$VENV"
-    # Some base images create the venv without pip — bootstrap it explicitly
-    if [ ! -f "$VENV/bin/pip" ]; then
-        log "pip not in new venv — bootstrapping via ensurepip..."
-        "$VENV/bin/python" -m ensurepip --upgrade 2>>"$LOG" || \
-            curl -sS https://bootstrap.pypa.io/get-pip.py | "$VENV/bin/python" 2>>"$LOG"
-        # ensurepip installs pip as a module but does NOT always create bin/pip script
-        # Running via -m pip creates the script wrapper
-        "$VENV/bin/python" -m pip install --upgrade pip --quiet 2>>"$LOG" || true
-    fi
-    "$VENV/bin/pip" install --upgrade pip --quiet 2>>"$LOG"
-    if "$VENV/bin/pip" install -r /app/requirements.txt --quiet 2>>"$LOG"; then
+    # Bootstrap pip module if the venv was created without it
+    "$PY" -m ensurepip --upgrade 2>>"$LOG" || \
+        curl -sS https://bootstrap.pypa.io/get-pip.py | "$PY" 2>>"$LOG"
+    "$PY" -m pip install --upgrade pip --quiet --no-cache-dir 2>>"$LOG"
+    if "$PY" -m pip install -r /app/requirements.txt --quiet --no-cache-dir 2>>"$LOG"; then
         log "Packages installed to venv"
     else
         log_err "pip install failed — some packages may be missing (check $LOG)"
     fi
 else
-    log "venv exists — checking for missing packages..."
-    # Bootstrap pip here too in case a previous partial run left the venv without it
-    if [ ! -f "$VENV/bin/pip" ]; then
-        log "pip missing from existing venv — bootstrapping..."
-        "$VENV/bin/python" -m ensurepip --upgrade 2>>"$LOG" || \
-            curl -sS https://bootstrap.pypa.io/get-pip.py | "$VENV/bin/python" 2>>"$LOG"
-        # ensurepip installs pip as a module but does NOT always create bin/pip script
-        # Running via -m pip forces creation of the wrapper script
-        "$VENV/bin/python" -m pip install --upgrade pip --quiet 2>>"$LOG" || true
-    fi
-    if ! "$VENV/bin/pip" install -q -r /app/requirements.txt 2>>"$LOG"; then
+    log "venv exists — syncing packages..."
+    # Ensure pip module is present (some base images omit it)
+    "$PY" -m ensurepip --upgrade 2>>"$LOG" || true
+    if ! "$PY" -m pip install -q --no-cache-dir -r /app/requirements.txt 2>>"$LOG"; then
         log_err "pip sync failed — continuing with existing packages (check $LOG)"
     fi
 fi
@@ -61,8 +56,8 @@ if [ ! -f "$LLAMA_BIN" ]; then
     if [ -f "$LLAMA_BIN" ]; then
         cp "$LLAMA_BIN" /usr/local/bin/llama-quantize 2>>"$LOG" || true
         [ -f /workspace/llama.cpp/requirements.txt ] && \
-            "$VENV/bin/pip" install -q -r /workspace/llama.cpp/requirements.txt 2>>"$LOG" || true
-        "$VENV/bin/pip" install -q gguf 2>>"$LOG" || true
+            "$PY" -m pip install -q -r /workspace/llama.cpp/requirements.txt 2>>"$LOG" || true
+        "$PY" -m pip install -q gguf 2>>"$LOG" || true
         log "llama.cpp compiled and cached"
     else
         log_err "llama.cpp compile failed — quantization will be unavailable"
@@ -70,7 +65,7 @@ if [ ! -f "$LLAMA_BIN" ]; then
 else
     log "llama.cpp already compiled — linking binaries..."
     cp "$LLAMA_BIN" /usr/local/bin/llama-quantize 2>>"$LOG" || true
-    "$VENV/bin/pip" install -q gguf 2>>"$LOG" || true
+    "$PY" -m pip install -q gguf 2>>"$LOG" || true
     cat > /usr/local/bin/llama-convert-hf-to-gguf <<'WRAPPER'
 #!/usr/bin/env bash
 exec python3 /workspace/llama.cpp/convert_hf_to_gguf.py "$@"
