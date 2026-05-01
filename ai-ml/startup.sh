@@ -17,6 +17,10 @@ export DATALAB_CACHE_PATH=/workspace/.cache/datalab
 # ensurepip on all base images, but the pip module is always present.
 VENV=/workspace/venv
 PY="$VENV/bin/python"
+# Redirect pip tmp dir to /workspace so large package extraction does not
+# fill the 5 GB container overlay disk
+mkdir -p /workspace/tmp
+export TMPDIR=/workspace/tmp
 
 if [ ! -f "$VENV/bin/activate" ]; then
     log "First boot: creating venv at $VENV (~5-10 min)..."
