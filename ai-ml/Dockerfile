@@ -23,7 +23,7 @@ COPY . .
 # Permissions
 RUN chmod +x startup.sh setup.sh
 
-EXPOSE 8000
+EXPOSE 8000 8080 8188 8888
 
 ENV PYTHONUNBUFFERED=1
 
