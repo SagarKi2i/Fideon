@@ -17,14 +17,26 @@ VENV=/workspace/venv
 if [ ! -f "$VENV/bin/activate" ]; then
     log "First boot: creating venv at $VENV (~5-10 min)..."
     python3 -m venv "$VENV"
-    "$VENV/bin/pip" install --upgrade pip --quiet
+    # Some base images create the venv without pip — bootstrap it explicitly
+    if [ ! -f "$VENV/bin/pip" ]; then
+        log "pip not in new venv — bootstrapping via ensurepip..."
+        "$VENV/bin/python" -m ensurepip --upgrade 2>>"$LOG" || \
+            curl -sS https://bootstrap.pypa.io/get-pip.py | "$VENV/bin/python" 2>>"$LOG"
+    fi
+    "$VENV/bin/pip" install --upgrade pip --quiet 2>>"$LOG"
     if "$VENV/bin/pip" install -r /app/requirements.txt --quiet 2>>"$LOG"; then
         log "Packages installed to venv"
     else
-        log_err "pip install failed — check $LOG for details"
+        log_err "pip install failed — some packages may be missing (check $LOG)"
     fi
 else
     log "venv exists — checking for missing packages..."
+    # Bootstrap pip here too in case a previous partial run left the venv without it
+    if [ ! -f "$VENV/bin/pip" ]; then
+        log "pip missing from existing venv — bootstrapping..."
+        "$VENV/bin/python" -m ensurepip --upgrade 2>>"$LOG" || \
+            curl -sS https://bootstrap.pypa.io/get-pip.py | "$VENV/bin/python" 2>>"$LOG"
+    fi
     if ! "$VENV/bin/pip" install -q -r /app/requirements.txt 2>>"$LOG"; then
         log_err "pip sync failed — continuing with existing packages (check $LOG)"
     fi
@@ -35,8 +47,13 @@ source "$VENV/bin/activate"
 # ── llama.cpp: compile once on GPU pod, reuse forever ─────────────────────────
 LLAMA_BIN="/workspace/llama.cpp/build/bin/llama-quantize"
 if [ ! -f "$LLAMA_BIN" ]; then
-    log "First boot: compiling llama.cpp with CUDA (~10-15 min)..."
-    if bash /app/setup.sh --skip-pip --skip-verify; then
+    log "First boot: compiling llama.cpp with CUDA (~40 min)..."
+    # Use || true so that a SIGTERM at the very end (e.g. the cp step) does not
+    # cause startup.sh to skip the binary-exists check below.
+    bash /app/setup.sh --skip-pip --skip-verify 2>>"$LOG" || true
+    # Trust the binary on disk, not setup.sh's exit code
+    if [ -f "$LLAMA_BIN" ]; then
+        cp "$LLAMA_BIN" /usr/local/bin/llama-quantize 2>>"$LOG" || true
         [ -f /workspace/llama.cpp/requirements.txt ] && \
             "$VENV/bin/pip" install -q -r /workspace/llama.cpp/requirements.txt 2>>"$LOG" || true
         "$VENV/bin/pip" install -q gguf 2>>"$LOG" || true
@@ -56,16 +73,21 @@ WRAPPER
 fi
 
 # ── Start FastAPI ──────────────────────────────────────────────────────────────
+_start_fastapi() {
+    cd /app
+    "$VENV/bin/uvicorn" server:app --host 0.0.0.0 --port 8000 >> "$LOG" 2>&1 &
+    echo $!
+}
+
 log "Starting FastAPI on port 8000..."
-cd /app
-"$VENV/bin/uvicorn" server:app --host 0.0.0.0 --port 8000 >> "$LOG" 2>&1 &
-UVICORN_PID=$!
+UVICORN_PID=$(_start_fastapi)
 
 log "Waiting for FastAPI (up to 60s)..."
 READY=0
 for i in $(seq 1 60); do
     if ! kill -0 $UVICORN_PID 2>/dev/null; then
-        log_err "FastAPI process died on attempt $i — check $LOG for the Python traceback"
+        log_err "FastAPI process died on attempt $i — last 20 log lines:"
+        tail -20 "$LOG" | while IFS= read -r line; do log_err "  $line"; done
         break
     fi
     # Accept any HTTP response (even 404) — connection refused returns code 000
@@ -154,11 +176,23 @@ log "Public:       https://gpu-api.fideonai.fyi"
 log "Logs:         /workspace/logs/startup.log"
 log "========================================"
 
-# ── Keep container alive, restart if FastAPI dies ─────────────────────────────
+# ── Keep container alive, auto-restart FastAPI on crash ───────────────────────
+# Exits the container only after MAX_RESTARTS consecutive failures so RunPod
+# doesn't spin forever on a fatal import error.
+MAX_RESTARTS=5
+RESTART_COUNT=0
 while true; do
-    if ! kill -0 $UVICORN_PID 2>/dev/null; then
-        log_err "FastAPI (uvicorn) has exited unexpectedly — container will exit and restart"
-        exit 1
-    fi
     sleep 30
+    if ! kill -0 $UVICORN_PID 2>/dev/null; then
+        RESTART_COUNT=$((RESTART_COUNT + 1))
+        if [ $RESTART_COUNT -gt $MAX_RESTARTS ]; then
+            log_err "FastAPI has crashed $RESTART_COUNT times — giving up, exiting container"
+            log_err "Check the Python traceback above in $LOG"
+            exit 1
+        fi
+        log_err "FastAPI died (attempt $RESTART_COUNT/$MAX_RESTARTS) — restarting in 5s..."
+        sleep 5
+        UVICORN_PID=$(_start_fastapi)
+        log "FastAPI restarted (PID $UVICORN_PID)"
+    fi
 done
