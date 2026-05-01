@@ -24,8 +24,8 @@ if [ ! -f "$VENV/bin/activate" ]; then
     # Bootstrap pip module if the venv was created without it
     "$PY" -m ensurepip --upgrade 2>>"$LOG" || \
         curl -sS https://bootstrap.pypa.io/get-pip.py | "$PY" 2>>"$LOG"
-    "$PY" -m pip install --upgrade pip --quiet 2>>"$LOG"
-    if "$PY" -m pip install -r /app/requirements.txt --quiet 2>>"$LOG"; then
+    "$PY" -m pip install --upgrade pip --quiet --no-cache-dir 2>>"$LOG"
+    if "$PY" -m pip install -r /app/requirements.txt --quiet --no-cache-dir 2>>"$LOG"; then
         log "Packages installed to venv"
     else
         log_err "pip install failed — some packages may be missing (check $LOG)"
@@ -34,7 +34,7 @@ else
     log "venv exists — syncing packages..."
     # Ensure pip module is present (some base images omit it)
     "$PY" -m ensurepip --upgrade 2>>"$LOG" || true
-    if ! "$PY" -m pip install -q -r /app/requirements.txt 2>>"$LOG"; then
+    if ! "$PY" -m pip install -q --no-cache-dir -r /app/requirements.txt 2>>"$LOG"; then
         log_err "pip sync failed — continuing with existing packages (check $LOG)"
     fi
 fi
