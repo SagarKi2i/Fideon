@@ -107,6 +107,29 @@ export async function deleteWebhook(id: string): Promise<void> {
   if (!res.ok) throw buildApiRequestError(res, payload, "Failed to delete webhook");
 }
 
+export async function sendTestEvent(
+  eventType: string,
+  payload?: Record<string, unknown>,
+): Promise<{ event_id: string }> {
+  if (typeof window !== "undefined" && window.electron?.webhooks?.testEvent) {
+    const token = await getAccessToken();
+    const result = await window.electron.webhooks.testEvent(token, eventType, payload ?? {});
+    if (!result?.success) {
+      throw new Error(result?.error || result?.payload?.error || "Failed to send test event");
+    }
+    return { event_id: result.event_id ?? "" };
+  }
+
+  const res = await fetch(apiUrl("/api/v1/webhooks/test-event"), {
+    method: "POST",
+    headers: await authHeadersJson(),
+    body: JSON.stringify({ event_type: eventType, payload: payload ?? {} }),
+  });
+  const data = await readJsonSafe(res);
+  if (!res.ok) throw buildApiRequestError(res, data, "Failed to send test event");
+  return data as { event_id: string };
+}
+
 export async function rotateWebhookSecret(id: string): Promise<{ secret: string; note: string }> {
   if (typeof window !== "undefined" && window.electron?.webhooks?.rotateSecret) {
     const token = await getAccessToken();
