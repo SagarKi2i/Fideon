@@ -125,17 +125,29 @@ export default function DeviceSetup() {
             setDeviceJwt(storedJwt);
             setIsConnected(true);
             // Ensure Cloud device ID renders even if Electron store is slow/unavailable.
-            setDeviceId((prev) => prev ?? tryExtractDeviceIdFromJwt(storedJwt));
+            const extractedId = tryExtractDeviceIdFromJwt(storedJwt);
+            setDeviceId((prev) => prev ?? extractedId);
+            
+            let finalDeviceId = extractedId;
             if (window.electron?.device?.getDeviceId) {
               try {
                 const res = await window.electron.device.getDeviceId();
-                if (res?.success && res.device_id) setDeviceId(res.device_id);
+                if (res?.success && res.device_id) {
+                  setDeviceId(res.device_id);
+                  finalDeviceId = res.device_id;
+                }
               } catch {
                 // ignore
               }
             }
+            // Auto-link device to tenant
+            if (finalDeviceId) {
+              try { await linkDeviceById(finalDeviceId); } catch { /* silent fail if not logged in or already linked */ }
+            }
             void loadDeviceModels(storedJwt);
           }
+        } catch {
+          // ignore network errors
         } finally {
           setConnecting(false);
         }
@@ -199,6 +211,9 @@ export default function DeviceSetup() {
             setStoredDeviceJwt(res.device_jwt);
             setDeviceJwt(res.device_jwt);
             setIsConnected(true);
+            if (res.device_id) {
+              try { await linkDeviceById(res.device_id); } catch { /* silent */ }
+            }
             await loadDeviceModels(res.device_jwt);
           }
         }
@@ -246,7 +261,11 @@ export default function DeviceSetup() {
             setStoredDeviceJwt(res.device_jwt);
             setDeviceJwt(res.device_jwt);
             setIsConnected(true);
-            setDeviceId(res.device_id ?? tryExtractDeviceIdFromJwt(res.device_jwt));
+            const devId = res.device_id ?? tryExtractDeviceIdFromJwt(res.device_jwt);
+            setDeviceId(devId);
+            if (devId) {
+              try { await linkDeviceById(devId); } catch { /* silent */ }
+            }
             await loadDeviceModels(res.device_jwt);
           } else {
             throw new Error(res?.error || "Could not register device");
@@ -285,7 +304,11 @@ export default function DeviceSetup() {
             setStoredDeviceJwt(res.device_jwt);
             setDeviceJwt(res.device_jwt);
             setIsConnected(true);
-            setDeviceId(res.device_id ?? tryExtractDeviceIdFromJwt(res.device_jwt));
+            const devId = res.device_id ?? tryExtractDeviceIdFromJwt(res.device_jwt);
+            setDeviceId(devId);
+            if (devId) {
+              try { await linkDeviceById(devId); } catch { /* silent */ }
+            }
             await loadDeviceModels(res.device_jwt);
           } else {
             throw new Error(res?.error || "Could not re-register device");
@@ -485,34 +508,11 @@ export default function DeviceSetup() {
               <Copy className="h-4 w-4 mr-2" />
               Copy
             </Button>
-            <Button
-              type="button"
-              className="bg-gradient-primary"
-              disabled={!deviceId || loading || !isConnected}
-              onClick={async () => {
-                if (!deviceId) return;
-                try {
-                  setLoading(true);
-                  await linkDeviceById(deviceId);
-                  toast({ title: "Device linked", description: "This device is now connected to your tenant." });
-                } catch (e) {
-                  toast({
-                    title: "Link failed",
-                    description:
-                      (e instanceof Error ? e.message : "Unknown error") +
-                      (!isConnected ? " (Register/reconnect this device first using Refresh.)" : ""),
-                    variant: "destructive",
-                  });
-                } finally {
-                  setLoading(false);
-                }
-              }}
-            >
-              Link now
-            </Button>
           </div>
           <p className="text-xs text-muted-foreground">
-            If this shows “Not registered yet”, click Refresh below to register/reconnect, then link.
+            {deviceId 
+              ? "This device is automatically registered and linked to your tenant." 
+              : "If this shows “Not registered yet”, click Refresh below to register/reconnect."}
           </p>
           </div>
         </CardContent>
@@ -533,29 +533,32 @@ export default function DeviceSetup() {
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                {isConnected ? (
-                  <Badge variant="default" className="bg-green-500">
-                    <CheckCircle2 className="mr-1 h-3 w-3" />
-                    Connected
-                  </Badge>
-                ) : (loading || connecting) ? (
-                  <Badge variant="secondary">
-                    <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                    Connecting…
-                  </Badge>
-                ) : (
-                  <Badge variant="secondary">
-                    <WifiOff className="mr-1 h-3 w-3" />
-                    Disconnected
-                  </Badge>
-                )}
+                {/* aria-live so screen readers announce connection changes without a page reload */}
+                <div role="status" aria-live="polite" aria-atomic="true">
+                  {isConnected ? (
+                    <Badge variant="default" className="bg-green-500">
+                      <CheckCircle2 className="mr-1 h-3 w-3" aria-hidden="true" />
+                      Connected
+                    </Badge>
+                  ) : (loading || connecting) ? (
+                    <Badge variant="secondary">
+                      <Loader2 className="mr-1 h-3 w-3 animate-spin" aria-hidden="true" />
+                      Connecting…
+                    </Badge>
+                  ) : (
+                    <Badge variant="secondary">
+                      <WifiOff className="mr-1 h-3 w-3" aria-hidden="true" />
+                      Disconnected
+                    </Badge>
+                  )}
+                </div>
                 <span className="text-sm text-muted-foreground">
                   {allocatedModels.length} model(s) allocated
                 </span>
               </div>
               <div className="flex gap-2">
-                <Button variant="outline" size="sm" onClick={handleRefresh} disabled={loading}>
-                  <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+                <Button variant="outline" size="sm" onClick={handleRefresh} disabled={loading} aria-label="Refresh device connection">
+                  <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} aria-hidden="true" />
                 </Button>
                 <Button variant="outline" size="sm" onClick={handleSync} disabled={loading || !deviceJwt}>
                   Sync Status
@@ -571,19 +574,19 @@ export default function DeviceSetup() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             {ollamaRunning ? (
-              <Wifi className="h-5 w-5 text-green-500" />
+              <Wifi className="h-5 w-5 text-green-500" aria-hidden="true" />
             ) : (
-              <WifiOff className="h-5 w-5 text-red-500" />
+              <WifiOff className="h-5 w-5 text-red-500" aria-hidden="true" />
             )}
             Ollama Status
           </CardTitle>
         </CardHeader>
         <CardContent>
           <div className="flex items-center justify-between">
-            <span className="text-sm text-muted-foreground">
+            <span role="status" aria-live="polite" className="text-sm text-muted-foreground">
               {ollamaRunning ? "Ollama is running" : "Ollama is not running"}
             </span>
-            <Button variant="outline" size="sm" onClick={checkOllama}>
+            <Button variant="outline" size="sm" onClick={checkOllama} aria-label="Check Ollama status">
               Check Status
             </Button>
           </div>
