@@ -7,9 +7,6 @@ const useStandalone =
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   ...(useStandalone ? { output: "standalone" } : {}),
-  // Windows: disable tracing (EPERM / missing .nft.json during standalone collect-build-traces).
-  // Linux/Docker keep default tracing for smaller standalone images.
-  ...(isWindows ? { outputFileTracing: false } : {}),
   webpack: (config) => {
     // Treat the PDF.js worker as a file asset so it isn't parsed/minified as JS.
     config.module.rules.push({

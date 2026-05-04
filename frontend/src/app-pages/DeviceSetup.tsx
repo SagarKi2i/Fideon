@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -14,7 +15,8 @@ import {
   Trash2,
   WifiOff,
   Wifi,
-  Copy
+  Copy,
+  AlertCircle
 } from "lucide-react";
 import {
   fetchDeviceModels,
@@ -64,6 +66,7 @@ export default function DeviceSetup() {
   const [isElectronApp, setIsElectronApp] = useState(false);
   const [deviceJwt, setDeviceJwt] = useState("");
   const [deviceId, setDeviceId] = useState<string | null>(null);
+  const [isDisabled, setIsDisabled] = useState(false);
   /** From Electron main: os.hostname + node-machine-id (registration fingerprint). */
   const [localMachine, setLocalMachine] = useState<{
     machineName: string;
@@ -79,13 +82,16 @@ export default function DeviceSetup() {
       setDeviceId(null);
       setIsConnected(false);
       setAllocatedModels([]);
+      if (message?.toLowerCase().includes("deactivated") || message?.toLowerCase().includes("disabled")) {
+        setIsDisabled(true);
+      }
       if (window.electron?.device?.clearAuth) {
         void window.electron.device.clearAuth();
       }
       if (!authLossToastShown.current) {
         authLossToastShown.current = true;
         toast({
-          title: "Device no longer connected",
+          title: isDisabled ? "Device Disabled" : "Device no longer connected",
           description:
             message ||
             "This device was disabled or its token was revoked. Ask an admin to re-enable it if needed, then use Refresh to register again.",
@@ -93,7 +99,7 @@ export default function DeviceSetup() {
         });
       }
     },
-    [toast],
+    [toast, isDisabled],
   );
 
   const verifyCloudSession = useCallback(
@@ -101,6 +107,7 @@ export default function DeviceSetup() {
       try {
         await sendDeviceHeartbeat(jwt);
         authLossToastShown.current = false;
+        setIsDisabled(false);
         return true;
       } catch (e) {
         if (e instanceof ApiRequestError && e.isAuthError) {
@@ -450,6 +457,17 @@ export default function DeviceSetup() {
           Connect your device to sync and download AI models locally
         </p>
       </div>
+      
+      {isDisabled && (
+        <Alert variant="destructive" className="animate-in slide-in-from-top-2 duration-300">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Device Disabled</AlertTitle>
+          <AlertDescription>
+            This device has been disabled by an administrator. Please contact your administrator to re-enable it.
+            Once re-enabled, click "Refresh" to reconnect.
+          </AlertDescription>
+        </Alert>
+      )}
 
       <Card>
         <CardHeader>
