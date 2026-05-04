@@ -2,11 +2,11 @@
 Training orchestrator — top-level promote_adapter() called after run_cycle().
 
 Responsibilities (in order):
-  1. Upload merged HF model   → SeaweedFS finetuned/v{N}/
+  1. Upload merged HF model   → Azure Blob  finetuned/v{N}/
   2. Quantize merged model    → GGUF Q5_K_M + Q4_K_M
-  3. Upload quantized GGUFs   → SeaweedFS quantized/v{N}/
+  3. Upload quantized GGUFs   → Azure Blob  quantized/v{N}/
   4. Register GGUF artifacts  → Supabase adapter_registry (so Electron can download)
-  5. Update version_registry.json with all SeaweedFS paths
+  5. Update version_registry.json with all storage paths
   6. Write model card
   7. Send promotion alert
 
@@ -23,7 +23,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fine_tuning.seaweedfs_client import SeaweedFSClient
+from fine_tuning.storage_client import get_storage_client
 from fine_tuning.observability.alerting import alerter
 
 
@@ -144,11 +144,11 @@ def promote_adapter(
 
     Steps
     -----
-    1. Upload merged HF model   → SeaweedFS  finetuned/v{version}/
+    1. Upload merged HF model   → Azure Blob  finetuned/v{version}/
     2. Quantize                 → GGUF Q5_K_M + Q4_K_M (skipped if llama.cpp absent)
-    3. Upload quantized GGUFs   → SeaweedFS  quantized/v{version}/
+    3. Upload quantized GGUFs   → Azure Blob  quantized/v{version}/
     4. Register GGUFs           → Supabase adapter_registry (Electron delivery)
-    5. Update registry          → promote_version() with all SeaweedFS paths
+    5. Update registry          → promote_version() with all storage paths
     6. Write model card
     7. Send alert
     """
@@ -157,15 +157,15 @@ def promote_adapter(
     from fine_tuning.quantization.quantizer import run_quantization
 
     registry = VersionRegistry(registry_path)
-    seaweed  = SeaweedFSClient()
+    storage  = get_storage_client()
 
-    seaweedfs_finetuned_prefix: Optional[str] = None
-    seaweedfs_quantized_keys:   List[str]     = []
+    storage_finetuned_prefix: Optional[str] = None
+    storage_quantized_keys:   List[str]     = []
 
     # ── 1. Upload merged HF model → finetuned/v{N}/ ─────────────────────────
-    # Fatal: if upload fails, do not register the version with a null S3 prefix.
-    print(f"[orchestrator] Uploading merged HF model (v{version}) to SeaweedFS …")
-    seaweedfs_finetuned_prefix = seaweed.upload_hf_model(merged_model_path, version)
+    # Fatal: if upload fails, do not register the version with a null prefix.
+    print(f"[orchestrator] Uploading merged HF model (v{version}) to storage …")
+    storage_finetuned_prefix = storage.upload_hf_model(merged_model_path, version)
 
     # ── 2. Quantize merged model → GGUF ─────────────────────────────────────
     gguf_output_dir = str(Path(merged_model_path).parent / f"{version}-gguf")
@@ -178,18 +178,18 @@ def promote_adapter(
 
     # ── 3. Upload quantized GGUFs → quantized/v{N}/ ─────────────────────────
     if quant_results:
-        print(f"[orchestrator] Uploading {len(quant_results)} GGUF(s) to SeaweedFS …")
+        print(f"[orchestrator] Uploading {len(quant_results)} GGUF(s) to storage …")
         try:
-            seaweedfs_quantized_keys = seaweed.upload_quantized(gguf_output_dir, version)
+            storage_quantized_keys = storage.upload_quantized(gguf_output_dir, version)
         except Exception as exc:
             print(f"[orchestrator] Quantized upload failed (non-fatal): {exc}")
     else:
         print("[orchestrator] No GGUF artifacts — skipping quantized upload.")
 
     # ── 4. Register GGUFs in Supabase adapter_registry → Electron delivery ──
-    if seaweedfs_quantized_keys:
+    if storage_quantized_keys:
         try:
-            _register_gguf_in_supabase(seaweedfs_quantized_keys, version, gguf_output_dir)
+            _register_gguf_in_supabase(storage_quantized_keys, version, gguf_output_dir)
         except Exception as exc:
             print(f"[orchestrator] adapter_registry registration failed (non-fatal): {exc}")
     else:
@@ -203,8 +203,8 @@ def promote_adapter(
         eval_scores=eval_scores,
         training_meta={
             **training_meta,
-            "seaweedfs_finetuned_prefix": seaweedfs_finetuned_prefix,
-            "seaweedfs_quantized_keys":   seaweedfs_quantized_keys,
+            "storage_finetuned_prefix": storage_finetuned_prefix,
+            "storage_quantized_keys":   storage_quantized_keys,
         },
     )
 
@@ -216,8 +216,8 @@ def promote_adapter(
             "base_model":                 base_model,
             "eval_scores":                eval_scores,
             "training_meta":              training_meta,
-            "seaweedfs_finetuned_prefix": seaweedfs_finetuned_prefix,
-            "seaweedfs_quantized_keys":   seaweedfs_quantized_keys,
+            "storage_finetuned_prefix": storage_finetuned_prefix,
+            "storage_quantized_keys":   storage_quantized_keys,
         },
     )
 
@@ -227,14 +227,14 @@ def promote_adapter(
         version=version,
         status="promoted",
         base_model=base_model or merged_model_path,
-        seaweedfs_path=seaweedfs_finetuned_prefix,
+        seaweedfs_path=storage_finetuned_prefix,
         eval_scores=eval_scores,
     )
 
     return {
-        "new_status":                 "promoted",
-        "version":                    version,
-        "seaweedfs_finetuned_prefix": seaweedfs_finetuned_prefix,
-        "seaweedfs_quantized_keys":   seaweedfs_quantized_keys,
-        "actor":                      actor,
+        "new_status":               "promoted",
+        "version":                  version,
+        "storage_finetuned_prefix": storage_finetuned_prefix,
+        "storage_quantized_keys":   storage_quantized_keys,
+        "actor":                    actor,
     }

@@ -67,7 +67,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 _uploads: Dict[str, Dict[str, Any]] = {}
 _ocr_jobs: Dict[str, Dict[str, Any]] = {}
 
-# Share-gradients jobs (user-triggered SeaweedFS upload after local training)
+# Share-gradients jobs (user-triggered storage upload after local training)
 _share_jobs: Dict[str, Dict[str, Any]] = {}
 _share_jobs_lock = threading.Lock()
 
@@ -457,6 +457,56 @@ def _load_training_samples() -> List[Dict[str, Any]]:
     return samples
 
 
+# ── Supabase training_feedback helpers ────────────────────────────────────────
+
+def _fetch_unused_training_feedback() -> List[Dict[str, Any]]:
+    """Fetch rows from Supabase training_feedback where is_used_for_training=false."""
+    supabase_url = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    if not supabase_url or not supabase_key:
+        return []
+    try:
+        import httpx
+        resp = httpx.get(
+            f"{supabase_url}/rest/v1/training_feedback",
+            params={"is_used_for_training": "eq.false", "select": "*"},
+            headers={"apikey": supabase_key, "Authorization": f"Bearer {supabase_key}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        rows = resp.json()
+        return rows if isinstance(rows, list) else []
+    except Exception as exc:
+        print(f"[finetune] Could not fetch training_feedback from Supabase: {exc}")
+        return []
+
+
+def _mark_training_feedback_used(ids: List[str]) -> None:
+    """Mark a list of training_feedback rows as used in Supabase."""
+    if not ids:
+        return
+    supabase_url = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    if not supabase_url or not supabase_key:
+        return
+    try:
+        import httpx
+        id_list = ",".join(str(i) for i in ids)
+        httpx.patch(
+            f"{supabase_url}/rest/v1/training_feedback",
+            params={"id": f"in.({id_list})"},
+            headers={
+                "apikey": supabase_key,
+                "Authorization": f"Bearer {supabase_key}",
+                "Content-Type": "application/json",
+            },
+            json={"is_used_for_training": True},
+            timeout=10,
+        )
+    except Exception as exc:
+        print(f"[finetune] Could not mark training_feedback as used: {exc}")
+
+
 @app.post("/training-samples")
 async def store_training_sample(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     """
@@ -576,7 +626,58 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
             if outcome.version_snapshot_path:
                 snapshot_path = outcome.version_snapshot_path
         except Exception as exc:
-            print(f"[finetune/start] skipping sample {sample.get('sample_id')} (stays pending for retry): {exc}")
+            import traceback as _tb
+            print(f"[finetune/start] ERROR on sample {sample.get('sample_id')} — stays pending for retry:\n"
+                  f"  {exc}\n{''.join(_tb.format_tb(_tb.sys.exc_info()[2]))}")
+
+    # ── Also ingest 'Submit Training Feedback' form data from Supabase ────────
+    fb_rows = _fetch_unused_training_feedback()
+    ingested_fb_ids: List[str] = []
+    for fb in fb_rows:
+        answer = (fb.get("corrected_response") or "").strip() or (fb.get("original_response") or "").strip()
+        prompt = (fb.get("prompt") or "").strip()
+        if not prompt or not answer:
+            print(f"[finetune/start] Feedback {fb.get('id')} skipped — missing prompt or response (cannot train on empty content)")
+            continue
+        try:
+            chat_row = {
+                "messages": [
+                    {"role": "system", "content": (
+                        "You are an expert insurance document parser. "
+                        "Given raw OCR text from an insurance document, extract all fields. "
+                        "Output exactly three sections in order: "
+                        "FIELDS: (a JSON object of all extracted fields), "
+                        "RAW TEXT: (the source OCR text), "
+                        "MARKDOWN: (a summary table). "
+                        "No commentary outside these sections."
+                    )},
+                    {"role": "user",      "content": prompt},
+                    {"role": "assistant", "content": answer},
+                ],
+                "domain": "insurance",
+                "metadata": {
+                    "form_type":     fb.get("form_type") or "feedback",
+                    "feedback_id":   str(fb.get("id", "")),
+                    "feedback_type": fb.get("feedback_type") or "correction",
+                    "rating":        fb.get("rating"),
+                    "created_at":    datetime.now(timezone.utc).isoformat(),
+                },
+            }
+            outcome = append_training_sample(
+                root=feedback_dir,
+                row=chat_row,
+                retrain_threshold=threshold,
+            )
+            ingested += 1
+            ingested_fb_ids.append(str(fb["id"]))
+            if outcome.version_snapshot_path:
+                snapshot_path = outcome.version_snapshot_path
+        except Exception as exc:
+            import traceback as _tb
+            print(f"[finetune/start] ERROR on feedback {fb.get('id')} — will retry next cycle:\n"
+                  f"  {exc}\n{''.join(_tb.format_tb(_tb.sys.exc_info()[2]))}")
+
+    print(f"[finetune/start] Ingested {len(ingested_fb_ids)} training_feedback row(s) from Supabase.")
 
     if not snapshot_path:
         # Force a snapshot from whatever is pending now (manual trigger bypasses threshold)
@@ -624,6 +725,9 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
         encoding="utf-8",
     )
 
+    # ── Mark Supabase training_feedback rows as used ──────────────────────────
+    _mark_training_feedback_used(ingested_fb_ids)
+
     # ── Launch cycle in background thread ─────────────────────────────────────
     job_id = str(uuid.uuid4())
     launch_cycle_background(
@@ -636,10 +740,13 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
         "status": "queued",
         "job_id": job_id,
         "message": (
-            f"Fine-tuning started with {ingested} sample(s). "
+            f"Fine-tuning started with {ingested} sample(s) "
+            f"({len(ingested_fb_ids)} from Training Feedback form). "
             f"Poll GET /finetune/jobs/{job_id} for progress."
         ),
         "total_samples": ingested,
+        "acord_samples": ingested - len(ingested_fb_ids),
+        "feedback_samples": len(ingested_fb_ids),
         "snapshot_path": snapshot_path,
     }
 
@@ -721,7 +828,7 @@ def list_registry_versions() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Federated Learning — FedAvg aggregation across all SeaweedFS weight versions
+# Federated Learning — FedAvg aggregation across all stored weight versions
 # ---------------------------------------------------------------------------
 
 _fed_jobs: Dict[str, Dict[str, Any]] = {}
@@ -798,29 +905,33 @@ def _fedavg_safetensors(model_dirs: List[str], output_dir: str) -> None:
 
 
 def _run_federated_job(job_id: str) -> None:
-    """Background thread: download all SeaweedFS versions, FedAvg, upload result."""
+    """Background thread: download all stored weight versions, FedAvg, upload result."""
     import shutil as _shutil
     import tempfile
 
     try:
-        from fine_tuning.seaweedfs_client import SeaweedFSClient
-        seaweed = SeaweedFSClient()
+        from fine_tuning.storage_client import get_storage_client
+        seaweed = get_storage_client()
 
         # ── 1. Discover all available fine-tuned versions ────────────────────
         _update_fed_job(job_id, "discovering_versions")
         latest = seaweed.get_latest_finetuned_version()
         if latest is None:
-            raise RuntimeError("No fine-tuned weights found in SeaweedFS. Run Local Training first.")
+            raise RuntimeError("No fine-tuned weights found in storage. Run Local Training first.")
 
         versions_available: List[int] = []
         try:
-            client = seaweed._boto_client()
-            for v in range(max(1, latest - 9), latest + 1):   # check up to last 10 versions
-                resp = client.list_objects_v2(
-                    Bucket=seaweed._bucket, Prefix=f"finetuned/v{v}/", MaxKeys=1
-                )
-                if resp.get("Contents"):
-                    versions_available.append(v)
+            if hasattr(seaweed, "list_finetuned_versions"):
+                versions_available = seaweed.list_finetuned_versions(latest, count=10)
+            else:
+                # SeaweedFS fallback — use boto3 list
+                client = seaweed._boto_client()
+                for v in range(max(1, latest - 9), latest + 1):
+                    resp = client.list_objects_v2(
+                        Bucket=seaweed._bucket, Prefix=f"finetuned/v{v}/", MaxKeys=1
+                    )
+                    if resp.get("Contents"):
+                        versions_available.append(v)
         except Exception as exc:
             print(f"[federated] Version discovery error (using latest only): {exc}")
             versions_available = [latest]
@@ -850,7 +961,7 @@ def _run_federated_job(job_id: str) -> None:
 
             if not model_dirs:
                 raise RuntimeError(
-                    f"All {len(versions_available)} version(s) failed to download from SeaweedFS. "
+                    f"All {len(versions_available)} version(s) failed to download from storage. "
                     f"Check that {seaweed._endpoint} is reachable from the pod. "
                     f"Versions attempted: {versions_available}"
                 )
@@ -916,7 +1027,7 @@ def _run_federated_job(job_id: str) -> None:
                 "versions_aggregated": downloaded_versions,
                 "versions_skipped": skipped_versions,
             })
-            print(f"[federated] Aggregation complete — new version v{new_version} in SeaweedFS.")
+            print(f"[federated] Aggregation complete — new version v{new_version} uploaded to storage.")
         finally:
             _shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -935,7 +1046,7 @@ def _run_federated_job(job_id: str) -> None:
 
 def _run_share_job(job_id: str, pending_entries: List[tuple]) -> None:
     """
-    Background thread: upload all pending weight versions to SeaweedFS.
+    Background thread: upload all pending weight versions to storage (Azure Blob / SeaweedFS).
     pending_entries: list of (file_path: Path, pending: Dict) tuples, one per training run.
     Processes sequentially. Deletes each file after successful upload.
     Stops on first failure (undeleted file stays for retry).
@@ -981,7 +1092,7 @@ def _run_share_job(job_id: str, pending_entries: List[tuple]) -> None:
             # Delete pending-share manifest only after confirmed upload success
             file_path.unlink(missing_ok=True)
 
-            # Delete local weight directories — they are now safely on SeaweedFS
+            # Delete local weight directories — they are now safely in storage
             import shutil as _shutil
             _merged = Path(merged_model_path)
             if _merged.exists():
@@ -1026,7 +1137,7 @@ def _run_share_job(job_id: str, pending_entries: List[tuple]) -> None:
 @app.post("/share-gradients")
 async def share_gradients_endpoint(body: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     """
-    Upload ALL locally-merged fine-tuned weight versions to SeaweedFS.
+    Upload ALL locally-merged fine-tuned weight versions to storage (Azure Blob / SeaweedFS).
     Must be called manually by the user after Local Training completes.
     Reads every *.json file from /workspace/fine_tuning/pending_shares/ written by job_runner.
     Each version gets its own file — none are overwritten, all are uploaded.
@@ -1084,7 +1195,7 @@ async def share_gradients_endpoint(body: Dict[str, Any] = Body(default={})) -> D
         "job_id":           job_id,
         "pending_versions": versions,
         "message": (
-            f"Uploading {len(pending_entries)} version(s) {versions} to SeaweedFS. "
+            f"Uploading {len(pending_entries)} version(s) {versions} to storage. "
             f"Poll GET /share-gradients/jobs/{job_id}."
         ),
     }
@@ -1137,37 +1248,26 @@ async def start_federated(body: Dict[str, Any] = Body(default={})) -> Dict[str, 
     Returns immediately with job_id; poll GET /federated/jobs/{job_id} for status.
     """
     import asyncio
-    from fine_tuning.seaweedfs_client import SeaweedFSClient
+    from fine_tuning.storage_client import get_storage_client
 
-    seaweed = SeaweedFSClient()
+    seaweed = get_storage_client()
 
-    # ── Pre-flight: verify SeaweedFS is reachable before queuing the job ────────
-    # This gives the user an immediate clear error instead of a background job
-    # that silently fails minutes later with RetriesExceededError.
+    # ── Pre-flight: verify storage is reachable before queuing the job ───────
     if not seaweed._configured:
         return {
             "status": "error",
-            "message": "SEAWEEDFS_ENDPOINT is not configured on the pod.",
+            "message": "Storage backend is not configured on the pod. "
+                       "Set STORAGE_BACKEND=azure + AZURE_BLOB_* vars, "
+                       "or STORAGE_BACKEND=seaweedfs + SEAWEEDFS_ENDPOINT.",
         }
     try:
-        import boto3
-        from botocore.config import Config as _BotoConfig
-        _probe = boto3.client(
-            "s3",
-            endpoint_url=seaweed._endpoint,
-            aws_access_key_id=seaweed._access_key,
-            aws_secret_access_key=seaweed._secret_key,
-            config=_BotoConfig(connect_timeout=8, read_timeout=8, retries={"max_attempts": 1}),
-        )
-        _probe.list_objects_v2(Bucket=seaweed._bucket, Prefix="finetuned/", MaxKeys=1)
+        seaweed.probe()
     except Exception as _conn_exc:
         return {
-            "status": "seaweedfs_unreachable",
+            "status": "storage_unreachable",
             "message": (
-                f"Cannot reach SeaweedFS at {seaweed._endpoint} (bucket={seaweed._bucket}). "
-                f"Error: {_conn_exc}. "
-                f"Verify the pod can reach SeaweedFS: run  curl -m 8 {seaweed._endpoint}  "
-                f"from the pod terminal."
+                f"Cannot reach storage at {seaweed._endpoint} (container/bucket={seaweed._bucket}). "
+                f"Error: {_conn_exc}."
             ),
         }
 
@@ -1175,7 +1275,7 @@ async def start_federated(body: Dict[str, Any] = Body(default={})) -> Dict[str, 
     if latest is None:
         return {
             "status": "no_weights",
-            "message": "No fine-tuned weights found in SeaweedFS. Complete Local Training first.",
+            "message": "No fine-tuned weights found in storage. Complete Local Training first.",
             "versions_found": 0,
         }
 

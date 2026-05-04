@@ -82,7 +82,7 @@ def _resolve_active_model_path() -> str:
     Return the best available model path at load time:
       1. Already explicitly set via reload_qwen_model() (non-default _active_model_path)
       2. Latest promoted merged model in version_registry.json (if on disk)
-      3. SeaweedFS download cache (/workspace/fine_tuning/models/finetuned/v{N}/)
+      3. Storage download cache (/workspace/fine_tuning/models/finetuned/v{N}/)
          — used when local merged weights were deleted after Share Gradients
       4. QWEN_MODEL_ID (original base model)
     """
@@ -102,13 +102,13 @@ def _resolve_active_model_path() -> str:
                 return current_base
 
             # Local merged path is gone (deleted after Share Gradients).
-            # Check if SeaweedFS download cache already exists from a prior training cycle.
+            # Check if storage download cache already exists from a prior training cycle.
             current_version = reg.get("current_version")
             if current_version:
                 cache_dir = f"/workspace/fine_tuning/models/finetuned/v{current_version}"
                 cache_path = Path(cache_dir)
                 if cache_path.exists() and (cache_path / "config.json").exists():
-                    print(f"[extractor] Using SeaweedFS cache for v{current_version} → {cache_dir}")
+                    print(f"[extractor] Using storage cache for v{current_version} → {cache_dir}")
                     _active_model_path = cache_dir
                     return cache_dir
         except Exception as exc:

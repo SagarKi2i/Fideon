@@ -65,9 +65,14 @@ docling>=2.5.0
 pyyaml>=6.0
 
 # -----------------------------------------------------------------------------
-# Optional: SeaweedFS / S3 weight upload
+# Optional: SeaweedFS / S3 weight upload (used when STORAGE_BACKEND=seaweedfs)
 # -----------------------------------------------------------------------------
 boto3>=1.34.0
+
+# -----------------------------------------------------------------------------
+# Optional: Azure Blob Storage weight upload (used when STORAGE_BACKEND=azure)
+# -----------------------------------------------------------------------------
+azure-storage-blob>=12.19.0
 
 # -----------------------------------------------------------------------------
 # Optional: DeepEval LLM-judge metrics

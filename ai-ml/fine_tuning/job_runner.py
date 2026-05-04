@@ -184,11 +184,11 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
 
     Cleans up old merged runs before attempting SeaweedFS download to free space.
     """
-    from fine_tuning.seaweedfs_client import SeaweedFSClient
+    from fine_tuning.storage_client import get_storage_client
     from fine_tuning.registry.version_registry import VersionRegistry
 
     registry = VersionRegistry(registry_path)
-    seaweed = SeaweedFSClient()
+    storage = get_storage_client()
 
     # ── Pre-flight: clean up old merged runs to reclaim disk ─────────────────
     if runs_dir and runs_dir.exists():
@@ -197,13 +197,13 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
         free_gb = _free_disk_gb()
         print(f"[job_runner] Free disk after cleanup: {free_gb:.1f} GB")
 
-    # ── 1. SeaweedFS: latest fine-tuned version ───────────────────────────────
-    seaweed_version = seaweed.get_latest_finetuned_version()
-    if seaweed_version is None:
-        print("[job_runner] WARNING: SeaweedFS returned no version (unreachable or no uploads yet). "
+    # ── 1. Storage: latest fine-tuned version ────────────────────────────────
+    storage_version = storage.get_latest_finetuned_version()
+    if storage_version is None:
+        print("[job_runner] WARNING: Storage returned no version (unreachable or no uploads yet). "
               "Falling back to local registry or base model.")
-    if seaweed_version is not None:
-        cache_dir = f"/workspace/fine_tuning/models/finetuned/v{seaweed_version}"
+    if storage_version is not None:
+        cache_dir = f"/workspace/fine_tuning/models/finetuned/v{storage_version}"
         cache_path = Path(cache_dir)
         # Validate cached model is complete — a partial upload/download with missing shards
         # causes OSError at training time. Check config.json AND all shards from the index.
@@ -219,37 +219,37 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
                     existing = {f.name for f in p.glob("*.safetensors")}
                     if expected and not expected.issubset(existing):
                         missing = expected - existing
-                        print(f"[job_runner] Cache v{seaweed_version} missing shards: {missing}")
+                        print(f"[job_runner] Cache v{storage_version} missing shards: {missing}")
                         return False
                 except Exception:
                     pass
             return any(f.suffix == ".safetensors" for f in p.iterdir())
 
         if _cache_is_complete(cache_path):
-            print(f"[job_runner] Using cached SeaweedFS model v{seaweed_version}: {cache_dir}")
-            _evict_old_seaweedfs_caches(cache_path.parent, keep_version=seaweed_version)
+            print(f"[job_runner] Using cached storage model v{storage_version}: {cache_dir}")
+            _evict_old_seaweedfs_caches(cache_path.parent, keep_version=storage_version)
             return cache_dir
         if cache_path.exists():
-            print(f"[job_runner] Cached model v{seaweed_version} is incomplete — deleting and re-downloading …")
+            print(f"[job_runner] Cached model v{storage_version} is incomplete — deleting and re-downloading …")
             shutil.rmtree(cache_path, ignore_errors=True)
         free_gb = _free_disk_gb()
         if free_gb < _MIN_FREE_DISK_GB:
             print(
-                f"[job_runner] Skipping SeaweedFS download — only {free_gb:.1f} GB free "
+                f"[job_runner] Skipping storage download — only {free_gb:.1f} GB free "
                 f"(need ≥{_MIN_FREE_DISK_GB} GB). Falling back to local model."
             )
         else:
             print(
-                f"[job_runner] Downloading fine-tuned model v{seaweed_version} "
-                f"from SeaweedFS → {cache_dir} …"
+                f"[job_runner] Downloading fine-tuned model v{storage_version} "
+                f"from storage → {cache_dir} …"
             )
             try:
-                seaweed.download_finetuned_model(seaweed_version, cache_dir)
-                print(f"[job_runner] SeaweedFS model v{seaweed_version} ready at {cache_dir}")
-                _evict_old_seaweedfs_caches(cache_path.parent, keep_version=seaweed_version)
+                storage.download_finetuned_model(storage_version, cache_dir)
+                print(f"[job_runner] Storage model v{storage_version} ready at {cache_dir}")
+                _evict_old_seaweedfs_caches(cache_path.parent, keep_version=storage_version)
                 return cache_dir
             except Exception as exc:
-                print(f"[job_runner] SeaweedFS download failed (non-fatal): {exc}")
+                print(f"[job_runner] Storage download failed (non-fatal): {exc}")
                 # Remove partial download to reclaim space
                 if cache_path.exists():
                     shutil.rmtree(cache_path, ignore_errors=True)

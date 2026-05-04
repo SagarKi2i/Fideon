@@ -86,6 +86,20 @@ class SeaweedFSClient:
             max_concurrency=1,  # sequential chunks — no parallel connection storms
         )
 
+    def probe(self) -> None:
+        """Raise if SeaweedFS is unreachable (used by pre-flight check)."""
+        self._boto_client().list_objects_v2(Bucket=self._bucket, Prefix="finetuned/", MaxKeys=1)
+
+    def list_finetuned_versions(self, latest: int, count: int = 10) -> list:
+        """Return available version numbers from finetuned/ prefix."""
+        client = self._boto_client()
+        found = []
+        for v in range(max(1, latest - count + 1), latest + 1):
+            resp = client.list_objects_v2(Bucket=self._bucket, Prefix=f"finetuned/v{v}/", MaxKeys=1)
+            if resp.get("Contents"):
+                found.append(v)
+        return found or [latest]
+
     # ── Fine-tuned model (full HF weights) ───────────────────────────────────
 
     def upload_hf_model(self, local_dir: str, version: int) -> str:
