@@ -634,6 +634,24 @@ ipcMain.handle("webhooks:rotateSecret", async (_event, accessToken: string, id: 
   }
 });
 
+ipcMain.handle(
+  "webhooks:testEvent",
+  async (_event, accessToken: string, eventType: string, payload: Record<string, unknown>) => {
+    try {
+      const r = await callBackendApi({
+        path: "/api/v1/webhooks/test-event",
+        method: "POST",
+        accessToken,
+        body: { event_type: eventType, payload },
+      });
+      if (!r.ok) return { success: false, status: r.status, payload: r.payload };
+      return { success: true, event_id: r.payload?.event_id };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  },
+);
+
 // IPC: auto-launch placeholder using OS login items (where supported)
 ipcMain.handle("settings:getAutoLaunch", async () => {
   try {

@@ -5,7 +5,11 @@
 #
 #   bash /workspace/ai-ml/setup.sh
 # =============================================================================
-set -euo pipefail
+# -e is intentionally omitted: cmake --build can receive SIGTERM at the very
+# end of a long build (RunPod timeout / container preemption) and would exit
+# non-zero even though all binaries were already written to disk.  We check
+# for the binary explicitly after the build instead of relying on exit codes.
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKIP_PIP=0
@@ -45,9 +49,18 @@ else
 fi
 
 cd /workspace/llama.cpp
-cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release -j$(nproc)
-cp build/bin/llama-quantize /usr/local/bin/
+
+# Skip cmake entirely if the binary is already present (e.g. interrupted build
+# that wrote the binary before the SIGTERM arrived).
+if [[ -f build/bin/llama-quantize ]]; then
+  echo "  llama-quantize already built — skipping cmake"
+else
+  cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+  cmake --build build --config Release -j$(nproc)
+fi
+
+# cp is non-fatal: startup.sh checks for the workspace binary directly.
+cp build/bin/llama-quantize /usr/local/bin/ 2>/dev/null || true
 
 # ── 3. llama.cpp Python dependencies (needed by convert_hf_to_gguf.py) ───────
 echo ""

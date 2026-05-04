@@ -531,6 +531,30 @@ async def device_heartbeat(request: Request, authorization: Optional[str] = Head
     return {"success": True, "device_id": device_id, "last_seen_at": now.isoformat()}
 
 
+@router.post("/api/v1/devices/offline")
+async def device_offline(authorization: Optional[str] = Header(default=None)):
+    """
+    Explicitly mark the device as offline (e.g., during user logout).
+    """
+    device_id, claims = await _resolve_device_from_bearer(authorization)
+    device_row = await _load_active_device_row(device_id)
+    _enforce_not_revoked(claims, device_row.get("jwt_issued_after"))
+    _enforce_fingerprint_matches_device(claims, device_row)
+
+    now = datetime.now(timezone.utc)
+    # To force it offline instantly in the UI, we push last_seen_at back in time
+    # beyond the 3-minute cutoff.
+    past_time = now - timedelta(minutes=5)
+
+    await postgrest_patch(
+        "devices",
+        f"id=eq.{quote(device_id, safe='')}",
+        {"status": "offline", "last_seen_at": past_time.isoformat()},
+    )
+    log.info("device.offline_explicit", device_id=device_id)
+    return {"success": True, "device_id": device_id, "status": "offline"}
+
+
 @router.post("/api/v1/devices/{device_id}/revoke")
 async def revoke_device(
     device_id: str = Path(...),

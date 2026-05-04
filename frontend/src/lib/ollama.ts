@@ -168,6 +168,7 @@ declare global {
         ) => Promise<{ success: boolean; payload?: any; status?: number; error?: string }>;
         delete?: (accessToken: string, id: string) => Promise<{ success: boolean; payload?: any; status?: number; error?: string }>;
         rotateSecret?: (accessToken: string, id: string) => Promise<any>;
+        testEvent?: (accessToken: string, eventType: string, payload: Record<string, unknown>) => Promise<{ success: boolean; event_id?: string; payload?: any; status?: number; error?: string }>;
       };
       model?: {
         checkUpdate: (domain: string) => Promise<{

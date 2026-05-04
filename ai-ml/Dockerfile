@@ -13,23 +13,17 @@ RUN apt-get update && apt-get install -y curl git build-essential cmake libgomp1
     apt-get update && apt-get install -y cloudflared && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install Python packages
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install FileBrowser (port 8080 file manager)
+RUN curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
 
-# Copy all code
+# Copy code + requirements (pip install happens at first boot into /workspace/venv)
+COPY requirements.txt .
 COPY . .
 
 # Permissions
 RUN chmod +x startup.sh setup.sh
 
-# Create directories
-RUN mkdir -p /workspace/uploads \
-             /workspace/fine_tuning/training_samples \
-             /workspace/fine_tuning/models \
-             /workspace/logs
-
-EXPOSE 8000
+EXPOSE 8000 8080 8188 8888
 
 ENV PYTHONUNBUFFERED=1
 
