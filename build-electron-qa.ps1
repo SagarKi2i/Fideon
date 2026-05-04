@@ -1,7 +1,7 @@
 param(
-  [string]$ApiUrl = "http://13.68.145.18:8080",
-  [string]$FrontendUrl = "http://13.68.145.18:4200",
-  [string]$BackendDocsUrl = "http://13.68.145.18:8080/docs",
+  [string]$ApiUrl = "https://fideon-staging-apim.azure-api.net/stg",
+  [string]$FrontendUrl = "https://fideon-staging-frontend-gnbwcnhmhbeqbmhq.centralus-01.azurewebsites.net",
+  [string]$BackendDocsUrl = "https://fideon-staging-apim.azure-api.net/stg/docs",
   [string]$PackageLabel = "staging",
   [switch]$SkipInstall,
   [switch]$SkipFrontendBuild,
@@ -28,6 +28,12 @@ Write-Host "Using Frontend URL (reference): $FrontendUrl" -ForegroundColor Cyan
 $env:NEXT_PUBLIC_FRONTEND_URL = $FrontendUrl
 Write-Host "Using Backend Swagger URL (reference): $BackendDocsUrl" -ForegroundColor Cyan
 $env:NEXT_PUBLIC_BACKEND_DOCS_URL = $BackendDocsUrl
+$env:NEXT_STANDALONE = "1"
+
+# Sync Electron main process API URL with the build parameter.
+Write-Host "Configuring Electron main process API URL..." -ForegroundColor Cyan
+$electronEnvPath = Join-Path $electronDir ".env"
+"ELECTRON_API_BASE_URL=$ApiUrl" | Set-Content -Path $electronEnvPath -Encoding utf8
 
 # Prevent file-lock issues during repackaging (app.asar is inside the exe folder).
 # If the process isn't running, `taskkill` writes an error; ignore it so the script keeps going.

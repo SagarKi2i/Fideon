@@ -43,7 +43,8 @@
       {
         "from": ".",
         "filter": [
-          "package.json"
+          "package.json",
+          ".env"
         ]
       },
       {

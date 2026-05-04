@@ -528,7 +528,29 @@ async def device_heartbeat(request: Request, authorization: Optional[str] = Head
     await _sync_local_models(device_id, local_models, now)
     log.debug("device.heartbeat", device_id=device_id)
     await try_emit_device_online(device_id, force=False)
-    return {"success": True, "device_id": device_id, "last_seen_at": now.isoformat()}
+
+    # Return pending model IDs so the device can start pulling without waiting for a realtime push.
+    pending_rows = await postgrest_get(
+        "device_models",
+        f"select=model_id,model_name,ollama_model_name&device_id=eq.{quote(device_id, safe='')}&is_downloaded=eq.false&limit=50",
+    )
+    pending_downloads = [
+        {
+            "model_id": r.get("model_id"),
+            "model_name": r.get("model_name"),
+            "ollama_model_name": r.get("ollama_model_name") or "llama3.2:latest",
+        }
+        for r in (pending_rows or [])
+        if r.get("model_id")
+    ]
+
+    return {
+        "success": True,
+        "device_id": device_id,
+        "last_seen_at": now.isoformat(),
+        "pending_downloads": pending_downloads,
+        "pending_count": len(pending_downloads),
+    }
 
 
 @router.post("/api/v1/devices/offline")
@@ -609,6 +631,54 @@ async def revoke_device(
     )
     log.info("device.revoked", device_id=device_id)
     return {"success": True, "device_id": device_id, "revoked_at": now.isoformat()}
+
+
+@router.post("/api/v1/devices/{device_id}/enable")
+async def enable_device(
+    device_id: str = Path(...),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Admin endpoint: re-enable a previously revoked/deactivated device.
+
+    Sets is_active = true on the device row.
+    The device will then be able to register again.
+
+    Auth: Supabase user JWT with admin role.
+    """
+    await verify_admin(authorization)
+    requester_context = await get_user_context(authorization)
+    requester_role = requester_context.get("role")
+    requester_tenant_id = requester_context.get("tenant_id")
+
+    rows = await postgrest_get(
+        "devices",
+        f"select=id,tenant_id,registered_by&id=eq.{quote(device_id, safe='')}&limit=1",
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Device not found")
+    target = rows[0]
+
+    if requester_role in {"admin", "global_admin"}:
+        if not requester_tenant_id:
+            raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
+        target_tenant_id = target.get("tenant_id")
+        if not target_tenant_id and target.get("registered_by"):
+            owner_rows = await postgrest_get(
+                "app_users",
+                f"select=tenant_id&user_id=eq.{quote(str(target['registered_by']), safe='')}&limit=1",
+            )
+            target_tenant_id = owner_rows[0].get("tenant_id") if owner_rows else None
+        if target_tenant_id != requester_tenant_id:
+            raise HTTPException(status_code=403, detail="Cross-tenant device access denied")
+
+    await postgrest_patch(
+        "devices",
+        f"id=eq.{quote(device_id, safe='')}",
+        {"is_active": True},
+    )
+    log.info("device.enabled", device_id=device_id)
+    return {"success": True, "device_id": device_id}
 
 
 @router.post("/api/v1/devices/link")

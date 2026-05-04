@@ -139,6 +139,14 @@ async def allocate_device_models(
     if resp.status_code >= 400:
         raise HTTPException(status_code=500, detail=resp.text)
 
+    # Emit a realtime sync event so the device learns about new models immediately
+    try:
+        from app.services.device_sync_orchestrator import trigger_device_sync
+        new_model_ids = [r["model_id"] for r in rows_to_insert]
+        await trigger_device_sync(device_id, model_ids=new_model_ids)
+    except Exception:
+        pass  # Non-blocking — sync log is best-effort
+
     return {"success": True, "allocated": len(rows_to_insert)}
 
 
@@ -297,3 +305,60 @@ async def list_tenants_by_ids(
         f"select=id,name&id=in.({ids_joined})",
     )
     return {"tenants": rows}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEVICE SYNC — trigger + broadcast  (FNF-193)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.post("/api/v1/admin/devices/{device_id}/trigger-sync")
+async def admin_trigger_device_sync(
+    device_id: str,
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Admin: immediately emit a model_sync event for a specific device.
+    The device's Supabase realtime subscription picks this up and triggers
+    a model list refresh + Ollama pull for any pending models.
+    """
+    from app.core.supabase import get_user_context
+    from app.services.device_sync_orchestrator import trigger_device_sync
+
+    await verify_admin(authorization)
+    ctx = await get_user_context(authorization)
+    requester_tenant_id = ctx.get("tenant_id")
+
+    # Verify device belongs to requester's tenant
+    rows = await postgrest_get(
+        "devices",
+        f"select=id,tenant_id,status&id=eq.{quote(device_id, safe='')}&limit=1",
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Device not found")
+    device = rows[0]
+    if requester_tenant_id and str(device.get("tenant_id") or "") != str(requester_tenant_id):
+        raise HTTPException(status_code=403, detail="Cross-tenant device access denied")
+
+    await trigger_device_sync(device_id)
+    return {"success": True, "device_id": device_id, "status": device.get("status")}
+
+
+@router.post("/api/v1/admin/devices/broadcast-sync")
+async def admin_broadcast_sync(
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Admin: emit a model_sync event for ALL online devices in the admin's tenant.
+    Use this to push pending model allocations to the entire device fleet at once.
+    """
+    from app.core.supabase import get_user_context
+    from app.services.device_sync_orchestrator import broadcast_tenant_sync
+
+    await verify_admin(authorization)
+    ctx = await get_user_context(authorization)
+    tenant_id = ctx.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="Requester is not linked to a tenant")
+
+    notified = await broadcast_tenant_sync(str(tenant_id))
+    return {"success": True, "devices_notified": notified}

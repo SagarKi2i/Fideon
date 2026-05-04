@@ -17,9 +17,10 @@ from starlette.responses import PlainTextResponse
 from app.core.config import (
     CORS_ALLOWED_ORIGINS,
     DEVICE_JWT_SECRET,
+    DEVICE_OFFLINE_DETECTOR_ENABLED,
+    DEVICE_SYNC_ORCHESTRATOR_ENABLED,
     ENABLE_LOCAL_GENERATE,
     ENABLE_LOCAL_GENERATE_WARMUP,
-    DEVICE_OFFLINE_DETECTOR_ENABLED,
     WEBHOOK_SECRET_ENCRYPTION_KEY,
     WEBHOOK_WORKER_ENABLED,
     SUPABASE_URL,
@@ -87,6 +88,11 @@ async def _lifespan(app: FastAPI):
 
         bg_tasks.append(asyncio.create_task(offline_detector_loop(), name="device_offline_detector"))
 
+    if DEVICE_SYNC_ORCHESTRATOR_ENABLED:
+        from app.services.device_sync_orchestrator import orchestrator_loop
+
+        bg_tasks.append(asyncio.create_task(orchestrator_loop(), name="device_sync_orchestrator"))
+
     try:
         yield
     finally:
@@ -129,6 +135,7 @@ def _include_routers(app: FastAPI) -> None:
         admin,
         agents,
         auth_proxy,
+        carriers,
         chat,
         decision_reviews,
         device,
@@ -159,6 +166,7 @@ def _include_routers(app: FastAPI) -> None:
         admin.router,
         agents.router,
         auth_proxy.router,
+        carriers.router,
         chat.router,
         decision_reviews.router,
         device.router,

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+﻿import { useState, useEffect } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -235,7 +235,7 @@ export default function Playground() {
       }
 
       // ACORD: main backend orchestrates RunPod then proxies to ML /api/acord/extract
-      if (data?.type === "acord-parser" && data.file instanceof File && !(useLocalModel && isElectronApp)) {
+      if (data?.type === "acord_form_understanding" && data.file instanceof File && !(useLocalModel && isElectronApp)) {
         const formTypeHint = String(data.formType ?? "125");
         try {
           const acordResp = await extractAcord(data.file, formTypeHint);
@@ -363,7 +363,7 @@ export default function Playground() {
 
     // Pods sometimes get different model_id values, but the pod UI should still be ACORD.
     if (
-      selectedModel === "acord-parser" ||
+      selectedModel === "acord_form_understanding" ||
       selectedModelData?.model_name?.toLowerCase().includes("acord")
     ) {
       return <ACORDParserUI modelId={selectedModel} onRun={handleRun} isRunning={isRunning} result={result} />;
@@ -540,7 +540,7 @@ export default function Playground() {
         {result &&
           !isRunning &&
           selectedModelData &&
-          selectedModel !== "acord-parser" &&
+          selectedModel !== "acord_form_understanding" &&
           !selectedModelData.model_name.toLowerCase().includes("acord") && (
           <div className="flex justify-end">
             <SendToReviewButton

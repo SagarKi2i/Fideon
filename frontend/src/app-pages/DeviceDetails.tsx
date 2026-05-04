@@ -132,6 +132,7 @@ export default function DeviceDetails() {
   const [disableDeviceOpen, setDisableDeviceOpen] = useState(false);
   const [disablingDevice, setDisablingDevice] = useState(false);
   const [enablingDevice, setEnablingDevice] = useState(false);
+  const [syncing, setSyncing] = useState(false);
 
   useEffect(() => {
     checkAccess();
@@ -441,11 +442,21 @@ export default function DeviceDetails() {
   };
 
   const handleTriggerSync = async () => {
-    if (!device) return;
+    if (!id) return;
+    setSyncing(true);
     try {
-      // V1 device heartbeat requires a device JWT. Triggering sync from the admin UI
-      // can no longer be done using the legacy device_token once legacy endpoints are disabled.
-      throw new Error("Sync trigger requires device JWT (v1). Use Device Setup on the device.");
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) throw new Error("Not authenticated");
+      const res = await fetch(
+        apiUrl(`/api/v1/admin/devices/${encodeURIComponent(id)}/trigger-sync`),
+        { method: "POST", headers: { Authorization: `Bearer ${session.access_token}` } },
+      );
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error((payload as any)?.error || `HTTP ${res.status}`);
+      }
+      toast({ title: "Sync triggered", description: "The device will receive pending model updates." });
+      loadDeviceData();
     } catch (error: any) {
       console.error("Error triggering sync:", error);
       toast({
@@ -453,6 +464,8 @@ export default function DeviceDetails() {
         description: error.message || "Failed to trigger sync",
         variant: "destructive",
       });
+    } finally {
+      setSyncing(false);
     }
   };
 
@@ -851,9 +864,9 @@ export default function DeviceDetails() {
             <CardHeader>
               <div className="flex items-center justify-between">
                 <CardTitle>Sync History ({syncLogs.length})</CardTitle>
-                <Button size="sm" className="gap-2" onClick={handleTriggerSync}>
-                  <RefreshCw className="h-4 w-4" />
-                  Sync Now
+                <Button size="sm" className="gap-2" onClick={() => void handleTriggerSync()} disabled={syncing}>
+                  {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                  {syncing ? "Syncing…" : "Sync Now"}
                 </Button>
               </div>
             </CardHeader>
