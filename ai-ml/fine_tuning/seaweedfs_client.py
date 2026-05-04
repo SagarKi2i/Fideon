@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -65,7 +66,7 @@ class SeaweedFSClient:
         return TransferConfig(
             multipart_threshold=_MULTIPART_THRESHOLD,
             multipart_chunksize=_MULTIPART_CHUNK,
-            max_concurrency=4,
+            max_concurrency=2,  # lower concurrency is more stable on SeaweedFS
         )
 
     def _upload_file_with_retry(self, client: Any, local_path: str, key: str) -> None:
@@ -103,6 +104,8 @@ class SeaweedFSClient:
         client = self._boto_client()
         files = [f for f in local.rglob("*") if f.is_file()]
         print(f"[seaweedfs] Uploading HF model ({len(files)} files) → s3://{self._bucket}/{prefix}/")
+        _RETRY_DELAYS = [30, 90]  # seconds to wait before attempt 2, 3
+        failed: list[str] = []
         for f in files:
             rel = f.relative_to(local)
             key = f"{prefix}/{rel.as_posix()}"
@@ -110,7 +113,18 @@ class SeaweedFSClient:
             print(f"[seaweedfs]   {rel} ({size_mb} MB) …")
             self._upload_file_with_retry(client, str(f), key)
 
-        # Mark this as the latest version
+        if failed:
+            # Training succeeded — don't mark job as failed just because SeaweedFS is down.
+            # The merged model is still on disk; next cycle will re-upload.
+            # Do NOT write latest.txt — an incomplete upload must not be used as base model.
+            print(
+                f"[seaweedfs] WARNING: {len(failed)} file(s) failed to upload to {prefix}. "
+                f"Model is preserved on disk. SeaweedFS may be full or unhealthy. "
+                f"Failed files: {', '.join(failed)}"
+            )
+            return prefix
+
+        # Only mark as latest when ALL files uploaded successfully
         client.put_object(
             Bucket=self._bucket,
             Key="finetuned/latest.txt",
@@ -182,6 +196,8 @@ class SeaweedFSClient:
         # Exclude fp16.gguf — it's a 16 GB intermediate file, not needed for inference
         files = [f for f in local.glob("*.gguf") if "fp16" not in f.name] + list(local.glob("manifest.json"))
         print(f"[seaweedfs] Uploading {len(files)} quantized file(s) → s3://{self._bucket}/{prefix}/")
+        _RETRY_DELAYS = [30, 90]
+        failed: list[str] = []
         for f in sorted(files):
             key = f"{prefix}/{f.name}"
             size_mb = f.stat().st_size // 1_000_000
@@ -189,7 +205,10 @@ class SeaweedFSClient:
             self._upload_file_with_retry(client, str(f), key)
             keys.append(key)
 
-        print(f"[seaweedfs] Quantized upload complete ({len(keys)} files).")
+        if failed:
+            print(f"[seaweedfs] WARNING: {len(failed)} GGUF file(s) failed to upload: {', '.join(failed)}")
+        else:
+            print(f"[seaweedfs] Quantized upload complete ({len(keys)} files).")
         return keys
 
     # ── Legacy helpers ────────────────────────────────────────────────────────

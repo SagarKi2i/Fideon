@@ -41,6 +41,7 @@ from app.schemas.acord_workflow import (
     ReExtractRequest,
 )
 from app.services.acord_training import create_job_row, spawn_job_runner
+from app.services.nl_summary import generate_nl_summary as _generate_nl_summary
 # NOTE: importing fine_tuning / torch at module import time can make API startup
 # extremely slow. Import hardened inference lazily only when needed.
 
@@ -1033,6 +1034,7 @@ async def _run_extract_and_persist(
             persist_exc.detail,
         )
         detail_txt = persist_exc.detail if isinstance(persist_exc.detail, str) else str(persist_exc.detail)
+        nl_summary_partial = await _generate_nl_summary(extracted, text)
         return AcordExtractResponse(
             run_id="",
             status="draft",
@@ -1044,6 +1046,7 @@ async def _run_extract_and_persist(
                 "Extraction completed but the draft could not be saved to the database. "
                 "You can still review and copy the JSON; submit/feedback needs a saved run."
             ),
+            natural_language_summary=nl_summary_partial,
         )
 
     doc_id = (file.filename or "acord-upload").rsplit(".", 1)[0]
@@ -1064,12 +1067,15 @@ async def _run_extract_and_persist(
         },
     )
 
+    nl_summary = await _generate_nl_summary(extracted, text)
+
     return AcordExtractResponse(
         run_id=str(row["id"]),
         status=row.get("status") or "draft",
         overall_confidence=float(row.get("overall_confidence") or 0.0),
         extracted=row.get("extracted_json") or {},
         partial=False,
+        natural_language_summary=nl_summary,
     )
 
 

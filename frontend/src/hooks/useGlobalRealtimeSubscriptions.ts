@@ -216,6 +216,7 @@ export function useGlobalRealtimeSubscriptions() {
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectInFlightRef = useRef(false);
+  const channelSuffixRef = useRef(0);
   const realtimeEnabled = process.env.NEXT_PUBLIC_ENABLE_GLOBAL_REALTIME !== "false";
 
   const persistNotification = useCallback(async (userId: string, detail: {
@@ -352,8 +353,10 @@ export function useGlobalRealtimeSubscriptions() {
       }, delayMs);
     };
 
+    const suffix = ++channelSuffixRef.current;
+
     const deviceChannel = supabase
-      .channel("global-device-status-live")
+      .channel(`global-device-status-live-${suffix}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "devices" }, (payload: any) => {
         if (
           payload.eventType === "UPDATE" &&
@@ -368,11 +371,11 @@ export function useGlobalRealtimeSubscriptions() {
         });
       })
       .subscribe((status, err) => {
-        handleRealtimeStatus("global-device-status-live", status, err);
+        handleRealtimeStatus(`global-device-status-live-${suffix}`, status, err);
       });
 
     const notificationsChannel = supabase
-      .channel("global-notifications-live")
+      .channel(`global-notifications-live-${suffix}`)
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "pod_activation_requests" },
@@ -479,7 +482,7 @@ export function useGlobalRealtimeSubscriptions() {
         },
       )
       .subscribe((status, err) => {
-        handleRealtimeStatus("global-notifications-live", status, err);
+        handleRealtimeStatus(`global-notifications-live-${suffix}`, status, err);
       });
 
     channelsRef.current = [deviceChannel, notificationsChannel];

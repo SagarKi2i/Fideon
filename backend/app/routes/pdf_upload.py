@@ -13,7 +13,6 @@ Routes:
 """
 from __future__ import annotations
 
-import io
 import json
 import re
 from typing import Any, Dict, Optional
@@ -24,9 +23,36 @@ from fastapi import APIRouter, Body, File, Header, HTTPException, UploadFile
 
 from app.core.config import RUNPOD_UPLOAD_BASE_URL
 from app.core.supabase import verify_user
+from app.services.nl_summary import generate_nl_summary
+from app.services.runpod_orchestrator import ensure_runpod_ml_ready
+from Models.acord_form_understanding.extraction_pipeline import openai_compat_extract_structured
+from Models.acord_form_understanding.uir import TextBlock, UnifiedIntermediateRepresentation
 
 log = structlog.get_logger("pdf_upload")
 router = APIRouter()
+
+
+async def _llm_extract_from_raw_text(
+    raw_text: str,
+    form_type_hint: str = "25",
+) -> Dict[str, Any]:
+    """
+    Runs the same LLM extraction pipeline used by the ACORD route on raw text.
+    Builds a minimal UIR from the full text and calls openai_compat_extract_structured.
+    Returns an empty dict silently if the LLM is not configured or fails.
+    """
+    if not (raw_text or "").strip():
+        return {}
+    try:
+        uir = UnifiedIntermediateRepresentation(
+            text_blocks=[TextBlock(text=raw_text, page=1, bbox=None, source="txt")],
+            layout={"extraction_engine": "txt"},
+        )
+        result = await openai_compat_extract_structured(uir, form_type_hint=form_type_hint)
+        return result or {}
+    except Exception as exc:
+        log.warning("llm_extract_from_raw_text.failed", reason=str(exc))
+        return {}
 
 _ALLOWED_EXTENSIONS = {".pdf", ".docx"}
 
@@ -86,117 +112,6 @@ def _detect_pdf_type(content: bytes) -> tuple[str, str]:
         return "scanned", ""
 
 
-# ── Local multi-layer extractor for digital PDFs (no AI) ─────────────────────
-#
-# Layer 1 — AcroForm fields   (PyMuPDF)   : embedded widget name/value pairs
-# Layer 2 — Raw text          (PyMuPDF)   : full page text for display
-# Layer 3 — Tables + KV       (pdfplumber): structured rows and two-column tables
-# Layer 4 — Regex patterns                : ACORD-specific field detection on raw text
-
-# Common ACORD field patterns (form-agnostic, works across 25 / 27 / 125 / 126 etc.)
-_ACORD_REGEX_PATTERNS: Dict[str, str] = {
-    "policy_number":       r"(?:Policy(?:\s+No\.?|\s+Number)?)\s*[:\-]\s*([A-Z0-9\-]{4,40})",
-    "effective_date":      r"(?:Effective|Eff\.?\s*Date)\s*[:\-]\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})",
-    "expiration_date":     r"(?:Expiration|Exp(?:iry)?\.?\s*Date)\s*[:\-]\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})",
-    "named_insured":       r"(?:NAMED\s+INSURED|Name\s+of\s+Insured)\s*[:\-]?\s*(.{3,80})",
-    "mailing_address":     r"(?:Mailing\s+Address|Address)\s*[:\-]\s*(.{5,100})",
-    "producer_name":       r"(?:PRODUCER|Producer|Agency Name)\s*[:\-]\s*(.{3,80})",
-    "producer_contact":    r"(?:Contact\s+Name|Contact)\s*[:\-]\s*(.{3,60})",
-    "producer_phone":      r"(?:Phone|Ph\.?)\s*[:\-]\s*([\d\s\(\)\-\+\.]{7,20})",
-    "producer_fax":        r"(?:Fax)\s*[:\-]\s*([\d\s\(\)\-\+\.]{7,20})",
-    "producer_email":      r"(?:E-?Mail|Email)\s*[:\-]\s*([\w\.\+\-]+@[\w\.\-]+\.\w{2,})",
-    "insurer_a":           r"INSURER\s+A\s*[:\-]\s*(.{3,80})",
-    "insurer_b":           r"INSURER\s+B\s*[:\-]\s*(.{3,80})",
-    "insurer_c":           r"INSURER\s+C\s*[:\-]\s*(.{3,80})",
-    "naic_code":           r"NAIC\s*#?\s*[:\-]?\s*(\d{5})",
-    "certificate_number":  r"(?:Certificate\s+(?:No\.?|Number))\s*[:\-]\s*([A-Z0-9\-]{4,30})",
-    "description_of_ops":  r"(?:DESCRIPTION\s+OF\s+OPERATIONS)[^\n]*\n(.{10,500})",
-    "certificate_holder":  r"(?:CERTIFICATE\s+HOLDER)\s*[:\-]?\s*(.{5,200})",
-    "gl_each_occurrence":  r"(?:Each\s+Occurrence)\s*\$?\s*([\d,]+)",
-    "gl_general_aggregate":r"(?:General\s+Aggregate)\s*\$?\s*([\d,]+)",
-    "auto_combined_limit": r"(?:Combined\s+Single\s+Limit)\s*\$?\s*([\d,]+)",
-    "umbrella_each_occ":   r"(?:UMBRELLA|EXCESS).*?Each\s+Occurrence\s*\$?\s*([\d,]+)",
-    "wc_el_each_accident": r"E\.L\.\s+Each\s+Accident\s*\$?\s*([\d,]+)",
-}
-
-
-def _extract_digital_pdf(
-    content: bytes,
-    form_type: str,
-    preextracted_text: str = "",
-) -> tuple[Dict[str, Any], str]:
-    """
-    Multi-layer local extraction. Returns (fields_dict, raw_text).
-    No external API calls — CPU only.
-
-    Pass preextracted_text from _detect_pdf_type to avoid opening the PDF twice.
-    """
-    import fitz  # PyMuPDF
-
-    fields: Dict[str, Any] = {}
-    raw_text = preextracted_text  # reuse text already extracted during detection
-
-    # ── Layer 1 + (optionally) 2: PyMuPDF ────────────────────────────────────
-    try:
-        doc = fitz.open(stream=content, filetype="pdf")
-
-        # Layer 1: AcroForm embedded form fields (most reliable when present)
-        for page in doc:
-            for widget in page.widgets() or []:
-                name = (widget.field_name or "").strip()
-                value = widget.field_value
-                if name and value is not None:
-                    val = str(value).strip()
-                    if val and val not in ("Off", ""):
-                        fields[name] = val
-
-        # Layer 2: Full text — only re-extract if not already supplied
-        if not raw_text:
-            pages_text: list[str] = []
-            for page in doc:
-                text = page.get_text("text").strip()
-                if text:
-                    pages_text.append(text)
-            raw_text = "\n\n--- Page Break ---\n\n".join(pages_text)
-
-        doc.close()
-    except Exception as e:
-        log.warning("digital_extract.pymupdf_failed", error=str(e))
-
-    # ── Layer 3: pdfplumber — tables + KV rows ────────────────────────────────
-    try:
-        import pdfplumber
-
-        with pdfplumber.open(io.BytesIO(content)) as pdf:
-            for page in pdf.pages:
-                for table in page.extract_tables() or []:
-                    for row in table:
-                        if not row or len(row) < 2:
-                            continue
-                        key = str(row[0] or "").strip().rstrip(":").strip()
-                        val = str(row[1] or "").strip()
-                        # Only store if key looks like a label (not a number/empty)
-                        if key and val and not key.isdigit() and key not in fields:
-                            fields[key] = val
-    except Exception as e:
-        log.warning("digital_extract.pdfplumber_failed", error=str(e))
-
-    # ── Layer 4: Regex on raw text ────────────────────────────────────────────
-    if raw_text:
-        for field_key, pattern in _ACORD_REGEX_PATTERNS.items():
-            if field_key in fields:
-                continue  # AcroForm or pdfplumber already found this
-            m = re.search(pattern, raw_text, re.IGNORECASE | re.DOTALL)
-            if m:
-                value = m.group(1).strip()
-                # Trim to first line for address-like fields to avoid runaway matches
-                value = value.split("\n")[0].strip()
-                if value:
-                    fields[field_key] = value
-
-    return fields, raw_text
-
-
 # ── POST /api/v1/pdf/smart-extract ───────────────────────────────────────────
 @router.post("/api/v1/pdf/smart-extract")
 async def smart_extract_pdf(
@@ -205,20 +120,15 @@ async def smart_extract_pdf(
     authorization: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
     """
-    Unified PDF extraction entry point. No external AI APIs used.
+    Unified PDF extraction entry point routed through RunPod for both digital and scanned PDFs.
 
-    1. Detects whether the PDF is digital or scanned (PyMuPDF, CPU-only, instant).
-    2. Digital → multi-layer local extraction:
-         Layer 1: AcroForm embedded fields (PyMuPDF)
-         Layer 2: Full raw text (PyMuPDF)
-         Layer 3: Tables + KV rows (pdfplumber)
-         Layer 4: ACORD regex patterns
-       Returns fields + raw_text immediately. No RunPod involvement.
-    3. Scanned → uploads PDF to RunPod, returns {pdf_type, upload_id}.
-       Frontend then calls POST /api/v1/pdf/extract/{upload_id} to run
-       Surya OCR + Qwen VL on the RunPod GPU.
+    1. Detects whether the PDF is digital or scanned (PyMuPDF, CPU-only, instant) for metadata only.
+    2. Uploads the document to RunPod in all cases.
+    3. Returns {pdf_type, upload_id, ...}; frontend then calls
+       POST /api/v1/pdf/extract/{upload_id} so extraction always happens on RunPod.
     """
     await verify_user(authorization)
+    await ensure_runpod_ml_ready()
 
     filename = file.filename or ""
     ext = ("." + filename.rsplit(".", 1)[-1].lower()) if "." in filename else ""
@@ -239,7 +149,7 @@ async def smart_extract_pdf(
             detail=f"File too large ({len(content) // (1024*1024)} MB). Maximum allowed is 50 MB.",
         )
 
-    pdf_type, embedded_text = _detect_pdf_type(content)
+    pdf_type, _ = _detect_pdf_type(content)
     log.info(
         "smart_extract.detected",
         filename=filename,
@@ -248,29 +158,16 @@ async def smart_extract_pdf(
         form_type=form_type,
     )
 
-    if pdf_type == "digital":
-        log.info("smart_extract.digital_path", filename=filename)
-        # Pass embedded_text so _extract_digital_pdf skips re-opening the PDF for Layer 2
-        fields, full_text = _extract_digital_pdf(content, form_type, preextracted_text=embedded_text)
-        log.info("smart_extract.digital_done", filename=filename, field_count=len(fields))
-        return {
-            "pdf_type": "digital",
-            "form_type_detected": f"acord{form_type}",
-            "extracted_json": fields,
-            "full_text": full_text,
-            "source": "local",
-        }
-
-    # Scanned path — upload to RunPod then let frontend trigger extraction
-    log.info("smart_extract.scanned_path_uploading", filename=filename)
+    # All PDFs use RunPod extraction path.
+    log.info("smart_extract.uploading_to_runpod", filename=filename, pdf_type=pdf_type)
     result = await _runpod_post(
         "/upload",
         files={"file": (filename, content, file.content_type or "application/pdf")},
         params={"form_type": form_type},
     )
-    log.info("smart_extract.scanned_uploaded", upload_id=result.get("upload_id"))
+    log.info("smart_extract.uploaded", upload_id=result.get("upload_id"), pdf_type=pdf_type)
     return {
-        "pdf_type": "scanned",
+        "pdf_type": pdf_type,
         "upload_id": result.get("upload_id"),
         "filename": result.get("filename", filename),
         "size_bytes": result.get("size_bytes", len(content)),
@@ -288,6 +185,7 @@ async def upload_pdf_to_runpod(
 ) -> Dict[str, Any]:
     """Upload a PDF from the browser to the RunPod pod storage."""
     await verify_user(authorization)
+    await ensure_runpod_ml_ready()
 
     filename = file.filename or ""
     ext = ("." + filename.rsplit(".", 1)[-1].lower()) if "." in filename else ""
@@ -381,6 +279,27 @@ async def extract_acord_from_upload(
         form_type=result.get("form_type_detected"),
         pdf_type=result.get("pdf_type"),
     )
+    raw_text = result.get("full_text") or result.get("raw_text") or ""
+    runpod_fields = result.get("extracted_json") or result.get("fields") or {}
+
+    # Re-run LLM extraction on the backend using the full raw text returned by RunPod.
+    # This ensures all fields present in the raw text are captured even if RunPod's
+    # internal extraction missed them (e.g. truncated context, partial model output).
+    llm_fields = await _llm_extract_from_raw_text(raw_text, form_type_hint=form_type)
+    if llm_fields:
+        # RunPod values win over LLM when both exist and RunPod value is non-null.
+        for k, v in runpod_fields.items():
+            if k not in llm_fields or llm_fields[k] is None:
+                llm_fields[k] = v
+        result["extracted_json"] = llm_fields
+        log.info("acord_extract.llm_supplement_done", upload_id=upload_id, field_count=len(llm_fields))
+    else:
+        result["extracted_json"] = runpod_fields
+        log.info("acord_extract.llm_supplement_skipped", upload_id=upload_id)
+
+    nl_summary = await generate_nl_summary(result["extracted_json"], raw_text)
+    if nl_summary:
+        result["natural_language_summary"] = nl_summary
     return result
 
 
