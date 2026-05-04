@@ -17,7 +17,7 @@ httpx>=0.27.0
 # -----------------------------------------------------------------------------
 # PDF → image conversion
 # -----------------------------------------------------------------------------
-PyMuPDF==1.27.2.2
+PyMuPDF==1.27.2.3
 Pillow>=10.2.0,<11.0.0
 numpy==2.4.4
 
@@ -37,31 +37,34 @@ torch==2.7.0
 torchvision==0.22.0
 transformers==4.56.2
 accelerate==1.13.0
-qwen-vl-utils>=0.0.8
+qwen-vl-utils==0.0.14
 
 # -----------------------------------------------------------------------------
 # QLoRA fine-tuning
 # -----------------------------------------------------------------------------
-# 4-bit quantization (NF4 / double quant)
-bitsandbytes>=0.43.0
+# 4-bit quantization (NF4 / double quant) — requires torch>=2.3 (satisfied by 2.7.0)
+bitsandbytes==0.49.2
 
 # LoRA adapter training (PEFT)
-peft>=0.11.0
+peft==0.19.1
 
 # Supervised fine-tuning trainer (SFTTrainer / DataCollatorForLanguageModeling)
-trl>=0.9.0
+# trl 1.3.0 requires transformers>=4.56.2 and datasets>=4.7.0 (both satisfied)
+trl==1.3.0
 
 # Efficient weight serialization
-safetensors>=0.4.3
+safetensors==0.7.0
 
-# HuggingFace datasets (for Dataset.from_dict + map)
-datasets>=2.20.0
+# HuggingFace datasets
+datasets==4.8.5
 
 # -----------------------------------------------------------------------------
 # Docling — document structure parser (layout + tables + KV for scanned PDFs)
 # Runs in parallel with Surya OCR as Arm B of the extraction pipeline.
+# pypdfium2==4.30.0 satisfies both surya-ocr==0.17.1 (exact pin) and docling
 # -----------------------------------------------------------------------------
-docling>=2.5.0
+docling==2.92.0
+pypdfium2==4.30.0
 
 # -----------------------------------------------------------------------------
 # Config parsing
