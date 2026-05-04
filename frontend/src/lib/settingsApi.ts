@@ -96,3 +96,112 @@ export async function revokePersonalApiKey(keyId: string): Promise<void> {
   const payload = await readJsonSafe(res);
   if (!res.ok) throw buildApiRequestError(res, payload, "Failed to revoke API key");
 }
+
+// ── Carrier credentials ───────────────────────────────────────────────────────
+
+export interface CarrierConnectionRow {
+  id: string;
+  carrier_id: string;
+  username: string;
+  enterprise_id: string | null;
+  status: "active" | "inactive";
+  connected_at: string;
+  last_synced_at: string | null;
+}
+
+export async function fetchCarrierConnections(): Promise<CarrierConnectionRow[]> {
+  const res = await fetch(apiUrl("/api/carriers"), {
+    headers: await authHeaders(),
+  });
+  const payload = await readJsonSafe(res);
+  if (!res.ok) throw buildApiRequestError(res, payload, "Failed to load carrier connections");
+  return (payload.connections ?? []) as CarrierConnectionRow[];
+}
+
+export async function connectCarrier(
+  carrierId: string,
+  username: string,
+  password: string,
+  enterpriseId: string,
+): Promise<void> {
+  const res = await fetch(apiUrl("/api/carriers/connect"), {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ carrier_id: carrierId, username, password, enterprise_id: enterpriseId || null }),
+  });
+  const payload = await readJsonSafe(res);
+  if (!res.ok) throw buildApiRequestError(res, payload, "Failed to connect carrier");
+}
+
+export async function updateCarrierCredentials(
+  carrierId: string,
+  username: string,
+  password: string,
+  enterpriseId: string,
+): Promise<void> {
+  const res = await fetch(apiUrl(`/api/carriers/${encodeURIComponent(carrierId)}`), {
+    method: "PATCH",
+    headers: await authHeaders(),
+    body: JSON.stringify({ username, password: password || undefined, enterprise_id: enterpriseId || null }),
+  });
+  const payload = await readJsonSafe(res);
+  if (!res.ok) throw buildApiRequestError(res, payload, "Failed to update carrier credentials");
+}
+
+export async function disconnectCarrier(carrierId: string): Promise<void> {
+  const res = await fetch(apiUrl(`/api/carriers/${encodeURIComponent(carrierId)}`), {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
+  const payload = await readJsonSafe(res);
+  if (!res.ok) throw buildApiRequestError(res, payload, "Failed to disconnect carrier");
+}
+
+// ── Custom (tenant-specific) carriers ────────────────────────────────────────
+
+export interface TenantCarrierRow {
+  id: string;
+  carrier_id: string;
+  name: string;
+  logo: string;
+  created_at: string;
+}
+
+export async function fetchCustomCarriers(): Promise<TenantCarrierRow[]> {
+  const res = await fetch(apiUrl("/api/carriers/custom"), {
+    headers: await authHeaders(),
+  });
+  const payload = await readJsonSafe(res);
+  if (!res.ok) throw buildApiRequestError(res, payload, "Failed to load custom carriers");
+  return (payload.carriers ?? []) as TenantCarrierRow[];
+}
+
+export async function addCustomCarrier(name: string, logo: string): Promise<{ carrier_id: string }> {
+  const res = await fetch(apiUrl("/api/carriers/custom"), {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ name, logo: logo || "🏢" }),
+  });
+  const payload = await readJsonSafe(res);
+  if (!res.ok) throw buildApiRequestError(res, payload, "Failed to add carrier");
+  return payload as { carrier_id: string };
+}
+
+export async function updateCustomCarrier(carrierId: string, name: string, logo: string): Promise<void> {
+  const res = await fetch(apiUrl(`/api/carriers/custom/${encodeURIComponent(carrierId)}`), {
+    method: "PATCH",
+    headers: await authHeaders(),
+    body: JSON.stringify({ name, logo }),
+  });
+  const payload = await readJsonSafe(res);
+  if (!res.ok) throw buildApiRequestError(res, payload, "Failed to update carrier");
+}
+
+export async function deleteCustomCarrier(carrierId: string): Promise<void> {
+  const res = await fetch(apiUrl(`/api/carriers/custom/${encodeURIComponent(carrierId)}`), {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
+  const payload = await readJsonSafe(res);
+  if (!res.ok) throw buildApiRequestError(res, payload, "Failed to remove carrier");
+}

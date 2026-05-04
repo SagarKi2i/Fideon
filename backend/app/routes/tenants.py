@@ -47,8 +47,13 @@ router = APIRouter()
 log = structlog.get_logger("tenants")
 
 _VALID_PLANS = {"starter", "professional", "enterprise"}
-# Supported pack ids used across signup + marketplace pack-gating.
-_VALID_AGENT_PACKS = {"underwriting", "claims", "distribution", "compliance", "agentic-rag"}
+# Function-based pack IDs — 5 packs aligned to buyer persona and use case.
+# underwriting: quote gen, policy comparison, ACORD, coverage validation, risk tools
+# claims:       FNOL, carrier claims intake, adjudication, fraud detection, subrogation
+# distribution: document retrieval, renewal review, broker advisory, communication, loss runs
+# mga:          all MGA segment pods (binding authority, program UW, bordereaux, etc.)
+# carrier:      all Carrier segment pods (submission, pricing, adjudication, reinsurance, etc.)
+_VALID_AGENT_PACKS = {"underwriting", "claims", "distribution", "mga", "carrier"}
 # Custom slug: lowercase, alphanumeric + hyphens, min 3 chars, no leading/trailing hyphen.
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9\-]+[a-z0-9]$")
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")

@@ -528,7 +528,29 @@ async def device_heartbeat(request: Request, authorization: Optional[str] = Head
     await _sync_local_models(device_id, local_models, now)
     log.debug("device.heartbeat", device_id=device_id)
     await try_emit_device_online(device_id, force=False)
-    return {"success": True, "device_id": device_id, "last_seen_at": now.isoformat()}
+
+    # Return pending model IDs so the device can start pulling without waiting for a realtime push.
+    pending_rows = await postgrest_get(
+        "device_models",
+        f"select=model_id,model_name,ollama_model_name&device_id=eq.{quote(device_id, safe='')}&is_downloaded=eq.false&limit=50",
+    )
+    pending_downloads = [
+        {
+            "model_id": r.get("model_id"),
+            "model_name": r.get("model_name"),
+            "ollama_model_name": r.get("ollama_model_name") or "llama3.2:latest",
+        }
+        for r in (pending_rows or [])
+        if r.get("model_id")
+    ]
+
+    return {
+        "success": True,
+        "device_id": device_id,
+        "last_seen_at": now.isoformat(),
+        "pending_downloads": pending_downloads,
+        "pending_count": len(pending_downloads),
+    }
 
 
 @router.post("/api/v1/devices/offline")

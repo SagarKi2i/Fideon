@@ -1,4 +1,4 @@
-// Ollama service for local model execution
+﻿// Ollama service for local model execution
 // This service communicates with Ollama running on localhost
 
 export interface OllamaModel {
@@ -117,7 +117,7 @@ export async function checkNetworkStatus(): Promise<boolean> {
 // Model name mapping from our system to Ollama models
 export const MODEL_MAPPINGS: Record<string, string> = {
   'policy-comparison': 'llama3.2:latest',
-  'acord-parser': 'llama3.2:latest',
+  'acord_form_understanding': 'llama3.2:latest',
   'claims-fnol': 'llama3.2:latest',
   'renewal-review': 'llama3.2:latest',
   'document-search': 'llama3.2:latest',

@@ -101,27 +101,27 @@ const AGENT_PACKS = [
   {
     id: "underwriting",
     name: "Underwriting Pack",
-    description: "Quote generation, coverage validation, ACORD parsing, submission intake.",
+    description: "Quote generation, policy comparison, ACORD form extraction, coverage validation, endorsement intelligence, risk appetite matching, and 4 more underwriting tools.",
   },
   {
     id: "claims",
     name: "Claims Pack",
-    description: "FNOL intelligence, claims adjudication, fraud flag review.",
+    description: "FNOL intake and analysis, carrier claims intake, adjudication engine, fraud detection, and subrogation recovery.",
   },
   {
     id: "distribution",
     name: "Distribution Pack",
-    description: "Policy comparison, document retrieval, renewal packets.",
+    description: "Document retrieval, renewal review, broker advisory, client communication generator, and loss run reporting.",
   },
   {
-    id: "compliance",
-    name: "Compliance Pack",
-    description: "Compliance checks, COI issuance, regulatory validation.",
+    id: "mga",
+    name: "MGA Pack",
+    description: "Binding authority management, program underwriting, bordereaux generation, capacity matching, producer management, and treaty compliance.",
   },
   {
-    id: "agentic-rag",
-    name: "Agentic RAG Add-On",
-    description: "Retrieval-augmented generation over carrier and policy docs.",
+    id: "carrier",
+    name: "Carrier Pack",
+    description: "Submission intake and triage, risk scoring, actuarial pricing, claims adjudication, fraud detection, subrogation, policy issuance, and reinsurance management.",
   },
 ] as const;
 
@@ -573,6 +573,15 @@ export default function Signup() {
         };
       }
 
+      if (signupJson?.created_needs_verification) {
+        setCompleted(true);
+        toast({
+          title: "Account created",
+          description: "Your account has been created. Please sign in to continue.",
+        });
+        return;
+      }
+
       const signedUpUserId = signupJson?.user?.id as string | undefined;
       const accessToken = signupJson?.access_token as string | undefined;
       const refreshToken = signupJson?.refresh_token as string | undefined;
@@ -640,13 +649,19 @@ export default function Signup() {
       } else if (rawMessage.includes("password")) {
         friendlyMessage = `Password does not meet security requirements. Use ${LIMITS.password.min}-${LIMITS.password.max} characters with uppercase, lowercase, number, and special character.`;
       } else if (errStatus === 500 || rawMessage.includes("internal error") || rawMessage.includes("database error")) {
-        friendlyMessage = "Signup failed due to a server error. Please try again in a moment.";
+        friendlyMessage = "A server error occurred. Your account may have already been created — try signing in. If that fails, please try again.";
       } else {
         friendlyMessage = error?.message ?? "Something went wrong while creating your tenant.";
       }
 
       toast({
-        title: isDuplicateEmail ? "Email already in use" : "Onboarding failed",
+        title: isDuplicateEmail
+          ? "Email already in use"
+          : isSeatLimit
+          ? "Seat limit reached"
+          : isPackLimit
+          ? "Pack limit reached"
+          : "Onboarding failed",
         description: friendlyMessage,
         variant: "destructive",
       });

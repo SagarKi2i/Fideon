@@ -1,4 +1,4 @@
-export interface InsuranceModel {
+﻿export interface InsuranceModel {
   id: string;
   name: string;
   description: string;
@@ -56,7 +56,7 @@ export const brokerModels: InsuranceModel[] = [
     segment: "broker"
   },
   {
-    id: "acord-parser",
+    id: "acord_form_understanding",
     name: "ACORD Form Understanding",
     description: "Parse and extract data from ACORD 25, 27, 80, 85, 90, 125, 126, 140",
     icon: "file-text",
@@ -142,6 +142,15 @@ export const brokerModels: InsuranceModel[] = [
     description: "Provide premium ranges and deductible impact analysis",
     icon: "calculator",
     category: "Pricing",
+    domain: "insurance",
+    segment: "broker"
+  },
+  {
+    id: "loss-run-reporting",
+    name: "Loss Run Reporting",
+    description: "Ingest carrier loss runs, consolidate 5-year claims history, and generate underwriter-ready reports",
+    icon: "activity",
+    category: "Analytics",
     domain: "insurance",
     segment: "broker"
   }
