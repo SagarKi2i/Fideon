@@ -56,6 +56,8 @@ contextBridge.exposeInMainWorld("electron", {
     ) => ipcRenderer.invoke("webhooks:update", accessToken, id, patch),
     delete: (accessToken: string, id: string) => ipcRenderer.invoke("webhooks:delete", accessToken, id),
     rotateSecret: (accessToken: string, id: string) => ipcRenderer.invoke("webhooks:rotateSecret", accessToken, id),
+    testEvent: (accessToken: string, eventType: string, payload: Record<string, unknown>) =>
+      ipcRenderer.invoke("webhooks:testEvent", accessToken, eventType, payload),
   },
 
   model: {
