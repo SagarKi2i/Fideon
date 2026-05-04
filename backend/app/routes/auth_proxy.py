@@ -265,7 +265,7 @@ async def signup(request: Request):
         )
 
     result = resp.json() if resp.content else {}
-    if not resp.ok:
+    if not resp.is_success:
         # GoTrue uses different keys depending on version: "msg", "message", "error_description", "error".
         raw_msg: str = (
             result.get("msg")
