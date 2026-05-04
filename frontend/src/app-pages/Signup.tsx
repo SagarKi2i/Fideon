@@ -649,7 +649,7 @@ export default function Signup() {
       } else if (rawMessage.includes("password")) {
         friendlyMessage = `Password does not meet security requirements. Use ${LIMITS.password.min}-${LIMITS.password.max} characters with uppercase, lowercase, number, and special character.`;
       } else if (errStatus === 500 || rawMessage.includes("internal error") || rawMessage.includes("database error")) {
-        friendlyMessage = "Signup failed due to a server error. Please try again in a moment.";
+        friendlyMessage = "A server error occurred. Your account may have already been created — try signing in. If that fails, please try again.";
       } else {
         friendlyMessage = error?.message ?? "Something went wrong while creating your tenant.";
       }

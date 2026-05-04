@@ -11,7 +11,7 @@ from urllib.parse import quote
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 
-from app.core.config import SUPABASE_ANON_KEY, SUPABASE_URL
+from app.core.config import SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL
 from app.core.limiter import limiter
 from app.core.supabase import (
     insert_auth_audit_row,
@@ -310,6 +310,26 @@ async def signup(request: Request):
                 )
                 if existing:
                     return {"created_needs_verification": True, "email": email}
+            except Exception:
+                pass
+
+            # Final fallback: check auth.users directly via the GoTrue admin API.
+            # Catches the case where auth.users was committed but the app_users
+            # trigger failed, leaving no row in app_users for the check above.
+            try:
+                async with httpx.AsyncClient(timeout=5) as admin_client:
+                    admin_resp = await admin_client.get(
+                        f"{SUPABASE_URL}/auth/v1/admin/users",
+                        headers={
+                            "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                        },
+                        params={"email": email, "per_page": "1"},
+                    )
+                if admin_resp.status_code == 200:
+                    users_list = (admin_resp.json() or {}).get("users") or []
+                    if any(str(u.get("email") or "").lower() == email for u in users_list):
+                        return {"created_needs_verification": True, "email": email}
             except Exception:
                 pass
 
