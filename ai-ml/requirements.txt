@@ -1,7 +1,9 @@
 # =============================================================================
 # Fideon RunPod Server — Python dependencies
-# Python 3.12  |  RunPod GPU environment (CUDA 12.x / H100)
+# Python 3.11  |  RunPod GPU environment (CUDA 12.4 / H100)
 # =============================================================================
+# PyTorch CUDA wheels — must come from PyTorch index, not PyPI
+--extra-index-url https://download.pytorch.org/whl/cu124
 
 # -----------------------------------------------------------------------------
 # Web server
@@ -21,17 +23,19 @@ numpy==2.4.4
 
 # -----------------------------------------------------------------------------
 # Surya OCR — text detection + recognition
-# NOTE: 0.6.x uses function-based API (batch_text_detection / batch_recognition)
-# DO NOT upgrade to 0.17.x without updating surya_runner.py and extractor.py
+# 0.17.x requires torch>=2.7.0 and transformers>=4.56.1
 # -----------------------------------------------------------------------------
 surya-ocr==0.17.1
 
 # -----------------------------------------------------------------------------
 # Qwen2-VL — vision-language field extraction + fine-tuning base model
+# torch 2.7.0 is the minimum required by surya-ocr==0.17.1
+# torchvision must match torch major.minor (2.7 → 0.22)
+# transformers 4.56.2 satisfies surya-ocr (>=4.56.1) and trl (>=4.56.2)
 # -----------------------------------------------------------------------------
-torch==2.11.0
-torchvision==0.26.0
-transformers==5.5.3
+torch==2.7.0
+torchvision==0.22.0
+transformers==4.56.2
 accelerate==1.13.0
 qwen-vl-utils>=0.0.8
 
