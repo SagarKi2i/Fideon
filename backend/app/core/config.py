@@ -127,6 +127,13 @@ DEVICE_OFFLINE_DETECTOR_ENABLED = _env_bool("DEVICE_OFFLINE_DETECTOR_ENABLED", d
 DEVICE_OFFLINE_AFTER_SECONDS = _env_float("DEVICE_OFFLINE_AFTER_SECONDS", default=180.0)
 DEVICE_OFFLINE_DETECTOR_POLL_SECONDS = _env_float("DEVICE_OFFLINE_DETECTOR_POLL_SECONDS", default=30.0)
 
+# Device sync orchestrator — model distribution pipeline (FNF-193)
+# Polls for online devices with undownloaded models and emits realtime sync events.
+DEVICE_SYNC_ORCHESTRATOR_ENABLED = _env_bool("DEVICE_SYNC_ORCHESTRATOR_ENABLED", default=True)
+DEVICE_SYNC_ORCHESTRATOR_POLL_SECONDS = _env_float("DEVICE_SYNC_ORCHESTRATOR_POLL_SECONDS", default=120.0)
+# Minimum gap between sync notifications for the same device to avoid log spam.
+DEVICE_SYNC_MIN_GAP_SECONDS = _env_float("DEVICE_SYNC_MIN_GAP_SECONDS", default=300.0)
+
 # SSH: optional — if RUNPOD_SSH_HOST is set, orchestrator runs RUNPOD_REMOTE_START_SCRIPT on the pod.
 # Prefer RUNPOD_*; aliases SSH_HOST, SSH_PORT, SSH_USER, SSH_KEY_PATH (control_server / llm-gateway style).
 RUNPOD_SSH_HOST = os.getenv("RUNPOD_SSH_HOST", "").strip()

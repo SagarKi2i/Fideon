@@ -573,6 +573,15 @@ export default function Signup() {
         };
       }
 
+      if (signupJson?.created_needs_verification) {
+        setCompleted(true);
+        toast({
+          title: "Account created",
+          description: "Your account has been created. Please sign in to continue.",
+        });
+        return;
+      }
+
       const signedUpUserId = signupJson?.user?.id as string | undefined;
       const accessToken = signupJson?.access_token as string | undefined;
       const refreshToken = signupJson?.refresh_token as string | undefined;
@@ -646,7 +655,13 @@ export default function Signup() {
       }
 
       toast({
-        title: isDuplicateEmail ? "Email already in use" : "Onboarding failed",
+        title: isDuplicateEmail
+          ? "Email already in use"
+          : isSeatLimit
+          ? "Seat limit reached"
+          : isPackLimit
+          ? "Pack limit reached"
+          : "Onboarding failed",
         description: friendlyMessage,
         variant: "destructive",
       });

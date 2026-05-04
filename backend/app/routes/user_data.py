@@ -144,6 +144,28 @@ async def create_workflow(
     return {"workflow": rows[0] if rows else None}
 
 
+@router.patch("/api/v1/workflows/{workflow_id}")
+async def update_workflow(
+    workflow_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+):
+    uid = await _uid(authorization)
+    body = await request.json()
+    allowed = {"title", "description", "sop_text", "category", "parsed_steps"}
+    patch: Dict[str, Any] = {k: v for k, v in body.items() if k in allowed}
+    if not patch:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    if "title" in patch and not str(patch["title"]).strip():
+        raise HTTPException(status_code=400, detail="title cannot be empty")
+    await postgrest_patch(
+        "workflows",
+        f"id=eq.{quote(workflow_id, safe='')}&user_id=eq.{quote(uid, safe='')}",
+        patch,
+    )
+    return {"success": True}
+
+
 @router.delete("/api/v1/workflows/{workflow_id}")
 async def delete_workflow(
     workflow_id: str,
@@ -155,6 +177,67 @@ async def delete_workflow(
         f"id=eq.{quote(workflow_id, safe='')}&user_id=eq.{quote(uid, safe='')}",
     )
     return {"success": True}
+
+
+@router.get("/api/v1/workflows/{workflow_id}/versions")
+async def list_workflow_versions(
+    workflow_id: str,
+    authorization: Optional[str] = Header(default=None),
+):
+    uid = await _uid(authorization)
+    # Verify ownership
+    rows = await postgrest_get(
+        "workflows",
+        f"select=id&id=eq.{quote(workflow_id, safe='')}&user_id=eq.{quote(uid, safe='')}&limit=1",
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    versions = await postgrest_get(
+        "workflow_versions",
+        f"select=id,version_number,title,description,sop_text,category,parsed_steps,created_at"
+        f"&workflow_id=eq.{quote(workflow_id, safe='')}"
+        f"&order=version_number.desc&limit=10",
+    )
+    return {"versions": versions}
+
+
+@router.post("/api/v1/workflows/{workflow_id}/restore/{version_number}")
+async def restore_workflow_version(
+    workflow_id: str,
+    version_number: int,
+    authorization: Optional[str] = Header(default=None),
+):
+    uid = await _uid(authorization)
+    # Verify ownership
+    wf_rows = await postgrest_get(
+        "workflows",
+        f"select=id&id=eq.{quote(workflow_id, safe='')}&user_id=eq.{quote(uid, safe='')}&limit=1",
+    )
+    if not wf_rows:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    # Fetch the requested version
+    ver_rows = await postgrest_get(
+        "workflow_versions",
+        f"select=title,description,sop_text,category,parsed_steps"
+        f"&workflow_id=eq.{quote(workflow_id, safe='')}"
+        f"&version_number=eq.{version_number}&limit=1",
+    )
+    if not ver_rows:
+        raise HTTPException(status_code=404, detail="Version not found")
+    ver = ver_rows[0]
+    # Patch the workflow (the DB trigger will snapshot current state first)
+    await postgrest_patch(
+        "workflows",
+        f"id=eq.{quote(workflow_id, safe='')}&user_id=eq.{quote(uid, safe='')}",
+        {
+            "title": ver["title"],
+            "description": ver.get("description"),
+            "sop_text": ver["sop_text"],
+            "category": ver.get("category"),
+            "parsed_steps": ver.get("parsed_steps", []),
+        },
+    )
+    return {"success": True, "restored_to_version": version_number}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
