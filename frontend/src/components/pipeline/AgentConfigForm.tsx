@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+﻿import { useState, useEffect } from "react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -471,7 +471,7 @@ export const AGENT_REGISTRY: { id: string; name: string; category: string; descr
   { id: "policy-comparison", name: "Policy Comparison", category: "Broker", description: "Side-by-side policy analysis with gap detection" },
   { id: "quote-generation", name: "Quote Generation", category: "Broker", description: "Multi-carrier quote fetching & comparison" },
   { id: "claims-fnol", name: "Claims FNOL", category: "Broker", description: "First Notice of Loss intake & analysis" },
-  { id: "acord-parser", name: "ACORD Parser", category: "Broker", description: "Parse ACORD forms and extract structured data" },
+  { id: "acord_form_understanding", name: "ACORD Parser", category: "Broker", description: "Parse ACORD forms and extract structured data" },
   { id: "carrier-submission-intake", name: "Submission Intake", category: "Carrier", description: "Analyze submissions with appetite matching" },
   { id: "carrier-claims-adjudication", name: "Claims Adjudication", category: "Carrier", description: "Claim analysis with reserve & fraud detection" },
   { id: "carrier-fraud-detection", name: "Fraud Detection", category: "Carrier", description: "Analyze claims for fraud indicators" },

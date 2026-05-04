@@ -15,10 +15,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { 
-  Building2, 
-  FolderOpen, 
-  Settings as SettingsIcon, 
+import {
+  Building2,
+  FolderOpen,
+  Settings as SettingsIcon,
   Shield,
   CheckCircle2,
   AlertCircle,
@@ -28,6 +28,7 @@ import {
   Eye,
   EyeOff,
   Pencil,
+  Plus,
   Sparkles,
   RotateCcw,
   DollarSign,
@@ -49,13 +50,23 @@ import { WebhooksSettingsPanel } from "@/components/settings/WebhooksSettingsPan
 import { DeviceLinkPanel } from "@/components/settings/DeviceLinkPanel";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
+  addCustomCarrier,
+  connectCarrier,
   createPersonalApiKey,
+  deleteCustomCarrier,
+  disconnectCarrier,
+  fetchCarrierConnections,
+  fetchCustomCarriers,
   fetchPersonalApiKeys,
   fetchSettingsProfile,
   revokePersonalApiKey,
+  updateCarrierCredentials,
+  updateCustomCarrier,
   updateSettingsProfile,
+  type CarrierConnectionRow,
   type PersonalApiKeyRow,
   type SettingsPreferences,
+  type TenantCarrierRow,
 } from "@/lib/settingsApi";
 
 // Import AMS logos
@@ -78,6 +89,7 @@ interface CarrierCredential {
   connected: boolean;
   lastSync?: string;
   credentials?: CarrierCredentialData;
+  isCustom?: boolean;
 }
 
 interface AMSSystem {
@@ -96,18 +108,63 @@ const logoSrc = (logo: string | { src: string }) => (typeof logo === "string" ? 
 const getConnectionStatusCardClass = (connected: boolean): string =>
   connected ? "border-primary/50 bg-primary/5" : "border-border hover:border-primary/30";
 
-const carriers: CarrierCredential[] = [
-  { id: "travelers", name: "Travelers", logo: "🏢", connected: false },
-  { id: "hartford", name: "The Hartford", logo: "🦌", connected: false },
-  { id: "chubb", name: "Chubb", logo: "🛡️", connected: true, lastSync: "2 hours ago", credentials: { username: "user@agency.com", password: "••••••••", enterpriseId: "ENT-12345" } },
-  { id: "liberty-mutual", name: "Liberty Mutual", logo: "🗽", connected: false },
-  { id: "nationwide", name: "Nationwide", logo: "🏠", connected: true, lastSync: "1 day ago", credentials: { username: "agent@nationwide.com", password: "••••••••", enterpriseId: "NW-67890" } },
-  { id: "progressive", name: "Progressive Commercial", logo: "📊", connected: false },
-  { id: "amtrust", name: "AmTrust", logo: "💼", connected: false },
-  { id: "markel", name: "Markel", logo: "📈", connected: false },
-  { id: "berkshire", name: "Berkshire Hathaway", logo: "🏛️", connected: false },
-  { id: "zurich", name: "Zurich", logo: "🏔️", connected: false },
+// Static carrier metadata — names and logos only. Connection state comes from the API.
+const CARRIER_METADATA: Pick<CarrierCredential, "id" | "name" | "logo">[] = [
+  { id: "travelers",        name: "Travelers",             logo: "🏢" },
+  { id: "hartford",         name: "The Hartford",          logo: "🦌" },
+  { id: "chubb",            name: "Chubb",                 logo: "🛡️" },
+  { id: "liberty-mutual",   name: "Liberty Mutual",        logo: "🗽" },
+  { id: "nationwide",       name: "Nationwide",            logo: "🏠" },
+  { id: "progressive",      name: "Progressive Commercial",logo: "📊" },
+  { id: "amtrust",          name: "AmTrust",               logo: "💼" },
+  { id: "markel",           name: "Markel",                logo: "📈" },
+  { id: "berkshire",        name: "Berkshire Hathaway",    logo: "🏛️" },
+  { id: "zurich",           name: "Zurich",                logo: "🏔️" },
 ];
+
+function timeAgo(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 1)  return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24)  return `${hrs} hour${hrs > 1 ? "s" : ""} ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days} day${days > 1 ? "s" : ""} ago`;
+}
+
+function mergeCarriers(
+  connections: CarrierConnectionRow[],
+  customMeta: TenantCarrierRow[],
+): CarrierCredential[] {
+  const connMap = new Map(connections.map((c) => [c.carrier_id, c]));
+
+  const toCredential = (
+    id: string,
+    name: string,
+    logo: string,
+    isCustom: boolean,
+  ): CarrierCredential => {
+    const conn = connMap.get(id);
+    if (!conn) return { id, name, logo, connected: false, isCustom };
+    return {
+      id, name, logo, isCustom,
+      connected: true,
+      lastSync: conn.last_synced_at
+        ? timeAgo(conn.last_synced_at)
+        : `connected ${timeAgo(conn.connected_at)}`,
+      credentials: {
+        username:     conn.username,
+        password:     "••••••••",
+        enterpriseId: conn.enterprise_id ?? "",
+      },
+    };
+  };
+
+  const fixed  = CARRIER_METADATA.map((m) => toCredential(m.id, m.name, m.logo, false));
+  const custom = customMeta.map((m) => toCredential(m.carrier_id, m.name, m.logo, true));
+  return [...fixed, ...custom];
+}
 
 const amsSystemsList: AMSSystem[] = [
   { 
@@ -151,7 +208,11 @@ export default function Settings() {
   const { toast } = useToast();
   const { role, isAdmin } = useUserRole();
   const { settings: workflowSettings, updateSettings: updateWorkflowSettings, resetToDefaults, DEFAULT_SETTINGS } = useWorkflowSettings();
-  const [carrierCredentials, setCarrierCredentials] = useState(carriers);
+  const [carrierCredentials, setCarrierCredentials] = useState<CarrierCredential[]>(() => mergeCarriers([], []));
+  const [isCarrierLoading, setIsCarrierLoading] = useState(false);
+  const [isAddCarrierModalOpen, setIsAddCarrierModalOpen] = useState(false);
+  const [addCarrierForm, setAddCarrierForm] = useState({ name: "", logo: "" });
+  const [isAddingCarrier, setIsAddingCarrier] = useState(false);
   const [amsSystems, setAmsSystems] = useState(amsSystemsList);
   
   // Carrier credential modal state
@@ -189,6 +250,22 @@ export default function Settings() {
   const [isApiKeyLoading, setIsApiKeyLoading] = useState(false);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
 
+  const loadCarrierConnections = useCallback(async () => {
+    try {
+      setIsCarrierLoading(true);
+      const [connections, custom] = await Promise.all([
+        fetchCarrierConnections(),
+        fetchCustomCarriers(),
+      ]);
+      setCarrierCredentials(mergeCarriers(connections, custom));
+    } catch (error) {
+      console.error("Failed to load carrier connections:", error);
+      toast({ title: "Unable to load carriers", description: "Please refresh and try again.", variant: "destructive" });
+    } finally {
+      setIsCarrierLoading(false);
+    }
+  }, [toast]);
+
   const loadAccountSettings = useCallback(async () => {
     try {
       setIsInitialLoading(true);
@@ -216,7 +293,8 @@ export default function Settings() {
 
   useEffect(() => {
     void loadAccountSettings();
-  }, [loadAccountSettings]);
+    if (isAdmin) void loadCarrierConnections();
+  }, [loadAccountSettings, loadCarrierConnections, isAdmin]);
 
   const openCredentialModal = (carrier: CarrierCredential, editing: boolean = false) => {
     setSelectedCarrier(carrier);
@@ -234,58 +312,82 @@ export default function Settings() {
     setIsCredentialModalOpen(true);
   };
 
-  const handleCredentialSubmit = () => {
+  const handleCredentialSubmit = async () => {
     if (!selectedCarrier) return;
-    
+
     if (!credentialForm.username.trim() || !credentialForm.password.trim()) {
-      toast({
-        title: "Validation Error",
-        description: "Username and password are required",
-        variant: "destructive",
-      });
+      toast({ title: "Validation Error", description: "Username and password are required", variant: "destructive" });
       return;
     }
 
-    setCarrierCredentials(prev => 
-      prev.map((c: any) => 
-        c.id === selectedCarrier.id 
-          ? { 
-              ...c, 
-              connected: true, 
-              lastSync: "Just now",
-              credentials: {
-                username: credentialForm.username,
-                password: "••••••••",
-                enterpriseId: credentialForm.enterpriseId
-              }
-            }
-          : c
-      )
-    );
-    
-    toast({
-      title: isEditing ? "Credentials Updated" : "Connected",
-      description: `${selectedCarrier.name} ${isEditing ? "credentials updated" : "connected"} successfully`,
-    });
-    
-    setIsCredentialModalOpen(false);
-    setSelectedCarrier(null);
-    setCredentialForm({ username: "", password: "", enterpriseId: "" });
+    try {
+      if (isEditing) {
+        await updateCarrierCredentials(
+          selectedCarrier.id,
+          credentialForm.username,
+          credentialForm.password,
+          credentialForm.enterpriseId,
+        );
+      } else {
+        await connectCarrier(
+          selectedCarrier.id,
+          credentialForm.username,
+          credentialForm.password,
+          credentialForm.enterpriseId,
+        );
+      }
+      toast({
+        title: isEditing ? "Credentials Updated" : "Connected",
+        description: `${selectedCarrier.name} ${isEditing ? "credentials updated" : "connected"} successfully`,
+      });
+      setIsCredentialModalOpen(false);
+      setSelectedCarrier(null);
+      setCredentialForm({ username: "", password: "", enterpriseId: "" });
+      await loadCarrierConnections();
+    } catch (err) {
+      toast({ title: "Error", description: (err as Error).message, variant: "destructive" });
+    }
   };
 
-  const handleCarrierDisconnect = (carrierId: string) => {
-    const carrier = carrierCredentials.find((c: any) => c.id === carrierId);
-    setCarrierCredentials(prev => 
-      prev.map((c: any) => 
-        c.id === carrierId 
-          ? { ...c, connected: false, lastSync: undefined, credentials: undefined }
-          : c
-      )
-    );
-    toast({
-      title: "Disconnected",
-      description: `${carrier?.name} disconnected successfully`,
-    });
+  const handleCarrierDisconnect = async (carrierId: string) => {
+    const carrier = carrierCredentials.find((c) => c.id === carrierId);
+    try {
+      await disconnectCarrier(carrierId);
+      toast({ title: "Disconnected", description: `${carrier?.name} disconnected successfully` });
+      await loadCarrierConnections();
+    } catch (err) {
+      toast({ title: "Error", description: (err as Error).message, variant: "destructive" });
+    }
+  };
+
+  const handleAddCustomCarrier = async () => {
+    if (!addCarrierForm.name.trim()) {
+      toast({ title: "Validation Error", description: "Carrier name is required", variant: "destructive" });
+      return;
+    }
+    try {
+      setIsAddingCarrier(true);
+      await addCustomCarrier(addCarrierForm.name.trim(), addCarrierForm.logo.trim() || "🏢");
+      toast({ title: "Carrier Added", description: `${addCarrierForm.name} added to your carriers` });
+      setIsAddCarrierModalOpen(false);
+      setAddCarrierForm({ name: "", logo: "" });
+      await loadCarrierConnections();
+    } catch (err) {
+      toast({ title: "Error", description: (err as Error).message, variant: "destructive" });
+    } finally {
+      setIsAddingCarrier(false);
+    }
+  };
+
+  const handleDeleteCustomCarrier = async (carrierId: string) => {
+    const carrier = carrierCredentials.find((c) => c.id === carrierId);
+    try {
+      await deleteCustomCarrier(carrierId);
+      toast({ title: "Carrier Removed", description: `${carrier?.name} removed successfully` });
+      await loadCarrierConnections();
+    } catch (err) {
+      toast({ title: "Error", description: (err as Error).message, variant: "destructive" });
+    }
   };
 
   const handleAMSConnect = (amsId: string) => {
@@ -463,13 +565,15 @@ export default function Settings() {
         </p>
       </div>
 
-      <Tabs defaultValue="carriers" className="space-y-4">
+      <Tabs defaultValue={isAdmin ? "carriers" : "general"} className="space-y-4">
         <TabsList className="bg-muted flex-wrap h-auto gap-1">
-          <TabsTrigger value="carriers" className="flex items-center gap-2">
-            <Building2 className="h-4 w-4" />
-            <span className="hidden sm:inline">Carriers</span>
-            <Badge variant="secondary" className="ml-1">{connectedCarriers}</Badge>
-          </TabsTrigger>
+          {isAdmin && (
+            <TabsTrigger value="carriers" className="flex items-center gap-2">
+              <Building2 className="h-4 w-4" />
+              <span className="hidden sm:inline">Carriers</span>
+              <Badge variant="secondary" className="ml-1">{connectedCarriers}</Badge>
+            </TabsTrigger>
+          )}
           <TabsTrigger value="ams" className="flex items-center gap-2">
             <FolderOpen className="h-4 w-4" />
             <span className="hidden sm:inline">AMS Systems</span>
@@ -495,19 +599,39 @@ export default function Settings() {
           )}
         </TabsList>
 
-        {/* Carrier Credentials Tab */}
+        {/* Carrier Credentials Tab — admin / global_admin only */}
+        {isAdmin && (
         <TabsContent value="carriers" className="space-y-4">
           <Card className="bg-card border-border shadow-card">
             <CardHeader>
-              <CardTitle className="text-card-foreground flex items-center gap-2">
-                <Building2 className="h-5 w-5 text-primary" />
-                Carrier Credentials
-              </CardTitle>
-              <CardDescription>
-                Connect to carrier portals with your username, password, and enterprise ID
-              </CardDescription>
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <CardTitle className="text-card-foreground flex items-center gap-2">
+                    <Building2 className="h-5 w-5 text-primary" />
+                    Carrier Credentials
+                  </CardTitle>
+                  <CardDescription className="mt-1">
+                    Connect to carrier portals with your username, password, and enterprise ID
+                  </CardDescription>
+                </div>
+                <Button
+                  size="sm"
+                  className="bg-gradient-primary shrink-0"
+                  onClick={() => { setAddCarrierForm({ name: "", logo: "" }); setIsAddCarrierModalOpen(true); }}
+                >
+                  <Plus className="h-4 w-4 mr-1" />
+                  Add Carrier
+                </Button>
+              </div>
             </CardHeader>
             <CardContent>
+              {isCarrierLoading ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {Array.from({ length: 6 }).map((_, i) => (
+                    <Skeleton key={i} className="h-24 w-full rounded-lg" />
+                  ))}
+                </div>
+              ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {carrierCredentials.map((carrier: any) => (
                   <Card 
@@ -517,9 +641,20 @@ export default function Settings() {
                     <CardContent className="p-4">
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-3">
-                          <div className="text-3xl">{carrier.logo}</div>
+                          <div className="shrink-0">
+                            {carrier.logo.startsWith("http") ? (
+                              <img src={carrier.logo} alt={carrier.name} className="h-10 w-10 object-contain rounded" />
+                            ) : (
+                              <div className="text-3xl">{carrier.logo || "🏢"}</div>
+                            )}
+                          </div>
                           <div>
-                            <p className="font-medium text-foreground">{carrier.name}</p>
+                            <div className="flex items-center gap-1.5">
+                              <p className="font-medium text-foreground">{carrier.name}</p>
+                              {carrier.isCustom && (
+                                <Badge variant="secondary" className="text-xs px-1.5 py-0">Custom</Badge>
+                              )}
+                            </div>
                             {carrier.connected && carrier.credentials && (
                               <p className="text-xs text-muted-foreground">
                                 {carrier.credentials.username}
@@ -561,6 +696,17 @@ export default function Settings() {
                               Connect
                             </Button>
                           )}
+                          {carrier.isCustom && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => handleDeleteCustomCarrier(carrier.id)}
+                              title="Remove this carrier"
+                              className="text-destructive hover:text-destructive"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          )}
                         </div>
                       </div>
                       
@@ -584,6 +730,7 @@ export default function Settings() {
                   </Card>
                 ))}
               </div>
+              )}
             </CardContent>
           </Card>
 
@@ -621,6 +768,7 @@ export default function Settings() {
             </CardContent>
           </Card>
         </TabsContent>
+        )}
 
         {/* AMS Systems Tab */}
         <TabsContent value="ams" className="space-y-4">
@@ -1295,6 +1443,71 @@ export default function Settings() {
             <Button onClick={handleCredentialSubmit} className="bg-gradient-primary">
               <Key className="h-4 w-4 mr-2" />
               {isEditing ? "Update Credentials" : "Connect"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add Custom Carrier Modal */}
+      <Dialog open={isAddCarrierModalOpen} onOpenChange={setIsAddCarrierModalOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Plus className="h-5 w-5 text-primary" />
+              Add Custom Carrier
+            </DialogTitle>
+            <DialogDescription>
+              Add a carrier specific to your organization. Only users in your tenant will see it.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="custom-carrier-name">Carrier Name <span className="text-destructive">*</span></Label>
+              <Input
+                id="custom-carrier-name"
+                placeholder="e.g. State Farm"
+                value={addCarrierForm.name}
+                onChange={(e) => setAddCarrierForm((prev) => ({ ...prev, name: e.target.value }))}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="custom-carrier-logo">Logo Emoji <span className="text-muted-foreground text-xs">(optional)</span></Label>
+              <Input
+                id="custom-carrier-logo"
+                placeholder="🏢"
+                value={addCarrierForm.logo}
+                onChange={(e) => setAddCarrierForm((prev) => ({ ...prev, logo: e.target.value }))}
+              />
+              <p className="text-xs text-muted-foreground">
+                Paste an emoji to represent this carrier. Leave blank to use the default 🏢.
+              </p>
+            </div>
+
+            {/* Preview */}
+            {addCarrierForm.name && (
+              <div className="flex items-center gap-3 p-3 rounded-lg border border-border bg-muted/30">
+                <div className="text-2xl">{addCarrierForm.logo || "🏢"}</div>
+                <div>
+                  <p className="font-medium text-sm">{addCarrierForm.name}</p>
+                  <Badge variant="secondary" className="text-xs px-1.5 py-0 mt-0.5">Custom</Badge>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button variant="outline" onClick={() => setIsAddCarrierModalOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleAddCustomCarrier}
+              disabled={isAddingCarrier || !addCarrierForm.name.trim()}
+              className="bg-gradient-primary"
+            >
+              <Plus className="h-4 w-4 mr-2" />
+              {isAddingCarrier ? "Adding..." : "Add Carrier"}
             </Button>
           </DialogFooter>
         </DialogContent>

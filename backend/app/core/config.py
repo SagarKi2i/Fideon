@@ -217,6 +217,12 @@ LLM_SEMANTIC_CACHE_ENABLED = os.getenv("LLM_SEMANTIC_CACHE_ENABLED", "false")
 # Keep this value stable across deploys so existing key hashes remain valid.
 PERSONAL_API_KEY_PEPPER = os.getenv("PERSONAL_API_KEY_PEPPER", "")
 
+# Carrier credentials
+# Used to Fernet-encrypt carrier portal passwords before storing in DB.
+# Must be a stable, high-entropy secret — rotate with care (existing rows become unreadable).
+# Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+CARRIER_CREDENTIAL_ENCRYPTION_KEY = os.getenv("CARRIER_CREDENTIAL_ENCRYPTION_KEY", "").strip()
+
 # Webhooks
 # Used to encrypt webhook signing secrets at rest in DB.
 # Must be a stable, high-entropy secret (recommended: 32 urlsafe base64 bytes).

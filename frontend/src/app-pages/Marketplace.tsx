@@ -1,4 +1,4 @@
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+﻿import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -70,7 +70,7 @@ function getModelVersion(modelId: string): string {
     "policy-comparison": "v2.0",
     "document-retrieval": "v2.3",
     "claims-fnol": "v1.9",
-    "acord-parser": "v2.2",
+    "acord_form_understanding": "v2.2",
     "carrier-submission-intake": "v1.7",
     "carrier-claims-adjudication": "v1.8",
   };
