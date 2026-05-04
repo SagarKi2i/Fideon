@@ -157,6 +157,22 @@ def _load_eval_examples_from_config(config: Dict[str, Any]) -> List[Dict[str, An
     return examples
 
 
+def _evict_old_seaweedfs_caches(cache_root: Path, keep_version: int) -> None:
+    """Delete all finetuned/v{N}/ cache dirs except the one we're about to use."""
+    if not cache_root.exists():
+        return
+    for d in cache_root.iterdir():
+        if not d.is_dir() or not d.name.startswith("v"):
+            continue
+        try:
+            v = int(d.name[1:])
+        except ValueError:
+            continue
+        if v != keep_version:
+            shutil.rmtree(d, ignore_errors=True)
+            print(f"[job_runner] Evicted old SeaweedFS cache: {d}")
+
+
 def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Optional[Path] = None) -> str:
     """
     Return the base model path to train from, in priority order:
@@ -211,6 +227,7 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
 
         if _cache_is_complete(cache_path):
             print(f"[job_runner] Using cached SeaweedFS model v{seaweed_version}: {cache_dir}")
+            _evict_old_seaweedfs_caches(cache_path.parent, keep_version=seaweed_version)
             return cache_dir
         if cache_path.exists():
             print(f"[job_runner] Cached model v{seaweed_version} is incomplete — deleting and re-downloading …")
@@ -229,6 +246,7 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
             try:
                 seaweed.download_finetuned_model(seaweed_version, cache_dir)
                 print(f"[job_runner] SeaweedFS model v{seaweed_version} ready at {cache_dir}")
+                _evict_old_seaweedfs_caches(cache_path.parent, keep_version=seaweed_version)
                 return cache_dir
             except Exception as exc:
                 print(f"[job_runner] SeaweedFS download failed (non-fatal): {exc}")
@@ -415,11 +433,13 @@ def run_cycle(
             gate = run_eval_gate(
                 local_result, deepeval_result, parent_scores, config, forgetting
             )
-            _update("gate_checked", gate_passed=gate.passed, eval_scores=gate.scores)
+            # Merge training metrics into eval_scores so they are available in the registry and UI
+            combined_scores = {**gate.scores, **_train_stats}
+            _update("gate_checked", gate_passed=gate.passed, eval_scores=combined_scores)
 
             print(
                 f"[job_runner] Gate: passed={gate.passed}  "
-                f"scores={gate.scores}  failures={gate.failures}"
+                f"scores={combined_scores}  failures={gate.failures}"
             )
 
             if not gate.passed:
@@ -487,7 +507,7 @@ def run_cycle(
                 version=new_version,
                 merged_model_path=merge_result.output_path,
                 adapter_path=adapter_path,
-                eval_scores=gate.scores,
+                eval_scores=combined_scores,
                 training_meta=training_meta,
             )
 
@@ -501,7 +521,7 @@ def run_cycle(
                     "version":           new_version,
                     "merged_model_path": merge_result.output_path,
                     "adapter_path":      adapter_path,
-                    "eval_scores":       gate.scores,
+                    "eval_scores":       combined_scores,
                     "training_meta":     training_meta,
                     "base_model":        base_model,
                     "created_at":        _utc_now(),
@@ -531,7 +551,7 @@ def run_cycle(
             "version":            new_version,
             "adapter_path":       adapter_path,
             "merged_model_path":  merge_result.output_path,
-            "eval_scores":        {**gate.scores, **_train_stats},
+            "eval_scores":        combined_scores,
         })
         print(f"[job_runner] Cycle complete — SLM v1.{new_version} ready. Click 'Share Gradients' to upload to SeaweedFS.")
 

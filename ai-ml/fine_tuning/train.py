@@ -67,7 +67,7 @@ def run_training(
     from peft import LoraConfig, TaskType, get_peft_model
     from transformers import (
         AutoProcessor,
-        DataCollatorForLanguageModeling,
+        DataCollatorForSeq2Seq,
         Qwen2VLForConditionalGeneration,
         TrainingArguments,
         Trainer,
@@ -90,6 +90,7 @@ def run_training(
     tokenizer = processor.tokenizer
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"
 
     # ── Load model in BF16 (H100 SXM 80 GB — no quantization needed) ─────────
     # BF16 gives full-precision LoRA gradients vs the degraded NF4 compute path.
@@ -126,6 +127,16 @@ def run_training(
         task_type=TaskType.CAUSAL_LM,
     )
     model = get_peft_model(model, lora_config)
+    
+    # Required for Gradient Checkpointing to work with LoRA
+    model.enable_input_require_grads()
+    
+    # Explicitly enable gradient checkpointing on the model
+    model.gradient_checkpointing_enable()
+    
+    # Ensure config allows gradient checkpointing
+    model.config.use_cache = False 
+    
     model.print_trainable_parameters()
 
     # ── Tokenise dataset ─────────────────────────────────────────────────────
@@ -146,28 +157,43 @@ def run_training(
     _ASSISTANT_PREFIX = "<|im_start|>assistant\n"
 
     def _tokenise(batch: Dict[str, Any]) -> Dict[str, Any]:
+        # Tokenise all texts in the batch at once
         enc = tokenizer(
             batch["text"],
             truncation=True,
             max_length=max_seq,
             padding=False,
+            add_special_tokens=False,
         )
-        labels_list = []
-        for text, input_ids in zip(batch["text"], enc["input_ids"]):
-            labels = [-100] * len(input_ids)
+        
+        all_input_ids = enc["input_ids"]
+        all_labels = []
+        
+        for i, text in enumerate(batch["text"]):
+            input_ids = all_input_ids[i]
+            # Create a label copy and mask the non-assistant parts with -100
+            labels = [int(token_id) for token_id in input_ids]
+            
+            # Find the start of the assistant turn to mask everything before it
             prefix_end = text.rfind(_ASSISTANT_PREFIX)
             if prefix_end != -1:
+                # Tokenise the prefix to know exactly how many tokens to mask
                 prefix_text = text[: prefix_end + len(_ASSISTANT_PREFIX)]
-                prefix_len = len(
-                    tokenizer(prefix_text, add_special_tokens=False)["input_ids"]
-                )
-                for i in range(prefix_len, len(input_ids)):
-                    labels[i] = input_ids[i]
-            else:
-                labels = input_ids[:]
-            labels_list.append(labels)
-        enc["labels"] = labels_list
-        return enc
+                prefix_enc = tokenizer(prefix_text, add_special_tokens=False)
+                prefix_len = len(prefix_enc["input_ids"])
+                
+                # Mask tokens from 0 to prefix_len with -100
+                for j in range(min(prefix_len, len(labels))):
+                    labels[j] = -100
+            
+            all_labels.append(labels)
+
+        # Return a plain dict of lists (required for Dataset.map to work reliably with the Trainer)
+        return {
+            "input_ids": [list(map(int, ids)) for ids in all_input_ids],
+            "attention_mask": [list(map(int, mask)) for mask in enc["attention_mask"]],
+            "labels": all_labels,
+        }
 
     hf_dataset = Dataset.from_dict({"text": texts})
     tokenised  = hf_dataset.map(_tokenise, batched=True, remove_columns=["text"])
@@ -195,7 +221,12 @@ def run_training(
         dataloader_num_workers=0,
     )
 
-    collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    collator = DataCollatorForSeq2Seq(
+        tokenizer=tokenizer,
+        model=model,
+        label_pad_token_id=-100,
+        padding=True,
+    )
     trainer  = Trainer(
         model=model,
         args=training_args,
@@ -204,6 +235,12 @@ def run_training(
     )
 
     print("[train] Starting training …")
+    if torch.cuda.is_available():
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        print(f"[train] VRAM cleared before training. Free: {torch.cuda.memory_reserved() / 1e9:.1f}GB reserved.")
+        
     train_output = trainer.train()
 
     adapter_path = output_dir

@@ -88,6 +88,19 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+async def startup_event():
+    """
+    Trigger background model warmup on startup.
+    This loads the heavy Qwen2-VL model into GPU VRAM immediately so that the
+    first extraction request doesn't time out.
+    """
+    import threading
+    from extractor import _load_qwen
+    print("[server] Triggering background model warmup...")
+    threading.Thread(target=_load_qwen, daemon=True).start()
+
+
 # ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
@@ -643,9 +656,29 @@ def finetune_job_status(job_id: str) -> Dict[str, Any]:
     """
     from fine_tuning.job_runner import get_job_status
     job = get_job_status(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Fine-tuning job '{job_id}' not found")
-    return job
+    if job:
+        return job
+
+    # Fallback: check version registry for historical jobs
+    try:
+        from fine_tuning.registry.version_registry import VersionRegistry
+        registry_path = os.getenv("VERSION_REGISTRY_PATH", "/workspace/fine_tuning/registry/version_registry.json")
+        reg = VersionRegistry(registry_path)
+        versions = reg.list_versions()
+        for v in versions:
+            if v.get("job_id") == job_id:
+                return {
+                    "job_id":      job_id,
+                    "status":      "completed" if v.get("status") == "promoted" else v.get("status"),
+                    "phase":       "done",
+                    "version":     v.get("version"),
+                    "eval_scores": v.get("eval_scores"),
+                    "finished_at": v.get("promoted_at"),
+                }
+    except Exception:
+        pass
+
+    raise HTTPException(status_code=404, detail=f"Fine-tuning job '{job_id}' not found")
 
 
 @app.get("/finetune/jobs")
@@ -798,14 +831,35 @@ def _run_federated_job(job_id: str) -> None:
         _update_fed_job(job_id, "downloading_weights", versions_aggregated=versions_available)
         print(f"[federated] Aggregating versions: {versions_available}")
 
-        # ── 2. Download all versions ─────────────────────────────────────────
+        # ── 2. Download all versions (skip any that fail — partial FedAvg is better than none) ──
         tmp_dir = Path(tempfile.mkdtemp(prefix="fedavg_"))
         try:
             model_dirs: List[str] = []
+            downloaded_versions: List[int] = []
+            skipped_versions: List[int] = []
             for v in versions_available:
                 local_dir = str(tmp_dir / f"v{v}")
-                seaweed.download_finetuned_model(v, local_dir)
-                model_dirs.append(local_dir)
+                try:
+                    seaweed.download_finetuned_model(v, local_dir)
+                    model_dirs.append(local_dir)
+                    downloaded_versions.append(v)
+                    print(f"[federated] v{v} downloaded ✓")
+                except Exception as dl_exc:
+                    print(f"[federated] WARNING: Skipping v{v} — download failed: {dl_exc}")
+                    skipped_versions.append(v)
+
+            if not model_dirs:
+                raise RuntimeError(
+                    f"All {len(versions_available)} version(s) failed to download from SeaweedFS. "
+                    f"Check that {seaweed._endpoint} is reachable from the pod. "
+                    f"Versions attempted: {versions_available}"
+                )
+
+            if skipped_versions:
+                print(
+                    f"[federated] Proceeding with {len(model_dirs)} version(s) "
+                    f"(skipped {skipped_versions} due to download errors)"
+                )
 
             # ── 3. FedAvg aggregation ─────────────────────────────────────────
             _update_fed_job(job_id, "aggregating")
@@ -859,7 +913,8 @@ def _run_federated_job(job_id: str) -> None:
                 "phase": "done",
                 "finished_at": datetime.now(timezone.utc).isoformat(),
                 "version": new_version,
-                "versions_aggregated": versions_available,
+                "versions_aggregated": downloaded_versions,
+                "versions_skipped": skipped_versions,
             })
             print(f"[federated] Aggregation complete — new version v{new_version} in SeaweedFS.")
         finally:
@@ -923,10 +978,27 @@ def _run_share_job(job_id: str, pending_entries: List[tuple]) -> None:
                 training_meta=pending.get("training_meta", {}),
                 base_model=pending.get("base_model", ""),
             )
-            # Delete only after confirmed success — next run won't re-upload
+            # Delete pending-share manifest only after confirmed upload success
             file_path.unlink(missing_ok=True)
+
+            # Delete local weight directories — they are now safely on SeaweedFS
+            import shutil as _shutil
+            _merged = Path(merged_model_path)
+            if _merged.exists():
+                _shutil.rmtree(_merged, ignore_errors=True)
+                print(f"[share-gradients] Deleted local merged model: {_merged}")
+            # GGUF dir sits next to the merged dir as {version}-gguf/
+            _gguf_dir = _merged.parent / f"{version}-gguf"
+            if _gguf_dir.exists():
+                _shutil.rmtree(_gguf_dir, ignore_errors=True)
+                print(f"[share-gradients] Deleted local GGUF dir: {_gguf_dir}")
+            _adapter = Path(adapter_path)
+            if _adapter.exists():
+                _shutil.rmtree(_adapter, ignore_errors=True)
+                print(f"[share-gradients] Deleted local adapter: {_adapter}")
+
             uploaded_versions.append(version)
-            print(f"[share-gradients] v{version} uploaded and cleared.")
+            print(f"[share-gradients] v{version} uploaded, local weights cleared.")
 
         with _share_jobs_lock:
             _share_jobs[job_id].update({
@@ -1068,6 +1140,37 @@ async def start_federated(body: Dict[str, Any] = Body(default={})) -> Dict[str, 
     from fine_tuning.seaweedfs_client import SeaweedFSClient
 
     seaweed = SeaweedFSClient()
+
+    # ── Pre-flight: verify SeaweedFS is reachable before queuing the job ────────
+    # This gives the user an immediate clear error instead of a background job
+    # that silently fails minutes later with RetriesExceededError.
+    if not seaweed._configured:
+        return {
+            "status": "error",
+            "message": "SEAWEEDFS_ENDPOINT is not configured on the pod.",
+        }
+    try:
+        import boto3
+        from botocore.config import Config as _BotoConfig
+        _probe = boto3.client(
+            "s3",
+            endpoint_url=seaweed._endpoint,
+            aws_access_key_id=seaweed._access_key,
+            aws_secret_access_key=seaweed._secret_key,
+            config=_BotoConfig(connect_timeout=8, read_timeout=8, retries={"max_attempts": 1}),
+        )
+        _probe.list_objects_v2(Bucket=seaweed._bucket, Prefix="finetuned/", MaxKeys=1)
+    except Exception as _conn_exc:
+        return {
+            "status": "seaweedfs_unreachable",
+            "message": (
+                f"Cannot reach SeaweedFS at {seaweed._endpoint} (bucket={seaweed._bucket}). "
+                f"Error: {_conn_exc}. "
+                f"Verify the pod can reach SeaweedFS: run  curl -m 8 {seaweed._endpoint}  "
+                f"from the pod terminal."
+            ),
+        }
+
     latest = seaweed.get_latest_finetuned_version()
     if latest is None:
         return {

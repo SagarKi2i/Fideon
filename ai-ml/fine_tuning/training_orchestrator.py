@@ -90,7 +90,7 @@ def _register_gguf_in_supabase(
                 return q
         return "unknown"
 
-    with httpx.Client(timeout=30) as client:
+    with httpx.Client(timeout=120) as client:
         for key in gguf_s3_keys:
             filename = key.split("/")[-1]        # e.g. "model-q5_k_m.gguf"
             local_f  = gguf_path / filename

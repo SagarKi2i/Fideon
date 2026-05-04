@@ -51,12 +51,39 @@ class SeaweedFSClient:
             ),
         )
 
+    def _download_client(self) -> Any:
+        """Boto3 client tuned for downloads: short connect timeout, no internal retries.
+        The outer per-file retry loop in download_finetuned_model handles retries instead."""
+        import boto3
+        from botocore.config import Config
+        return boto3.client(
+            "s3",
+            endpoint_url=self._endpoint,
+            aws_access_key_id=self._access_key,
+            aws_secret_access_key=self._secret_key,
+            config=Config(
+                signature_version="s3v4",
+                connect_timeout=10,
+                read_timeout=600,
+                retries={"max_attempts": 1, "mode": "standard"},
+            ),
+        )
+
     def _transfer_config(self) -> Any:
         from boto3.s3.transfer import TransferConfig
         return TransferConfig(
             multipart_threshold=_MULTIPART_THRESHOLD,
             multipart_chunksize=_MULTIPART_CHUNK,
-            max_concurrency=2,  # lower concurrency is more stable on SeaweedFS
+            max_concurrency=2,
+        )
+
+    def _download_transfer_config(self) -> Any:
+        """Single-threaded transfer for downloads — more stable over unreliable links."""
+        from boto3.s3.transfer import TransferConfig
+        return TransferConfig(
+            multipart_threshold=_MULTIPART_THRESHOLD,
+            multipart_chunksize=_MULTIPART_CHUNK,
+            max_concurrency=1,  # sequential chunks — no parallel connection storms
         )
 
     # ── Fine-tuned model (full HF weights) ───────────────────────────────────
@@ -77,7 +104,7 @@ class SeaweedFSClient:
         tc = self._transfer_config()
         files = [f for f in local.rglob("*") if f.is_file()]
         print(f"[seaweedfs] Uploading HF model ({len(files)} files) → s3://{self._bucket}/{prefix}/")
-        _RETRY_DELAYS = [30, 90]  # seconds to wait before attempt 2, 3
+        _RETRY_DELAYS = [30, 60, 120, 240]  # Increased retry window
         failed: list[str] = []
         for f in files:
             rel = f.relative_to(local)
@@ -85,19 +112,22 @@ class SeaweedFSClient:
             size_mb = f.stat().st_size // 1_000_000
             print(f"[seaweedfs]   {rel} ({size_mb} MB) …")
             last_exc: Exception | None = None
-            for attempt in range(1, 4):  # 3 attempts per file
+            for attempt in range(1, 6):  # Increased to 5 attempts per file
                 try:
                     client.upload_file(str(f), self._bucket, key, Config=tc)
                     last_exc = None
                     break
                 except Exception as exc:
                     last_exc = exc
-                    if attempt < 3:
-                        wait = _RETRY_DELAYS[attempt - 1]
-                        print(f"[seaweedfs]   Retry {attempt}/3 for {rel} (waiting {wait}s): {exc}")
-                        time.sleep(wait)
+                    if attempt < 5:
+                        wait = _RETRY_DELAYS[min(attempt - 1, len(_RETRY_DELAYS) - 1)]
+                        # Add simple jitter
+                        import random
+                        actual_wait = wait + random.randint(0, 15)
+                        print(f"[seaweedfs]   Retry {attempt}/5 for {rel} (waiting {actual_wait}s): {exc}")
+                        time.sleep(actual_wait)
                     else:
-                        print(f"[seaweedfs]   Retry {attempt}/3 for {rel}: {exc}")
+                        print(f"[seaweedfs]   Retry 5/5 for {rel}: {exc}")
             if last_exc is not None:
                 failed.append(str(rel))
                 print(f"[seaweedfs]   FAILED after 3 attempts: {rel} — {last_exc}")
@@ -125,10 +155,23 @@ class SeaweedFSClient:
         if not self._configured:
             return None
         try:
-            client = self._boto_client()
+            import boto3
+            from botocore.config import Config
+            # Use a slightly longer timeout (10s) and apply it correctly to the client init
+            cfg = Config(connect_timeout=10, read_timeout=10, retries={"max_attempts": 1})
+            
+            client = boto3.client(
+                "s3",
+                endpoint_url=self._endpoint,
+                aws_access_key_id=self._access_key,
+                aws_secret_access_key=self._secret_key,
+                config=cfg,
+            )
+            
             resp = client.get_object(Bucket=self._bucket, Key="finetuned/latest.txt")
             return int(resp["Body"].read().decode().strip())
-        except Exception:
+        except Exception as exc:
+            print(f"[seaweedfs] Warning: Could not fetch latest version: {exc}")
             return None
 
     def download_finetuned_model(self, version: int, local_dir: str) -> str:
@@ -142,11 +185,27 @@ class SeaweedFSClient:
         prefix = f"finetuned/v{version}/"
         local = Path(local_dir)
         local.mkdir(parents=True, exist_ok=True)
-        client = self._boto_client()
-        tc = self._transfer_config()
+
+        # Single client for the entire download — recreating per-file causes
+        # connection pool churn and magnifies transient network errors.
+        client = self._download_client()
+        tc = self._download_transfer_config()  # single-threaded chunks, more stable
+
+        # Quick connectivity check before iterating all files.
+        try:
+            client.list_objects_v2(Bucket=self._bucket, Prefix=prefix, MaxKeys=1)
+        except Exception as exc:
+            raise RuntimeError(
+                f"[seaweedfs] Cannot reach SeaweedFS at {self._endpoint} "
+                f"(bucket={self._bucket}): {exc}"
+            ) from exc
 
         paginator = client.get_paginator("list_objects_v2")
         total = 0
+        # Short delays — fail fast so the caller can surface the error quickly.
+        # Total max wait before giving up on one file: 3+6+12+24 = 45 s.
+        _RETRY_DELAYS = [3, 6, 12, 24]
+
         for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
             for obj in page.get("Contents", []):
                 key = obj["Key"]
@@ -157,7 +216,29 @@ class SeaweedFSClient:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 size_mb = obj.get("Size", 0) // 1_000_000
                 print(f"[seaweedfs] Downloading {rel} ({size_mb} MB) …")
-                client.download_file(self._bucket, key, str(dest), Config=tc)
+
+                last_exc: Exception | None = None
+                for attempt in range(1, 6):
+                    try:
+                        client.download_file(self._bucket, key, str(dest), Config=tc)
+                        last_exc = None
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                        if attempt < 5:
+                            import random
+                            wait = _RETRY_DELAYS[min(attempt - 1, len(_RETRY_DELAYS) - 1)]
+                            wait += random.randint(0, 3)
+                            print(
+                                f"[seaweedfs]   Retry {attempt}/5 for {rel} in {wait}s "
+                                f"({type(exc).__name__})"
+                            )
+                            time.sleep(wait)
+                        else:
+                            print(f"[seaweedfs]   All 5 attempts failed for {rel}: {exc}")
+
+                if last_exc is not None:
+                    raise last_exc
                 total += 1
 
         print(f"[seaweedfs] Downloaded {total} files → {local_dir}")
