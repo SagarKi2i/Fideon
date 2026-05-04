@@ -6,7 +6,7 @@ Requires llama.cpp tools in PATH:
   llama-quantize              (FP16 GGUF → Q5_K_M / Q4_K_M)
 
 Install once on the pod:
-  bash /workspace/ai-ml/setup.sh
+  bash /workspace/Quantization/setup.sh
 
 If the binaries are not found, quantization is skipped non-fatally and an
 empty dict is returned — the pipeline continues and only the HF model is
@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
-QUANT_LEVELS: List[str] = ["Q4_K_M"]
+QUANT_LEVELS: List[str] = ["Q5_K_M", "Q4_K_M"]
 
 
 def tools_available() -> bool:
@@ -97,10 +97,6 @@ def run_quantization(
         size_mb = out_path.stat().st_size // 1_000_000
         print(f"[quantizer] {q_name} done ({size_mb} MB) → {out_path}")
         results[key] = str(out_path)
-
-    # Remove fp16 intermediate — it's 16 GB and not uploaded or used further
-    fp16_path.unlink()
-    print(f"[quantizer] Removed fp16 intermediate ({fp16_path.name})")
 
     # Step 3: Write manifest.json
     manifest = {

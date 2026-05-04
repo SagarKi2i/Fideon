@@ -21,9 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 _MULTIPART_THRESHOLD = 64 * 1024 * 1024    # 64 MB
-_MULTIPART_CHUNK     = 256 * 1024 * 1024  # 256 MB chunks — fewer parts, less SeaweedFS pressure
-_GGUF_SIZE_THRESHOLD = 1 * 1024 * 1024 * 1024  # files > 1 GB get conservative settings
-_UPLOAD_MAX_RETRIES  = 5                   # file-level retries (on top of botocore request retries)
+_MULTIPART_CHUNK     = 256 * 1024 * 1024  # 256 MB chunks — fewer parts = fewer failure points
 
 
 class SeaweedFSClient:
@@ -48,44 +46,18 @@ class SeaweedFSClient:
             config=Config(
                 signature_version="s3v4",
                 connect_timeout=60,
-                read_timeout=1800,  # 30 min — large GGUF files need more time
+                read_timeout=1800,
                 retries={"max_attempts": 5, "mode": "adaptive"},
             ),
         )
 
-    def _transfer_config(self, file_size_bytes: int = 0) -> Any:
+    def _transfer_config(self) -> Any:
         from boto3.s3.transfer import TransferConfig
-        # Large files (>1 GB): sequential upload, big chunks — avoids SeaweedFS 500 errors
-        # under concurrent multipart pressure
-        if file_size_bytes > _GGUF_SIZE_THRESHOLD:
-            return TransferConfig(
-                multipart_threshold=_MULTIPART_THRESHOLD,
-                multipart_chunksize=_MULTIPART_CHUNK,
-                max_concurrency=1,  # sequential — most reliable for large files on SeaweedFS
-            )
         return TransferConfig(
             multipart_threshold=_MULTIPART_THRESHOLD,
             multipart_chunksize=_MULTIPART_CHUNK,
             max_concurrency=2,  # lower concurrency is more stable on SeaweedFS
         )
-
-    def _upload_file_with_retry(self, client: Any, local_path: str, key: str) -> None:
-        """Upload a single file with file-level retries on top of botocore retries."""
-        import time
-        size = Path(local_path).stat().st_size
-        tc = self._transfer_config(size)
-        last_exc: Exception = RuntimeError("upload never attempted")
-        for attempt in range(1, _UPLOAD_MAX_RETRIES + 1):
-            try:
-                client.upload_file(local_path, self._bucket, key, Config=tc)
-                return
-            except Exception as exc:
-                last_exc = exc
-                if attempt < _UPLOAD_MAX_RETRIES:
-                    wait = 10 * attempt  # 10s, 20s, 30s, 40s back-off
-                    print(f"[seaweedfs]   upload failed (attempt {attempt}/{_UPLOAD_MAX_RETRIES}): {exc} — retrying in {wait}s …")
-                    time.sleep(wait)
-        raise RuntimeError(f"Upload failed after {_UPLOAD_MAX_RETRIES} attempts: {last_exc}") from last_exc
 
     # ── Fine-tuned model (full HF weights) ───────────────────────────────────
 
@@ -102,6 +74,7 @@ class SeaweedFSClient:
 
         local = Path(local_dir)
         client = self._boto_client()
+        tc = self._transfer_config()
         files = [f for f in local.rglob("*") if f.is_file()]
         print(f"[seaweedfs] Uploading HF model ({len(files)} files) → s3://{self._bucket}/{prefix}/")
         _RETRY_DELAYS = [30, 90]  # seconds to wait before attempt 2, 3
@@ -111,7 +84,23 @@ class SeaweedFSClient:
             key = f"{prefix}/{rel.as_posix()}"
             size_mb = f.stat().st_size // 1_000_000
             print(f"[seaweedfs]   {rel} ({size_mb} MB) …")
-            self._upload_file_with_retry(client, str(f), key)
+            last_exc: Exception | None = None
+            for attempt in range(1, 4):  # 3 attempts per file
+                try:
+                    client.upload_file(str(f), self._bucket, key, Config=tc)
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt < 3:
+                        wait = _RETRY_DELAYS[attempt - 1]
+                        print(f"[seaweedfs]   Retry {attempt}/3 for {rel} (waiting {wait}s): {exc}")
+                        time.sleep(wait)
+                    else:
+                        print(f"[seaweedfs]   Retry {attempt}/3 for {rel}: {exc}")
+            if last_exc is not None:
+                failed.append(str(rel))
+                print(f"[seaweedfs]   FAILED after 3 attempts: {rel} — {last_exc}")
 
         if failed:
             # Training succeeded — don't mark job as failed just because SeaweedFS is down.
@@ -193,8 +182,8 @@ class SeaweedFSClient:
             return keys
 
         client = self._boto_client()
-        # Exclude fp16.gguf — it's a 16 GB intermediate file, not needed for inference
-        files = [f for f in local.glob("*.gguf") if "fp16" not in f.name] + list(local.glob("manifest.json"))
+        tc = self._transfer_config()
+        files = list(local.glob("*.gguf")) + list(local.glob("manifest.json"))
         print(f"[seaweedfs] Uploading {len(files)} quantized file(s) → s3://{self._bucket}/{prefix}/")
         _RETRY_DELAYS = [30, 90]
         failed: list[str] = []
@@ -202,8 +191,24 @@ class SeaweedFSClient:
             key = f"{prefix}/{f.name}"
             size_mb = f.stat().st_size // 1_000_000
             print(f"[seaweedfs]   {f.name} ({size_mb} MB) …")
-            self._upload_file_with_retry(client, str(f), key)
-            keys.append(key)
+            last_exc: Exception | None = None
+            for attempt in range(1, 4):
+                try:
+                    client.upload_file(str(f), self._bucket, key, Config=tc)
+                    last_exc = None
+                    keys.append(key)
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt < 3:
+                        wait = _RETRY_DELAYS[attempt - 1]
+                        print(f"[seaweedfs]   Retry {attempt}/3 for {f.name} (waiting {wait}s): {exc}")
+                        time.sleep(wait)
+                    else:
+                        print(f"[seaweedfs]   Retry {attempt}/3 for {f.name}: {exc}")
+            if last_exc is not None:
+                failed.append(f.name)
+                print(f"[seaweedfs]   FAILED after 3 attempts: {f.name} — {last_exc}")
 
         if failed:
             print(f"[seaweedfs] WARNING: {len(failed)} GGUF file(s) failed to upload: {', '.join(failed)}")
@@ -220,7 +225,9 @@ class SeaweedFSClient:
             print(f"[seaweedfs] Not configured — skipping GGUF upload ({local_path.name})")
             return s3_key
         print(f"[seaweedfs] Uploading {local_path} → s3://{self._bucket}/{s3_key} …")
-        self._upload_file_with_retry(self._boto_client(), str(local_path), s3_key)
+        self._boto_client().upload_file(
+            str(local_path), self._bucket, s3_key, Config=self._transfer_config()
+        )
         return s3_key
 
     def get_sha256(self, s3_key: str) -> Optional[str]:
