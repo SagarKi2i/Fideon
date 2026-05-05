@@ -224,10 +224,7 @@ export default function DeviceSetup() {
     }
   };
 
-  useEffect(() => {
-    void checkElectron();
-    void checkOllama();
-  }, [checkElectron, checkOllama]);
+
 
   const checkOllama = async () => {
     const status = await checkOllamaStatus();
@@ -242,6 +239,11 @@ export default function DeviceSetup() {
     const response = await fetchDeviceModels(jwt);
     setAllocatedModels(response.models);
   };
+
+  useEffect(() => {
+    void checkElectron();
+    void checkOllama();
+  }, [checkElectron, checkOllama]);
 
   const handleRefresh = async () => {
     setIsDisabled(false);
