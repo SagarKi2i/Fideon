@@ -358,8 +358,18 @@ export default function Training() {
             setShareGradientsStatus(`Upload failed: ${status.error ?? "unknown error"}`);
           }
         }
-      } catch {
+      } catch (e: unknown) {
         if (!alive) return;
+        const isConnectivityFailure =
+          (e instanceof DOMException && e.name === "AbortError") ||
+          (e instanceof Error && /502|503|unreachable|failed to fetch|networkerror|bad gateway/i.test(e.message));
+        if (isConnectivityFailure) {
+          setActiveShareJobId(null);
+          setIsShareGradientsRunning(false);
+          setShareGradientsStatus("Lost connection to RunPod — share status unknown.");
+          setShareJobStatus(prev => prev ? { ...prev, status: "failed", error: "RunPod unreachable" } : null);
+          return;
+        }
         failCount++;
         if (failCount >= MAX_FAILURES) {
           setActiveShareJobId(null);
@@ -393,12 +403,25 @@ export default function Training() {
           setIsFederatedRunning(false);
           setFederatedStatus(
             status.status === "completed"
-              ? `Federated aggregation complete — model v${status.version ?? "?"} pushed to SeaweedFS.`
+              ? `Federated aggregation complete — model v${status.version ?? "?"} pushed to Azure Blob.`
               : `Federated aggregation failed: ${status.error ?? "unknown error"}`
           );
         }
-      } catch {
+      } catch (e: unknown) {
         if (!alive) return;
+        // Abort (15 s client timeout) or 502 from backend both mean RunPod is
+        // unreachable — clear the spinner immediately rather than waiting for
+        // MAX_FAILURES consecutive retries.
+        const isConnectivityFailure =
+          (e instanceof DOMException && e.name === "AbortError") ||
+          (e instanceof Error && /502|unreachable|failed to fetch|networkerror/i.test(e.message));
+        if (isConnectivityFailure) {
+          setActiveFederatedJobId(null);
+          setIsFederatedRunning(false);
+          setFederatedStatus("Lost connection to RunPod — federated status unknown.");
+          setFederatedJobStatus(prev => prev ? { ...prev, status: "failed", error: "RunPod unreachable" } : null);
+          return;
+        }
         failCount++;
         if (failCount >= MAX_FAILURES) {
           setActiveFederatedJobId(null);
@@ -456,18 +479,23 @@ export default function Training() {
               localStorage.setItem('local_training_jobs', JSON.stringify(updatedJobs));
               localJb = updatedJobs;
             }
-          } catch {
-            // RunPod unreachable — if the job started more than 30 min ago, mark it
-            // as interrupted so it doesn't stay "running" forever after the pod goes offline.
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            // 404 = pod restarted and wiped in-memory job state — job is gone,
+            // mark failed immediately regardless of age to stop the poll loop.
+            const isNotFound = /404|not found/i.test(msg);
             const startedAt = new Date(job.created_at ?? 0).getTime();
             const ageMinutes = (Date.now() - startedAt) / 60_000;
-            if (ageMinutes > 30) {
+            if (isNotFound || ageMinutes > 30) {
+              const reason = isNotFound
+                ? "Job lost — pod was restarted and in-memory state was cleared."
+                : "Job interrupted — RunPod went offline before completion.";
               const updatedJobs = localJb.map((j: any) =>
                 j.id === job.id
                   ? {
                       ...j,
                       status: "failed",
-                      error_message: "Job interrupted — RunPod went offline before completion.",
+                      error_message: reason,
                       completed_at: new Date().toISOString(),
                     }
                   : j
@@ -673,7 +701,7 @@ export default function Training() {
 
   const handleShareGradients = async () => {
     setIsShareGradientsRunning(true);
-    setShareGradientsStatus("Uploading weights to SeaweedFS…");
+    setShareGradientsStatus("Uploading weights to Azure Blob…");
     setShareJobStatus(null);
     try {
       const result = await shareGradients();
@@ -685,7 +713,7 @@ export default function Training() {
       }
       setActiveShareJobId(result.job_id ?? null);
       setShareJobStatus({ status: "running", phase: "starting" });
-      setShareGradientsStatus("Upload started — sending weights to SeaweedFS…");
+      setShareGradientsStatus("Upload started — sending weights to Azure Blob…");
       toast({ title: "Share Gradients started", description: "Uploading locally trained weights to Fideon Weights." });
     } catch (e: any) {
       const msg = friendlyRunpodError(e?.message || "Failed to share gradients");
@@ -697,19 +725,19 @@ export default function Training() {
 
   const handleStartFederated = async () => {
     setIsFederatedRunning(true);
-    setFederatedStatus("Connecting to RunPod and checking SeaweedFS for available weights…");
+    setFederatedStatus("Connecting to RunPod and checking Azure Blob for available weights…");
     setFederatedJobStatus(null);
     try {
       const result = await startFederatedLearning();
       if (result.status === "no_weights") {
-        setFederatedStatus("No weights found in SeaweedFS. Complete Local Training and click 'Share Gradients' first.");
+        setFederatedStatus("No weights found in Azure Blob. Complete Local Training and click 'Share Gradients' first.");
         setIsFederatedRunning(false);
-        toast({ title: "No weights in SeaweedFS", description: "Share Gradients must be clicked before Global Update can aggregate.", variant: "destructive" });
+        toast({ title: "No weights in Azure Blob", description: "Share Gradients must be clicked before Global Update can aggregate.", variant: "destructive" });
         return;
       }
       setActiveFederatedJobId(result.job_id ?? null);
       setFederatedJobStatus({ status: "running", phase: "starting" });
-      setFederatedStatus("Federated aggregation started — collecting weights from SeaweedFS…");
+      setFederatedStatus("Federated aggregation started — collecting weights from Azure Blob…");
       toast({ title: "Federated Learning started", description: "FedAvg aggregation is running on the pod." });
     } catch (e: any) {
       const msg = friendlyRunpodError(e?.message || "Failed to start federated learning");
@@ -772,13 +800,13 @@ export default function Training() {
       case "evaluating":          return "Evaluating model quality…";
       case "gate_checked":        return "Quality gate passed ✓";
       case "merging":             return "Merging LoRA adapter…";
-      case "promoting":           return "Uploading to SeaweedFS & registering…";
+      case "promoting":           return "Uploading to Azure Blob & registering…";
       case "done":                return "Complete — model registered";
       default:                    return phase ? `${phase}…` : "Processing…";
     }
   };
 
-  // Local training pipeline: 0=idle, 1=training on GPU, 2=upload to SeaweedFS
+  // Local training pipeline: 0=idle, 1=training on GPU, 2=upload to Azure Blob
   const getLocalPipelineStep = (phase: string | undefined, status: string): number => {
     if (status === "completed") return 2;
     if (!phase) return 0;
@@ -791,11 +819,11 @@ export default function Training() {
   const getFederatedPhaseLabel = (phase: string | undefined): string => {
     switch (phase) {
       case "starting":             return "Initialising…";
-      case "discovering_versions": return "Discovering weight versions in SeaweedFS…";
-      case "downloading_weights":  return "Downloading weights from SeaweedFS…";
+      case "discovering_versions": return "Discovering weight versions in Azure Blob…";
+      case "downloading_weights":  return "Downloading weights from Azure Blob…";
       case "aggregating":          return "Running FedAvg aggregation…";
       case "quantizing":           return "Quantizing model (GGUF Q5_K_M + Q4_K_M)…";
-      case "uploading":            return "Uploading aggregated model to SeaweedFS…";
+      case "uploading":            return "Uploading aggregated model to Azure Blob…";
       case "done":                 return "Aggregation complete — new model version registered";
       default:                     return phase ? `${phase}…` : "Processing…";
     }
@@ -853,7 +881,7 @@ export default function Training() {
                 Your ACORD model has been fine-tuned locally{runpodJobStatus?.version != null ? ` (v${runpodJobStatus.version})` : ""}. Weights are ready to share.
               </span>
               <span className="block text-foreground font-medium">
-                Go to the <strong>Federated Learning</strong> tab and click <strong>Share Gradients</strong> to upload your weights to Fideon Weights (SeaweedFS). Then click <strong>Global Update</strong> to aggregate all weights into a new global model.
+                Go to the <strong>Federated Learning</strong> tab and click <strong>Share Gradients</strong> to upload your weights to Azure Blob. Then click <strong>Global Update</strong> to aggregate all weights into a new global model.
               </span>
             </DialogDescription>
           </DialogHeader>
@@ -1471,7 +1499,7 @@ export default function Training() {
           {(isJobRunning || isJobDone || isJobFailed) && (() => {
             const localSteps = [
               { label: "Training on GPU", desc: "QLoRA LoRA fine-tuning on RunPod", icon: Cpu },
-              { label: "Push to Fideon Weights", desc: "Merge adapter & upload to SeaweedFS", icon: Upload },
+              { label: "Push to Fideon Weights", desc: "Merge adapter & upload to Azure Blob", icon: Upload },
             ];
             return (
               <Card>
@@ -1525,7 +1553,7 @@ export default function Training() {
                   {isJobDone && (
                     <div className="flex items-center gap-2 p-3 rounded-lg bg-green-500/10 border border-green-500/20 text-sm text-green-600 dark:text-green-400">
                       <CheckCircle2 className="h-4 w-4 shrink-0" />
-                      Weights ready locally{runpodJobStatus?.version ? ` (v${runpodJobStatus.version})` : ""} — click <strong className="mx-0.5">Share Gradients</strong> in the Federated Learning tab to upload to SeaweedFS.
+                      Weights ready locally{runpodJobStatus?.version ? ` (v${runpodJobStatus.version})` : ""} — click <strong className="mx-0.5">Share Gradients</strong> in the Federated Learning tab to upload to Azure Blob.
                     </div>
                   )}
                   {isJobFailed && (
@@ -1624,7 +1652,7 @@ export default function Training() {
                 Share Gradients
               </CardTitle>
               <CardDescription>
-                Upload your locally trained weights to Fideon Weights (SeaweedFS).
+                Upload your locally trained weights to Azure Blob.
                 Encrypted weight deltas are sent — your raw data stays on this device.
               </CardDescription>
             </CardHeader>
@@ -1703,7 +1731,7 @@ export default function Training() {
                 Global Update
               </CardTitle>
               <CardDescription>
-                Collect all weight versions from Fideon Weights (SeaweedFS), run FedAvg aggregation,
+                Collect all weight versions from Azure Blob, run FedAvg aggregation,
                 quantize the result, and register a new global model version.
                 Run this after all participants have shared their gradients.
               </CardDescription>
@@ -1759,8 +1787,8 @@ export default function Training() {
             const isFedFailed = federatedJobStatus.status === "failed";
             const isFedActive = !isFedDone && !isFedFailed;
             const fedSteps = [
-              { label: "Collect & Aggregate", desc: "Download weights from SeaweedFS and run FedAvg", icon: Globe },
-              { label: "New Model Ready",     desc: "Aggregated model pushed to SeaweedFS",          icon: CheckCircle2 },
+              { label: "Collect & Aggregate", desc: "Download weights from Azure Blob and run FedAvg", icon: Globe },
+              { label: "New Model Ready",     desc: "Aggregated model pushed to Azure Blob",           icon: CheckCircle2 },
             ];
             return (
               <Card>
@@ -1903,7 +1931,7 @@ export default function Training() {
                   { step: "1", title: "Collect Feedback",    desc: "Rate and correct AI outputs during normal use",                                 icon: MessageSquare },
                   { step: "2", title: "Train Locally",       desc: "Fine-tune the model on RunPod GPU using LoRA adapters",                         icon: Cpu },
                   { step: "3", title: "Share Gradients",     desc: "Encrypted weight deltas sent (not your data)",                                  icon: Upload },
-                  { step: "4", title: "Global Update",       desc: "FedAvg aggregation + quantization — new global model registered in SeaweedFS",  icon: Globe },
+                  { step: "4", title: "Global Update",       desc: "FedAvg aggregation + quantization — new global model registered in Azure Blob",  icon: Globe },
                 ].map((item: any) => (
                   <div key={item.step} className="text-center p-4 border rounded-lg">
                     <div className="mx-auto mb-2 h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center">

@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from fine_tuning.storage_client import get_storage_client
 from fine_tuning.observability.alerting import alerter
@@ -138,6 +138,7 @@ def promote_adapter(
     base_model: str = "",
     actor: str = "pipeline",
     force: bool = False,
+    progress_callback: Optional[Callable[[str, int, Optional[int]], None]] = None,
 ) -> Dict[str, Any]:
     """
     Finalise promotion of a merged model version.
@@ -165,7 +166,11 @@ def promote_adapter(
     # ── 1. Upload merged HF model → finetuned/v{N}/ ─────────────────────────
     # Fatal: if upload fails, do not register the version with a null prefix.
     print(f"[orchestrator] Uploading merged HF model (v{version}) to storage …")
-    storage_finetuned_prefix = storage.upload_hf_model(merged_model_path, version)
+    storage_finetuned_prefix = storage.upload_hf_model(
+        merged_model_path, 
+        version,
+        progress_callback=progress_callback
+    )
 
     # ── 2. Quantize merged model → GGUF ─────────────────────────────────────
     gguf_output_dir = str(Path(merged_model_path).parent / f"{version}-gguf")
@@ -180,7 +185,11 @@ def promote_adapter(
     if quant_results:
         print(f"[orchestrator] Uploading {len(quant_results)} GGUF(s) to storage …")
         try:
-            storage_quantized_keys = storage.upload_quantized(gguf_output_dir, version)
+            storage_quantized_keys = storage.upload_quantized(
+                gguf_output_dir, 
+                version,
+                progress_callback=progress_callback
+            )
         except Exception as exc:
             print(f"[orchestrator] Quantized upload failed (non-fatal): {exc}")
     else:

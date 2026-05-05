@@ -847,7 +847,11 @@ def _update_fed_job(job_id: str, phase: str, **kwargs: Any) -> None:
             _fed_jobs[job_id].update(kwargs)
 
 
-def _fedavg_safetensors(model_dirs: List[str], output_dir: str) -> None:
+def _fedavg_safetensors(
+    model_dirs: List[str], 
+    output_dir: str,
+    progress_callback: Optional[Callable[[str, int, int], None]] = None
+) -> None:
     """
     Average safetensors weights across model_dirs → output_dir (FedAvg with equal weights).
     Falls back to copying the latest model if safetensors/torch are unavailable.
@@ -888,7 +892,9 @@ def _fedavg_safetensors(model_dirs: List[str], output_dir: str) -> None:
         return
 
     print(f"[fedavg] Averaging {len(model_dirs)} models across {len(shards)} shard(s)…")
-    for shard in shards:
+    for i, shard in enumerate(shards):
+        if progress_callback:
+            progress_callback(shard.name, i, len(shards))
         all_tensors: Dict[str, list] = {}
         for mdir in model_dirs:
             shard_path = Path(mdir) / shard.name
@@ -900,6 +906,8 @@ def _fedavg_safetensors(model_dirs: List[str], output_dir: str) -> None:
         averaged = {k: torch.stack(vs).mean(dim=0) for k, vs in all_tensors.items() if vs}
         save_file(averaged, str(output / shard.name))
         print(f"[fedavg]   Averaged shard: {shard.name}")
+        if progress_callback:
+            progress_callback(shard.name, i + 1, len(shards))
 
     print(f"[fedavg] Done — aggregated model written to {output_dir}")
 
@@ -908,6 +916,15 @@ def _run_federated_job(job_id: str) -> None:
     """Background thread: download all stored weight versions, FedAvg, upload result."""
     import shutil as _shutil
     import tempfile
+
+    def _progress_cb(filename: str, current: int, total: Optional[int]) -> None:
+        pct = (current / total * 100) if total else 0
+        _update_fed_job(job_id, "downloading_weights", progress={
+            "current_file": filename,
+            "percentage": round(pct, 1),
+            "transferred_bytes": current,
+            "total_bytes": total
+        })
 
     try:
         from fine_tuning.storage_client import get_storage_client
@@ -951,7 +968,7 @@ def _run_federated_job(job_id: str) -> None:
             for v in versions_available:
                 local_dir = str(tmp_dir / f"v{v}")
                 try:
-                    seaweed.download_finetuned_model(v, local_dir)
+                    seaweed.download_finetuned_model(v, local_dir, progress_callback=_progress_cb)
                     model_dirs.append(local_dir)
                     downloaded_versions.append(v)
                     print(f"[federated] v{v} downloaded ✓")
@@ -973,9 +990,18 @@ def _run_federated_job(job_id: str) -> None:
                 )
 
             # ── 3. FedAvg aggregation ─────────────────────────────────────────
+            def _avg_progress(shard_name: str, current: int, total: int) -> None:
+                _update_fed_job(job_id, "aggregating", progress={
+                    "current_file": f"Averaging: {shard_name}",
+                    "percentage": round(current / total * 100, 1) if total else 100,
+                    "transferred_bytes": current,
+                    "total_bytes": total,
+                    "unit": "shards"
+                })
+
             _update_fed_job(job_id, "aggregating")
             agg_dir = str(tmp_dir / "aggregated")
-            _fedavg_safetensors(model_dirs, agg_dir)
+            _fedavg_safetensors(model_dirs, agg_dir, progress_callback=_avg_progress)
 
             # B7: verify aggregated model is valid before uploading
             _agg_path = Path(agg_dir)
@@ -986,7 +1012,12 @@ def _run_federated_job(job_id: str) -> None:
                 )
 
             # ── 4. Quantize aggregated model → GGUF ──────────────────────────
-            _update_fed_job(job_id, "quantizing")
+            _update_fed_job(job_id, "quantizing", progress={
+                "current_file": "Converting to GGUF...",
+                "percentage": 0,
+                "transferred_bytes": 0,
+                "total_bytes": 100
+            })
             gguf_dir = str(tmp_dir / "gguf")
             try:
                 from fine_tuning.quantization.quantizer import run_quantization
@@ -995,15 +1026,31 @@ def _run_federated_job(job_id: str) -> None:
             except Exception as exc:
                 print(f"[federated] Quantization failed (non-fatal): {exc}")
                 quant_results = {}
+            
+            _update_fed_job(job_id, "quantizing", progress={
+                "current_file": "GGUF Conversion Complete",
+                "percentage": 100,
+                "transferred_bytes": 100,
+                "total_bytes": 100
+            })
 
             # ── 5. Upload aggregated model + GGUFs as new version ─────────────
+            def _up_progress(fname: str, cur: int, tot: Optional[int]) -> None:
+                pct = (cur / tot * 100) if tot else 0
+                _update_fed_job(job_id, "uploading", progress={
+                    "current_file": fname,
+                    "percentage": round(pct, 1),
+                    "transferred_bytes": cur,
+                    "total_bytes": tot
+                })
+
             _update_fed_job(job_id, "uploading")
             new_version = latest + 1
-            seaweed.upload_hf_model(agg_dir, new_version)
+            seaweed.upload_hf_model(agg_dir, new_version, progress_callback=_up_progress)
             gguf_s3_keys: List[str] = []
             if quant_results:
                 try:
-                    gguf_s3_keys = seaweed.upload_quantized(gguf_dir, new_version)
+                    gguf_s3_keys = seaweed.upload_quantized(gguf_dir, new_version, progress_callback=_up_progress)
                     print(f"[federated] GGUF(s) uploaded for v{new_version}")
                 except Exception as exc:
                     print(f"[federated] GGUF upload failed (non-fatal): {exc}")
@@ -1057,6 +1104,15 @@ def _run_share_job(job_id: str, pending_entries: List[tuple]) -> None:
                 _share_jobs[job_id]["phase"] = phase
                 _share_jobs[job_id].update(kw)
 
+    def _progress_cb(filename: str, current: int, total: Optional[int]) -> None:
+        pct = (current / total * 100) if total else 0
+        _upd(_share_jobs[job_id]["phase"], progress={
+            "current_file": filename,
+            "percentage": round(pct, 1),
+            "transferred_bytes": current,
+            "total_bytes": total
+        })
+
     try:
         from fine_tuning.training_orchestrator import promote_adapter
 
@@ -1088,6 +1144,7 @@ def _run_share_job(job_id: str, pending_entries: List[tuple]) -> None:
                 eval_scores=pending.get("eval_scores", {}),
                 training_meta=pending.get("training_meta", {}),
                 base_model=pending.get("base_model", ""),
+                progress_callback=_progress_cb
             )
             # Delete pending-share manifest only after confirmed upload success
             file_path.unlink(missing_ok=True)
@@ -1185,6 +1242,7 @@ async def share_gradients_endpoint(body: Dict[str, Any] = Body(default={})) -> D
             "pending_versions":  versions,
             "uploaded_versions": [],
             "error":             None,
+            "progress":          None,
         }
 
     loop = asyncio.get_running_loop()
@@ -1289,6 +1347,7 @@ async def start_federated(body: Dict[str, Any] = Body(default={})) -> Dict[str, 
         "error": None,
         "version": None,
         "versions_aggregated": [],
+        "progress": None,
     })
 
     loop = asyncio.get_running_loop()

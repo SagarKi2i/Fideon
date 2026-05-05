@@ -65,12 +65,12 @@ def _upload_base() -> str:
 
 
 # ── helpers with Retries ───────────────────────────────────────────────────────
-async def _runpod_get(path: str, max_retries: int = 3) -> Dict[str, Any]:
+async def _runpod_get(path: str, max_retries: int = 3, timeout: float = 60.0) -> Dict[str, Any]:
     base = _upload_base()
     last_exc = None
     for attempt in range(max_retries):
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.get(f"{base}{path}")
                 if resp.status_code == 404:
                     raise HTTPException(status_code=404, detail=f"Not found on RunPod: {path}")
@@ -445,7 +445,9 @@ async def get_federated_job_status(
 ) -> Dict[str, Any]:
     """Poll the status of a federated aggregation job launched via POST /federated/start."""
     await verify_user(authorization)
-    return await _runpod_get(f"/federated/jobs/{job_id}")
+    # Short timeout + no retry for polling: fail fast so the frontend can count
+    # consecutive failures and reset the spinner instead of hanging for minutes.
+    return await _runpod_get(f"/federated/jobs/{job_id}", timeout=10.0, max_retries=1)
 
 
 # ── POST /api/v1/pdf/share-gradients ─────────────────────────────────────────

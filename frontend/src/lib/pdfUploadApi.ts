@@ -354,6 +354,7 @@ export async function startFederatedLearning(): Promise<{
     method: "POST",
     headers: { ...headers, "Content-Type": "application/json" },
     body: JSON.stringify({}),
+    signal: AbortSignal.timeout(35_000),
   });
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ detail: resp.statusText }));
@@ -367,7 +368,10 @@ export async function getFederatedJobStatus(jobId: string): Promise<{
   status: string; phase?: string; version?: number; versions_aggregated?: number[]; error?: string;
 }> {
   const headers = await authHeader();
-  const resp = await fetch(apiUrl(`/api/v1/pdf/federated/jobs/${encodeURIComponent(jobId)}`), { headers });
+  const resp = await fetch(apiUrl(`/api/v1/pdf/federated/jobs/${encodeURIComponent(jobId)}`), {
+    headers,
+    signal: AbortSignal.timeout(15_000),
+  });
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ detail: resp.statusText }));
     throw new Error(err.detail || err.error || `Status check failed: ${resp.status}`);

@@ -17,7 +17,7 @@ import hashlib
 import os
 import time
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 _CHUNK_SIZE = 256 * 1024 * 1024  # 256 MB upload chunks
 
@@ -66,7 +66,12 @@ class AzureBlobClient:
 
     # ── Fine-tuned model (full HF weights) ───────────────────────────────────
 
-    def upload_hf_model(self, local_dir: str, version: int) -> str:
+    def upload_hf_model(
+        self, 
+        local_dir: str, 
+        version: int, 
+        progress_callback: Optional[Callable[[str, int, Optional[int]], None]] = None
+    ) -> str:
         prefix = f"finetuned/v{version}"
         if not self._configured:
             print(f"[azure_blob] Not configured — skipping HF model upload (prefix: {prefix}/)")
@@ -89,7 +94,15 @@ class AzureBlobClient:
                 try:
                     blob_client = cc.get_blob_client(blob_name)
                     with open(f, "rb") as fh:
-                        blob_client.upload_blob(fh, overwrite=True, max_concurrency=2)
+                        hook = None
+                        if progress_callback:
+                            hook = lambda current, total: progress_callback(rel.as_posix(), current, total)
+                        blob_client.upload_blob(
+                            fh, 
+                            overwrite=True, 
+                            max_concurrency=2,
+                            progress_hook=hook
+                        )
                     last_exc = None
                     break
                 except Exception as exc:
@@ -130,7 +143,12 @@ class AzureBlobClient:
             print(f"[azure_blob] Warning: Could not fetch latest version: {exc}")
             return None
 
-    def download_finetuned_model(self, version: int, local_dir: str) -> str:
+    def download_finetuned_model(
+        self, 
+        version: int, 
+        local_dir: str,
+        progress_callback: Optional[Callable[[str, int, Optional[int]], None]] = None
+    ) -> str:
         if not self._configured:
             raise RuntimeError("AZURE_BLOB_ACCOUNT_URL not configured — cannot download model")
 
@@ -167,7 +185,13 @@ class AzureBlobClient:
                 try:
                     blob_client = cc.get_blob_client(blob_name)
                     with open(dest, "wb") as fh:
-                        blob_client.download_blob(max_concurrency=1).readinto(fh)
+                        hook = None
+                        if progress_callback:
+                            hook = lambda current, total: progress_callback(rel, current, total)
+                        blob_client.download_blob(
+                            max_concurrency=1,
+                            progress_hook=hook
+                        ).readinto(fh)
                     last_exc = None
                     break
                 except Exception as exc:
@@ -192,7 +216,12 @@ class AzureBlobClient:
 
     # ── Quantized GGUF ────────────────────────────────────────────────────────
 
-    def upload_quantized(self, gguf_dir: str, version: int) -> List[str]:
+    def upload_quantized(
+        self, 
+        gguf_dir: str, 
+        version: int,
+        progress_callback: Optional[Callable[[str, int, Optional[int]], None]] = None
+    ) -> List[str]:
         prefix = f"quantized/v{version}"
         local = Path(gguf_dir)
         keys: List[str] = []
@@ -215,7 +244,15 @@ class AzureBlobClient:
             for attempt in range(1, 4):
                 try:
                     with open(f, "rb") as fh:
-                        cc.get_blob_client(blob_name).upload_blob(fh, overwrite=True, max_concurrency=2)
+                        hook = None
+                        if progress_callback:
+                            hook = lambda current, total: progress_callback(f.name, current, total)
+                        cc.get_blob_client(blob_name).upload_blob(
+                            fh, 
+                            overwrite=True, 
+                            max_concurrency=2,
+                            progress_hook=hook
+                        )
                     last_exc = None
                     keys.append(blob_name)
                     break

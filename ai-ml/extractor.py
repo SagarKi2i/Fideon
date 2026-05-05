@@ -48,6 +48,69 @@ def _patch_transformers_compat() -> None:
         except ImportError:
             _iu.VideoInput = list  # type: ignore[attr-defined]
 
+    # Qwen2-VL cache_position bug: during the prefill→decode transition, image-token
+    # expansion makes the embedding sequence longer than input_ids, leaving
+    # cache_position as an empty tensor. Fix it at the Qwen2VL level before it
+    # propagates into the base-class generation loop.
+    # Note: do NOT patch GenerationMixin._cache_dependant_input_preparation — its
+    # signature changed between transformers versions (model_kwargs dropped in 4.50+),
+    # so patching it breaks on newer installs. The Qwen2VL-level patch is sufficient.
+    import torch as _torch
+
+    try:
+        from transformers.models.qwen2_vl import modeling_qwen2_vl as _qvl
+        _orig_qvl_prep = _qvl.Qwen2VLForConditionalGeneration.prepare_inputs_for_generation
+
+        def _fixed_qvl_prep(self, input_ids, past_key_values=None, attention_mask=None,
+                             inputs_embeds=None, cache_position=None, **kwargs):
+            # Fix 1: rebuild empty cache_position from KV-cache length.
+            if cache_position is not None and cache_position.numel() == 0:
+                device = input_ids.device if input_ids is not None else (
+                    inputs_embeds.device if inputs_embeds is not None else _torch.device("cpu")
+                )
+                past_len = past_key_values.get_seq_length() if past_key_values is not None else 0
+                cache_position = _torch.arange(past_len, past_len + 1, device=device)
+
+            try:
+                return _orig_qvl_prep(self, input_ids, past_key_values=past_key_values,
+                                      attention_mask=attention_mask, inputs_embeds=inputs_embeds,
+                                      cache_position=cache_position, **kwargs)
+            except RuntimeError as _rope_err:
+                if "non-empty list" not in str(_rope_err):
+                    raise
+                # Fix 2: get_rope_index builds an empty llm_pos_ids_list during decode
+                # (transformers 4.49.x bug — fixed in 4.50.0).
+                # Temporarily replace get_rope_index with a safe version that uses
+                # cache_position (the correct decode-step sequence position), then retry.
+                _dev = input_ids.device if input_ids is not None else _torch.device("cpu")
+                _bs  = input_ids.shape[0] if input_ids is not None else 1
+                _sl  = input_ids.shape[-1] if input_ids is not None else 1
+                _pos = (cache_position
+                        if cache_position is not None and cache_position.numel() > 0
+                        else _torch.arange(_sl, dtype=_torch.long, device=_dev))
+                _pids   = _pos.view(1, -1).expand(3, -1).contiguous()  # [3, seq_len]
+                _rdelta = _torch.zeros(_bs, dtype=_torch.long, device=_dev)
+
+                _orig_gri = type(self.model).get_rope_index
+
+                def _tmp_gri(model_self, _iids, _igt=None, _vgt=None, _am=None):
+                    try:
+                        return _orig_gri(model_self, _iids, _igt, _vgt, _am)
+                    except Exception:
+                        return _pids, _rdelta
+
+                type(self.model).get_rope_index = _tmp_gri
+                try:
+                    return _orig_qvl_prep(self, input_ids, past_key_values=past_key_values,
+                                          attention_mask=attention_mask, inputs_embeds=inputs_embeds,
+                                          cache_position=cache_position, **kwargs)
+                finally:
+                    type(self.model).get_rope_index = _orig_gri
+
+        _qvl.Qwen2VLForConditionalGeneration.prepare_inputs_for_generation = _fixed_qvl_prep
+    except Exception:
+        pass  # not installed or already patched
+
 
 _patch_transformers_compat()
 
