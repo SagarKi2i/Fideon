@@ -408,7 +408,8 @@ export default function Auth({ initialView = "signin" }: AuthProps) {
     }
     setLoading(true);
     try {
-      const redirectTo = `${window.location.origin}/reset-password`;
+      const appBase = (process.env.NEXT_PUBLIC_APP_URL || window.location.origin).replace(/\/$/, "");
+      const redirectTo = `${appBase}/reset-password`;
       const resp = await fetch(apiUrl("/api/v1/auth/password-reset/request"), {
         method: "POST",
         headers: {
