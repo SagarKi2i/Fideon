@@ -339,16 +339,17 @@ export default function DeviceSetup() {
               throw new Error(res?.error || "Could not re-register device");
             }
           } catch (e) {
-          const msg = e instanceof Error ? e.message : "Unknown error";
-          if (msg.includes("401") || msg.includes("403")) {
-            setDeviceJwt(null);
-            setStoredDeviceJwt(null);
+            const msg = e instanceof Error ? e.message : "Unknown error";
+            if (msg.includes("401") || msg.includes("403")) {
+              setDeviceJwt(null);
+              setStoredDeviceJwt(null);
+            }
+            toast({
+              title: "Reconnection failed",
+              description: msg,
+              variant: "destructive",
+            });
           }
-          toast({
-            title: "Reconnection failed",
-            description: msg,
-            variant: "destructive",
-          });
         }
         return;
       }
