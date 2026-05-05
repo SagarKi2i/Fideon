@@ -267,6 +267,7 @@ export default function DeviceSetup() {
   };
 
   const handleRefresh = async () => {
+    setIsDisabled(false);
     if (!deviceJwt) {
       if (window.electron?.device?.ensureAuth) {
         try {
@@ -291,6 +292,10 @@ export default function DeviceSetup() {
           }
         } catch (e) {
           const msg = e instanceof Error ? e.message : "Unknown error";
+          if (msg.includes("401") || msg.includes("403")) {
+            setDeviceJwt(null);
+            setStoredDeviceJwt(null);
+          }
           const hint =
             typeof msg === "string" && msg.toLowerCase().includes("fetch failed")
               ? " Check the backend is running and Electron main uses the same API port as the app (electron/.env ELECTRON_API_BASE_URL, default 127.0.0.1:8080)."
@@ -332,6 +337,17 @@ export default function DeviceSetup() {
           } else {
             throw new Error(res?.error || "Could not re-register device");
           }
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : "Unknown error";
+          if (msg.includes("401") || msg.includes("403")) {
+            setDeviceJwt(null);
+            setStoredDeviceJwt(null);
+          }
+          toast({
+            title: "Reconnection failed",
+            description: msg,
+            variant: "destructive",
+          });
         }
         return;
       }
