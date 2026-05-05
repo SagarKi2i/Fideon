@@ -155,6 +155,8 @@ jobs:
           NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
           NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
           CORS_ALLOWED_ORIGINS: ${{ secrets.CORS_ALLOWED_ORIGINS }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          RESEND_FROM_EMAIL: ${{ secrets.RESEND_FROM_EMAIL }}
         run: |
           set -e
           az account set --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
@@ -227,6 +229,12 @@ jobs:
             if [ -n "$FE_APP" ]; then
               SETTINGS+=("CORS_ALLOWED_ORIGINS=https://${FE_APP}.azurewebsites.net,http://localhost:3000,http://localhost:3003")
             fi
+          fi
+          if [ -n "$RESEND_API_KEY" ]; then
+            SETTINGS+=("RESEND_API_KEY=${RESEND_API_KEY}")
+          fi
+          if [ -n "$RESEND_FROM_EMAIL" ]; then
+            SETTINGS+=("RESEND_FROM_EMAIL=${RESEND_FROM_EMAIL}")
           fi
 
           az webapp config appsettings set \

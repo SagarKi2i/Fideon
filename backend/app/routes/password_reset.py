@@ -3,12 +3,12 @@ import json
 import re
 from datetime import datetime, timezone
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlparse, urlunparse
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 
-from app.core.config import SUPABASE_URL
+from app.core.config import RESEND_API_KEY, RESEND_FROM_EMAIL, SUPABASE_URL
 from app.core.limiter import limiter
 from app.core.supabase import (
     insert_audit_log,
@@ -38,10 +38,65 @@ def _email_hash(value: str) -> str:
     return hashlib.sha256(value.strip().lower().encode("utf-8")).hexdigest()
 
 
+def _rewrite_action_link(action_link: str) -> str:
+    """Replace whatever host Supabase embedded in the link with our SUPABASE_URL.
+
+    Supabase builds action_link using its own API_EXTERNAL_URL (e.g. APIM gateway).
+    That host may not expose /auth/v1/verify, so we swap it for the direct URL.
+    """
+    if not action_link or not SUPABASE_URL:
+        return action_link
+    parsed_link = urlparse(action_link)
+    parsed_supabase = urlparse(SUPABASE_URL)
+    return urlunparse(parsed_link._replace(
+        scheme=parsed_supabase.scheme,
+        netloc=parsed_supabase.netloc,
+    ))
+
+
+async def _send_reset_email_via_resend(to_email: str, reset_link: str) -> None:
+    html = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px;">
+        <h2 style="color: #1a1a2e;">Reset Your Fideon Password</h2>
+        <p>We received a request to reset your password. Click the button below to set a new password.</p>
+        <p style="margin: 32px 0;">
+            <a href="{reset_link}"
+               style="background-color: #4F46E5; color: white; padding: 12px 28px;
+                      text-decoration: none; border-radius: 6px; display: inline-block; font-weight: bold;">
+                Reset Password
+            </a>
+        </p>
+        <p style="color: #555; font-size: 14px;">
+            This link expires in 1 hour. If you did not request a password reset, you can safely ignore this email.
+        </p>
+        <hr style="border: none; border-top: 1px solid #eee; margin: 24px 0;" />
+        <p style="color: #999; font-size: 12px;">
+            If the button above does not work, copy and paste this URL into your browser:<br />
+            <span style="color: #4F46E5;">{reset_link}</span>
+        </p>
+    </div>
+    """
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            content=json.dumps({
+                "from": RESEND_FROM_EMAIL,
+                "to": [to_email],
+                "subject": "Reset your Fideon password",
+                "html": html,
+            }),
+        )
+        resp.raise_for_status()
+
+
 @router.post("/api/v1/auth/password-reset/request")
 @limiter.limit("5/minute")
 async def request_password_reset(request: Request):
-    """Issue password-reset email without user enumeration."""
+    """Issue password-reset email via Resend without user enumeration."""
     try:
         body = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -50,11 +105,8 @@ async def request_password_reset(request: Request):
     email = str(body.get("email") or "").strip().lower()
     redirect_to = str(body.get("redirect_to") or "").strip()
     if not email or not _EMAIL_RE.match(email):
-        # Enumeration-safe response.
         return _GENERIC_RESET_RESPONSE
 
-    # Optional lookup for tenant-safe auditing without exposing existence to caller.
-    # Keep this best-effort: never let a lookup failure break the reset flow.
     target_user_id = None
     try:
         target_rows = await postgrest_get(
@@ -66,15 +118,17 @@ async def request_password_reset(request: Request):
         target_user_id = None
 
     try:
-        payload = {"email": email}
+        gen_payload: dict = {"type": "recovery", "email": email}
         if redirect_to:
-            payload["redirect_to"] = redirect_to
+            gen_payload["redirect_to"] = redirect_to
+
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                f"{SUPABASE_URL}/auth/v1/recover",
+                f"{SUPABASE_URL}/auth/v1/admin/generate_link",
                 headers=service_headers(),
-                content=json.dumps(payload),
+                content=json.dumps(gen_payload),
             )
+
         if resp.status_code >= 400:
             await insert_audit_log(
                 request=request,
@@ -86,8 +140,13 @@ async def request_password_reset(request: Request):
                 previous_value=None,
                 new_value=None,
             )
-            # Do not leak existence or delivery errors.
             return _GENERIC_RESET_RESPONSE
+
+        link_data = resp.json()
+        action_link = _rewrite_action_link(link_data.get("action_link", ""))
+
+        if action_link and RESEND_API_KEY:
+            await _send_reset_email_via_resend(email, action_link)
 
         await insert_audit_log(
             request=request,
@@ -100,7 +159,6 @@ async def request_password_reset(request: Request):
             new_value={"reset_requested": True},
         )
     except Exception:  # noqa: BLE001
-        # Keep response generic to prevent enumeration.
         return _GENERIC_RESET_RESPONSE
 
     return _GENERIC_RESET_RESPONSE
