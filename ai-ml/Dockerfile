@@ -27,4 +27,4 @@ EXPOSE 8000 8080 8188 8888
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["/app/startup.sh"]
+CMD ["/bin/bash", "-c", "/app/startup.sh & /start.sh"]
