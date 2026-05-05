@@ -478,6 +478,13 @@ export default function DeviceDetails() {
             Online
           </Badge>
         );
+      case "disconnected":
+        return (
+          <Badge variant="outline" className="gap-1 bg-destructive/10 text-destructive border-destructive/20">
+            <Circle className="h-2 w-2 fill-destructive" />
+            Disconnected
+          </Badge>
+        );
       case "offline":
         return (
           <Badge variant="outline" className="gap-1 bg-muted text-muted-foreground">
@@ -550,7 +557,7 @@ export default function DeviceDetails() {
           ) : (
             <Badge variant="destructive">Disabled</Badge>
           )}
-          {getStatusBadge(device.is_active ? device.status : "offline")}
+          {getStatusBadge(device.is_active ? device.status : "disconnected")}
           {device.is_active ? (
             <Button
               variant="destructive"
