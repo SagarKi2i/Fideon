@@ -155,6 +155,7 @@ jobs:
           NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
           NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
           CORS_ALLOWED_ORIGINS: ${{ secrets.CORS_ALLOWED_ORIGINS }}
+          NEXT_PUBLIC_APP_URL: ${{ secrets.NEXT_PUBLIC_APP_URL }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           RESEND_FROM_EMAIL: ${{ secrets.RESEND_FROM_EMAIL }}
         run: |
@@ -180,6 +181,11 @@ jobs:
             if [ -n "$API_URL" ]; then
               FE_SETTINGS+=("NEXT_PUBLIC_API_URL=${API_URL}")
             fi
+            # Pin the app's own public URL so password-reset redirect_to is always correct
+            # regardless of which URL the user accessed the frontend from.
+            FE_APP_NAME="${{ vars.AZURE_WEBAPP_FRONTEND }}"
+            APP_URL="${NEXT_PUBLIC_APP_URL:-https://${FE_APP_NAME}.azurewebsites.net}"
+            FE_SETTINGS+=("NEXT_PUBLIC_APP_URL=${APP_URL}")
             # Disable Web Locks to prevent auth deadlock behind Azure APIM
             # (navigator.locks stalls in NODE_ENV=production, causing 403s on all Supabase queries)
             FE_SETTINGS+=("NEXT_PUBLIC_SUPABASE_AUTH_NO_WEB_LOCKS=true")
