@@ -112,26 +112,35 @@ export async function ensureDeviceAuthAsync(opts?: { log?: (msg: string) => void
 
 async function registerDevice(): Promise<{ device_id: string; device_token: string }> {
   const hw = getMachineId();
-  const res = await fetch(`${apiBaseUrl()}/api/v1/devices/register`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      hardware_fingerprint: hw,
-      device_name: deviceLabel(),
-      os_type: process.platform,
-      app_version: process.env.npm_package_version || undefined,
-      metadata: {
-        source: "electron-main",
-      },
-    }),
-  });
-  const payload = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const p: any = payload;
-    const msg = p?.error || p?.detail || JSON.stringify(payload) || `HTTP ${res.status}`;
-    throw new Error(`Device register failed: ${msg}`);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 20000);
+  try {
+    const res = await fetch(`${apiBaseUrl()}/api/v1/devices/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        hardware_fingerprint: hw,
+        device_name: deviceLabel(),
+        os_type: process.platform,
+        app_version: process.env.npm_package_version || undefined,
+        metadata: {
+          source: "electron-main",
+        },
+      }),
+    });
+    clearTimeout(timeoutId);
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const p: any = payload;
+      const msg = p?.error || p?.detail || JSON.stringify(payload) || `HTTP ${res.status}`;
+      throw new Error(`Device register failed: ${msg}`);
+    }
+    return payload as { device_id: string; device_token: string };
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    throw err;
   }
-  return payload as { device_id: string; device_token: string };
 }
 
 class DeviceAuthError extends Error {
@@ -144,20 +153,27 @@ class DeviceAuthError extends Error {
 }
 
 async function heartbeat(deviceJwt: string): Promise<void> {
-  const res = await fetch(`${apiBaseUrl()}/api/v1/devices/heartbeat`, {
-    method: "PUT",
-    headers: {
-      Authorization: `Bearer ${deviceJwt}`,
-    },
-  });
-  if (!res.ok) {
-    const payload = await res.json().catch(() => ({}));
-    const p: any = payload;
-    const msg = p?.error || p?.detail || JSON.stringify(payload) || `HTTP ${res.status}`;
-    if (res.status === 401 || res.status === 403) {
-      throw new DeviceAuthError(`Heartbeat failed: ${msg}`, res.status);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(`${apiBaseUrl()}/api/v1/devices/heartbeat`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${deviceJwt}` },
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!res.ok) {
+      const payload = await res.json().catch(() => ({}));
+      const p: any = payload;
+      const msg = p?.error || p?.detail || JSON.stringify(payload) || `HTTP ${res.status}`;
+      if (res.status === 401 || res.status === 403) {
+        throw new DeviceAuthError(`Heartbeat failed: ${msg}`, res.status);
+      }
+      throw new Error(`Heartbeat failed: ${msg}`);
     }
-    throw new Error(`Heartbeat failed: ${msg}`);
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    throw err;
   }
 }
 

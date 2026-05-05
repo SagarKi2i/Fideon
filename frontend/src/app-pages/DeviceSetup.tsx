@@ -83,7 +83,8 @@ export default function DeviceSetup() {
       setIsConnected(false);
       setAllocatedModels([]);
       if (message?.toLowerCase().includes("deactivated") || message?.toLowerCase().includes("disabled")) {
-        setIsDisabled(true);
+        // Only set disabled if we aren't currently trying to reconnect
+        setIsDisabled((prev) => (connecting || loading ? prev : true));
       }
       if (window.electron?.device?.clearAuth) {
         void window.electron.device.clearAuth();
@@ -192,7 +193,7 @@ export default function DeviceSetup() {
 
   // Background heartbeat: every 60s, report device + local model status to cloud.
   useEffect(() => {
-    if (!isElectronApp || !deviceJwt || !isConnected) {
+    if (!isElectronApp || !deviceJwt || !isConnected || connecting || loading) {
       return;
     }
 
