@@ -167,7 +167,9 @@ class AzureBlobClient:
                 f"(container={self._container}): {exc}"
             ) from exc
 
-        _RETRY_DELAYS = [3, 6, 12, 24]
+        # Longer retry delays for large shard files (each is ~5 GB).
+        _RETRY_DELAYS = [15, 30, 60, 120]
+        _CHUNK_BYTES   = 8 * 1024 * 1024   # stream in 8 MB chunks to avoid timeout
         total = 0
 
         for blob_props in cc.list_blobs(name_starts_with=prefix):
@@ -177,21 +179,25 @@ class AzureBlobClient:
                 continue
             dest = local / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
-            size_mb = (blob_props.get("size") or 0) // 1_000_000
+            file_size = blob_props.get("size") or 0
+            size_mb = file_size // 1_000_000
             print(f"[azure_blob] Downloading {rel} ({size_mb} MB) …")
 
             last_exc: Exception | None = None
             for attempt in range(1, 6):
                 try:
                     blob_client = cc.get_blob_client(blob_name)
+                    # Use chunked iteration instead of .readinto() so each
+                    # 8 MB chunk has its own timeout window — prevents
+                    # ServiceResponseTimeoutError on large (~5 GB) shards.
+                    downloader = blob_client.download_blob(max_concurrency=4)
+                    downloaded = 0
                     with open(dest, "wb") as fh:
-                        hook = None
-                        if progress_callback:
-                            hook = lambda current, total: progress_callback(rel, current, total)
-                        blob_client.download_blob(
-                            max_concurrency=1,
-                            progress_hook=hook
-                        ).readinto(fh)
+                        for chunk in downloader.chunks():
+                            fh.write(chunk)
+                            downloaded += len(chunk)
+                            if progress_callback:
+                                progress_callback(rel, downloaded, file_size or None)
                     last_exc = None
                     break
                 except Exception as exc:
@@ -199,10 +205,10 @@ class AzureBlobClient:
                     if attempt < 5:
                         import random
                         wait = _RETRY_DELAYS[min(attempt - 1, len(_RETRY_DELAYS) - 1)]
-                        wait += random.randint(0, 3)
+                        wait += random.randint(0, 10)
                         print(
                             f"[azure_blob]   Retry {attempt}/5 for {rel} in {wait}s "
-                            f"({type(exc).__name__})"
+                            f"({type(exc).__name__}: {exc})"
                         )
                         time.sleep(wait)
                     else:
