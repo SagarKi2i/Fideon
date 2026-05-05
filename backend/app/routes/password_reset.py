@@ -3,7 +3,7 @@ import json
 import re
 from datetime import datetime, timezone
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlparse, urlunparse
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -36,6 +36,22 @@ def _is_valid_password(password: str) -> bool:
 
 def _email_hash(value: str) -> str:
     return hashlib.sha256(value.strip().lower().encode("utf-8")).hexdigest()
+
+
+def _rewrite_action_link(action_link: str) -> str:
+    """Replace whatever host Supabase embedded in the link with our SUPABASE_URL.
+
+    Supabase builds action_link using its own API_EXTERNAL_URL (e.g. APIM gateway).
+    That host may not expose /auth/v1/verify, so we swap it for the direct URL.
+    """
+    if not action_link or not SUPABASE_URL:
+        return action_link
+    parsed_link = urlparse(action_link)
+    parsed_supabase = urlparse(SUPABASE_URL)
+    return urlunparse(parsed_link._replace(
+        scheme=parsed_supabase.scheme,
+        netloc=parsed_supabase.netloc,
+    ))
 
 
 async def _send_reset_email_via_resend(to_email: str, reset_link: str) -> None:
@@ -127,7 +143,7 @@ async def request_password_reset(request: Request):
             return _GENERIC_RESET_RESPONSE
 
         link_data = resp.json()
-        action_link = link_data.get("action_link")
+        action_link = _rewrite_action_link(link_data.get("action_link", ""))
 
         if action_link and RESEND_API_KEY:
             await _send_reset_email_via_resend(email, action_link)
