@@ -320,24 +320,25 @@ export default function DeviceSetup() {
       if (!ok) {
         // Token was invalid/revoked. Auto re-register in Electron so Refresh is one-click recovery.
         if (window.electron?.device?.ensureAuth) {
-          toast({ title: "Reconnecting…", description: "Device token was invalid. Re-registering now." });
-          const res = await window.electron.device.ensureAuth();
-          if (res?.success && res.device_jwt) {
-            const ok2 = await verifyCloudSession(res.device_jwt);
-            if (!ok2) return;
-            setStoredDeviceJwt(res.device_jwt);
-            setDeviceJwt(res.device_jwt);
-            setIsConnected(true);
-            const devId = res.device_id ?? tryExtractDeviceIdFromJwt(res.device_jwt);
-            setDeviceId(devId);
-            if (devId) {
-              try { await linkDeviceById(devId); } catch { /* silent */ }
+          try {
+            toast({ title: "Reconnecting…", description: "Device token was invalid. Re-registering now." });
+            const res = await window.electron.device.ensureAuth();
+            if (res?.success && res.device_jwt) {
+              const ok2 = await verifyCloudSession(res.device_jwt);
+              if (!ok2) return;
+              setStoredDeviceJwt(res.device_jwt);
+              setDeviceJwt(res.device_jwt);
+              setIsConnected(true);
+              const devId = res.device_id ?? tryExtractDeviceIdFromJwt(res.device_jwt);
+              setDeviceId(devId);
+              if (devId) {
+                try { await linkDeviceById(devId); } catch { /* silent */ }
+              }
+              await loadDeviceModels(res.device_jwt);
+            } else {
+              throw new Error(res?.error || "Could not re-register device");
             }
-            await loadDeviceModels(res.device_jwt);
-          } else {
-            throw new Error(res?.error || "Could not re-register device");
-          }
-        } catch (e) {
+          } catch (e) {
           const msg = e instanceof Error ? e.message : "Unknown error";
           if (msg.includes("401") || msg.includes("403")) {
             setDeviceJwt(null);
