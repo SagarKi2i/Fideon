@@ -223,92 +223,166 @@ def check_versions(client: Any) -> Optional[int]:
 
 
 # ---------------------------------------------------------------------------
-# Step 5 — Download a single version (read-only connectivity test)
+# Step 5 — Blob listing + single small-file download (no 16 GB pull)
 # ---------------------------------------------------------------------------
-def check_download(client: Any, latest: int) -> Optional[str]:
-    section(f"STEP 5 — Download v{latest} from Azure Blob (connectivity test)")
-    tmp_dir = tempfile.mkdtemp(prefix="fed_dl_test_")
+def check_download(client: Any, latest: int) -> bool:
+    section(f"STEP 5 — Blob Structure Check for v{latest} (lightweight, no full download)")
+
+    # ── 5a. Disk space on /tmp ────────────────────────────────────────────────
     try:
-        t0 = time.time()
-        local = client.download_finetuned_model(latest, tmp_dir)
-        elapsed = time.time() - t0
-        files = list(Path(local).rglob("*"))
-        total_mb = sum(f.stat().st_size for f in files if f.is_file()) / 1e6
-        ok(f"Downloaded {len([f for f in files if f.is_file()])} files ({total_mb:.1f} MB) in {elapsed:.1f}s")
-        for f in sorted(files):
-            if f.is_file():
-                info(f"  {f.relative_to(tmp_dir)}  ({f.stat().st_size // 1024} KB)")
-        # Verify HF model structure
-        has_config   = (Path(local) / "config.json").exists()
-        has_safetens = bool(list(Path(local).glob("*.safetensors")))
+        st = shutil.disk_usage("/tmp")
+        free_gb = st.free / 1e9
+        total_gb = st.total / 1e9
+        info(f"Disk /tmp: {free_gb:.1f} GB free / {total_gb:.1f} GB total")
+        if free_gb < 35:
+            warn(f"Only {free_gb:.1f} GB free — global-update needs ~35 GB (download + FedAvg output)")
+        else:
+            ok(f"Disk space OK ({free_gb:.1f} GB free)")
+    except Exception as e:
+        warn(f"Could not check disk space: {e}")
+
+    # ── 5b. List blobs under finetuned/v{latest}/ ────────────────────────────
+    prefix = f"finetuned/v{latest}/"
+    try:
+        cc = client._container_client()
+        blobs = list(cc.list_blobs(name_starts_with=prefix))
+        if not blobs:
+            fail(f"No blobs found under {prefix} — run fix_blob_paths.py first")
+            return False
+        total_bytes = sum(b.get("size", 0) for b in blobs)
+        info(f"Found {len(blobs)} blobs under {prefix} ({total_bytes / 1e9:.2f} GB total):")
+        safetensor_count = 0
+        has_config = has_index = False
+        for b in blobs:
+            name = b["name"][len(prefix):]
+            size_mb = b.get("size", 0) / 1e6
+            info(f"    {name}  ({size_mb:.1f} MB)")
+            if name.endswith(".safetensors"):
+                safetensor_count += 1
+            if name == "config.json":
+                has_config = True
+            if name == "model.safetensors.index.json":
+                has_index = True
+
         if has_config:
             ok("config.json present ✓")
         else:
-            fail("config.json MISSING — HF model loading will fail")
-        if has_safetens:
-            ok(f"safetensors shards present ({len(list(Path(local).glob('*.safetensors')))} files) ✓")
+            fail("config.json MISSING — HF model loading will fail after download")
+        if safetensor_count:
+            ok(f"{safetensor_count} safetensors shard(s) present ✓")
         else:
-            fail("No .safetensors files found — FedAvg cannot average weights")
-        return local if (has_config and has_safetens) else None
+            fail("No .safetensors files — FedAvg will have nothing to average")
+        if has_index:
+            ok("model.safetensors.index.json present ✓")
     except Exception as e:
-        fail(f"Download FAILED: {e}")
+        fail(f"Blob listing failed: {e}")
         log.debug(traceback.format_exc())
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        return None
+        return False
 
-
-# ---------------------------------------------------------------------------
-# Step 6 — FedAvg dry-run (average the single version with itself as smoke test)
-# ---------------------------------------------------------------------------
-def check_fedavg(model_dir: str) -> bool:
-    section("STEP 6 — FedAvg Dry-Run (average model with itself)")
-    tmp_out = tempfile.mkdtemp(prefix="fed_avg_test_")
+    # ── 5c. Download only config.json to confirm read access ─────────────────
+    tmp_dir = tempfile.mkdtemp(prefix="fed_probe_")
     try:
-        sys.path.insert(0, "/workspace/ai-ml")
-        from server import _fedavg_safetensors
+        cc = client._container_client()
+        blob_name = f"{prefix}config.json"
+        dest = Path(tmp_dir) / "config.json"
         t0 = time.time()
-        _fedavg_safetensors([model_dir, model_dir], tmp_out)
+        with open(dest, "wb") as fh:
+            cc.get_blob_client(blob_name).download_blob().readinto(fh)
         elapsed = time.time() - t0
-        out_files = list(Path(tmp_out).rglob("*"))
-        out_mb = sum(f.stat().st_size for f in out_files if f.is_file()) / 1e6
-        ok(f"FedAvg produced {len([f for f in out_files if f.is_file()])} files ({out_mb:.1f} MB) in {elapsed:.1f}s")
-        has_config = (Path(tmp_out) / "config.json").exists()
-        has_shards = bool(list(Path(tmp_out).glob("*.safetensors")))
-        if has_config and has_shards:
-            ok("Output structure is valid (config.json + safetensors present)")
-            return True
-        else:
-            fail(f"Output invalid: config.json={has_config}, safetensors={has_shards}")
-            return False
-    except ImportError:
-        warn("Could not import _fedavg_safetensors from server — testing directly")
+        size_kb = dest.stat().st_size // 1024
+        ok(f"config.json downloaded ({size_kb} KB in {elapsed:.2f}s) — read access confirmed ✓")
+        # Peek inside config.json
         try:
-            from safetensors import safe_open
-            from safetensors.torch import save_file
-            import torch
-            shards = list(Path(model_dir).glob("*.safetensors"))
-            if not shards:
-                warn("No safetensors shards — skipping FedAvg test")
-                return True
-            shard = shards[0]
-            all_t: Dict[str, list] = {}
-            with safe_open(str(shard), framework="pt") as f:
-                for key in f.keys():
-                    all_t[key] = [f.get_tensor(key), f.get_tensor(key)]
-            averaged = {k: torch.stack(vs).mean(0) for k, vs in all_t.items()}
-            save_file(averaged, str(Path(tmp_out) / shard.name))
-            ok(f"Direct FedAvg test passed — averaged {len(averaged)} tensors from {shard.name}")
-            return True
-        except Exception as e:
-            fail(f"FedAvg direct test failed: {e}")
-            log.debug(traceback.format_exc())
-            return False
+            import json as _json
+            cfg = _json.loads(dest.read_text())
+            arch = cfg.get("architectures", ["?"])[0]
+            model_type = cfg.get("model_type", "?")
+            info(f"    model_type={model_type}  architecture={arch}")
+        except Exception:
+            pass
+        return has_config and safetensor_count > 0
     except Exception as e:
-        fail(f"FedAvg dry-run FAILED: {e}")
+        fail(f"config.json download FAILED — cannot read from Azure Blob: {e}")
         log.debug(traceback.format_exc())
         return False
     finally:
-        shutil.rmtree(tmp_out, ignore_errors=True)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Step 6 — FedAvg smoke test with tiny synthetic safetensors (no 16 GB needed)
+# ---------------------------------------------------------------------------
+def check_fedavg() -> bool:
+    section("STEP 6 — FedAvg Smoke Test (synthetic 10-tensor safetensors)")
+    tmp_a   = tempfile.mkdtemp(prefix="fed_model_a_")
+    tmp_b   = tempfile.mkdtemp(prefix="fed_model_b_")
+    tmp_out = tempfile.mkdtemp(prefix="fed_avg_out_")
+    try:
+        import torch
+        from safetensors.torch import save_file
+
+        # Build two tiny fake models (10 tensors each, float32)
+        tensors_a = {f"layer.{i}.weight": torch.randn(64, 64) for i in range(10)}
+        tensors_b = {f"layer.{i}.weight": torch.randn(64, 64) for i in range(10)}
+        save_file(tensors_a, str(Path(tmp_a) / "model.safetensors"))
+        save_file(tensors_b, str(Path(tmp_b) / "model.safetensors"))
+
+        # Write a dummy config.json so FedAvg copies it to output
+        (Path(tmp_a) / "config.json").write_text('{"model_type":"test"}')
+        (Path(tmp_b) / "config.json").write_text('{"model_type":"test"}')
+        ok("Synthetic model pair created (2 × 10 tensors, float32)")
+
+        # Run FedAvg
+        t0 = time.time()
+        try:
+            sys.path.insert(0, "/workspace/ai-ml")
+            from server import _fedavg_safetensors
+            _fedavg_safetensors([tmp_a, tmp_b], tmp_out)
+        except ImportError:
+            # Fallback: inline averaging
+            from safetensors import safe_open
+            all_t: Dict[str, list] = {}
+            for d in [tmp_a, tmp_b]:
+                with safe_open(str(Path(d) / "model.safetensors"), framework="pt") as f:
+                    for k in f.keys():
+                        all_t.setdefault(k, []).append(f.get_tensor(k))
+            averaged = {k: torch.stack(vs).mean(0) for k, vs in all_t.items()}
+            save_file(averaged, str(Path(tmp_out) / "model.safetensors"))
+            shutil.copy(str(Path(tmp_a) / "config.json"), str(Path(tmp_out) / "config.json"))
+        elapsed = time.time() - t0
+
+        # Verify output
+        has_config = (Path(tmp_out) / "config.json").exists()
+        has_shard  = (Path(tmp_out) / "model.safetensors").exists()
+        if not (has_config and has_shard):
+            fail(f"FedAvg output invalid: config={has_config}, shard={has_shard}")
+            return False
+
+        # Spot-check: averaged values should be between the two inputs
+        from safetensors import safe_open as _so
+        with _so(str(Path(tmp_out) / "model.safetensors"), framework="pt") as f:
+            key = list(f.keys())[0]
+            avg_val = f.get_tensor(key)
+        expected = (tensors_a[key] + tensors_b[key]) / 2
+        if torch.allclose(avg_val, expected, atol=1e-5):
+            ok(f"FedAvg math correct — averaged values match (atol=1e-5) ✓  [{elapsed:.2f}s]")
+        else:
+            fail("FedAvg math incorrect — averaged values do not match expected")
+            return False
+
+        ok("safetensors read/write pipeline works end-to-end ✓")
+        return True
+
+    except ImportError as e:
+        fail(f"Missing package for FedAvg: {e}")
+        return False
+    except Exception as e:
+        fail(f"FedAvg smoke test FAILED: {e}")
+        log.debug(traceback.format_exc())
+        return False
+    finally:
+        for d in [tmp_a, tmp_b, tmp_out]:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -585,13 +659,11 @@ def main() -> None:
     results["versions"] = latest is not None
 
     if latest is not None:
-        model_dir = check_download(client, latest)
-        results["download"] = model_dir is not None
-        if model_dir:
-            results["fedavg"] = check_fedavg(model_dir)
-            shutil.rmtree(Path(model_dir).parent, ignore_errors=True)
+        results["download"] = check_download(client, latest)
     else:
-        warn("Skipping download and FedAvg checks — no versions available")
+        warn("Skipping blob structure check — no versions available")
+
+    results["fedavg"] = check_fedavg()
 
     results["pending"] = bool(check_pending_shares())
 
