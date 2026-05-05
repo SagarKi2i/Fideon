@@ -132,7 +132,6 @@ export default function DeviceSetup() {
           if (ok) {
             setDeviceJwt(storedJwt);
             setIsConnected(true);
-            // Ensure Cloud device ID renders even if Electron store is slow/unavailable.
             const extractedId = tryExtractDeviceIdFromJwt(storedJwt);
             setDeviceId((prev) => prev ?? extractedId);
             
@@ -144,15 +143,25 @@ export default function DeviceSetup() {
                   setDeviceId(res.device_id);
                   finalDeviceId = res.device_id;
                 }
-              } catch {
-                // ignore
-              }
+              } catch { /* ignore */ }
             }
-            // Auto-link device to tenant
             if (finalDeviceId) {
-              try { await linkDeviceById(finalDeviceId); } catch { /* silent fail if not logged in or already linked */ }
+              try { await linkDeviceById(finalDeviceId); } catch { /* silent */ }
             }
             void loadDeviceModels(storedJwt);
+          } else if (window.electron?.device?.ensureAuth) {
+            // Auto-recovery for Electron: if stored JWT failed, try to get a fresh one immediately.
+            const res = await window.electron.device.ensureAuth();
+            if (res?.success && res.device_jwt) {
+              setDeviceJwt(res.device_jwt);
+              setStoredDeviceJwt(res.device_jwt);
+              setIsConnected(true);
+              setDeviceId(res.device_id || tryExtractDeviceIdFromJwt(res.device_jwt));
+              if (res.device_id) {
+                try { await linkDeviceById(res.device_id); } catch { /* silent */ }
+              }
+              void loadDeviceModels(res.device_jwt);
+            }
           }
         } catch {
           // ignore network errors
