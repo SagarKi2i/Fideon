@@ -104,7 +104,7 @@ export default function DeviceSetup() {
   );
 
   const verifyCloudSession = useCallback(
-    async (jwt: string): Promise<boolean> => {
+    async (jwt: string, { silent = false }: { silent?: boolean } = {}): Promise<boolean> => {
       try {
         await sendDeviceHeartbeat(jwt);
         authLossToastShown.current = false;
@@ -112,7 +112,7 @@ export default function DeviceSetup() {
         return true;
       } catch (e) {
         if (e instanceof ApiRequestError && e.isAuthError) {
-          handleInvalidDeviceAuth(e.message);
+          if (!silent) handleInvalidDeviceAuth(e.message);
           return false;
         }
         throw e;
@@ -183,7 +183,7 @@ export default function DeviceSetup() {
         if (res?.success) {
           setDeviceId(res.device_id ?? null);
           if (res.device_jwt) {
-            const ok = await verifyCloudSession(res.device_jwt);
+            const ok = await verifyCloudSession(res.device_jwt, { silent: true });
             if (ok) {
               setStoredDeviceJwt(res.device_jwt);
               setDeviceJwt(res.device_jwt);
@@ -205,6 +205,20 @@ export default function DeviceSetup() {
                 }
                 await loadDeviceModels(res2.device_jwt);
               }
+            }
+          } else if (window.electron?.device?.ensureAuth) {
+            // No JWT at all — main process cleared it (stale token) before renderer loaded.
+            // Auto-register without showing any error to the user.
+            const res2 = await window.electron.device.ensureAuth();
+            if (res2?.success && res2.device_jwt) {
+              setDeviceJwt(res2.device_jwt);
+              setStoredDeviceJwt(res2.device_jwt);
+              setIsConnected(true);
+              setDeviceId(res2.device_id || tryExtractDeviceIdFromJwt(res2.device_jwt));
+              if (res2.device_id) {
+                try { await linkDeviceById(res2.device_id); } catch { /* silent */ }
+              }
+              await loadDeviceModels(res2.device_jwt);
             }
           }
         }
@@ -243,7 +257,8 @@ export default function DeviceSetup() {
   useEffect(() => {
     void checkElectron();
     void checkOllama();
-  }, [checkElectron, checkOllama]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleRefresh = async () => {
     setIsDisabled(false);
@@ -256,19 +271,20 @@ export default function DeviceSetup() {
           const res = await window.electron.device.ensureAuth();
           if (res?.success && res.device_jwt) {
             const ok = await verifyCloudSession(res.device_jwt);
-            if (!ok) return;
-            setStoredDeviceJwt(res.device_jwt);
-            setDeviceJwt(res.device_jwt);
-            setIsConnected(true);
-            const devId = res.device_id ?? tryExtractDeviceIdFromJwt(res.device_jwt);
-            setDeviceId(devId);
-            if (devId) {
-              try { await linkDeviceById(devId); } catch { /* silent */ }
+            if (ok) {
+              setStoredDeviceJwt(res.device_jwt);
+              setDeviceJwt(res.device_jwt);
+              setIsConnected(true);
+              const devId = res.device_id || tryExtractDeviceIdFromJwt(res.device_jwt);
+              setDeviceId(devId);
+              if (devId) {
+                try { await linkDeviceById(devId); } catch { /* silent */ }
+              }
+              await loadDeviceModels(res.device_jwt);
+              return;
             }
-            await loadDeviceModels(res.device_jwt);
-          } else {
-            throw new Error(res?.error || "Could not register device");
           }
+          throw new Error(res?.error || "Could not register device automatically.");
         } catch (e) {
           const msg = e instanceof Error ? e.message : "Unknown error";
           if (msg.includes("401") || msg.includes("403")) {
@@ -295,49 +311,39 @@ export default function DeviceSetup() {
     }
     setLoading(true);
     try {
-      const ok = await verifyCloudSession(deviceJwt);
-      if (!ok) {
-        // Token was invalid/revoked. Auto re-register in Electron so Refresh is one-click recovery.
-        if (window.electron?.device?.ensureAuth) {
-          try {
-            toast({ title: "Reconnecting…", description: "Device token was invalid. Re-registering now." });
-            const res = await window.electron.device.ensureAuth();
-            if (res?.success && res.device_jwt) {
-              const ok2 = await verifyCloudSession(res.device_jwt);
-              if (!ok2) return;
-              setStoredDeviceJwt(res.device_jwt);
-              setDeviceJwt(res.device_jwt);
-              setIsConnected(true);
-              const devId = res.device_id ?? tryExtractDeviceIdFromJwt(res.device_jwt);
-              setDeviceId(devId);
-              if (devId) {
-                try { await linkDeviceById(devId); } catch { /* silent */ }
-              }
-              await loadDeviceModels(res.device_jwt);
-            } else {
-              throw new Error(res?.error || "Could not re-register device");
-            }
-          } catch (e) {
-            const msg = e instanceof Error ? e.message : "Unknown error";
-            if (msg.includes("401") || msg.includes("403")) {
-              setDeviceJwt("");
-              setStoredDeviceJwt("");
-            }
-            toast({
-              title: "Reconnection failed",
-              description: msg,
-              variant: "destructive",
-            });
-          }
-        }
+      // 1. Try existing token (silent if ensureAuth can recover — avoids a false-negative toast)
+      const ok = await verifyCloudSession(deviceJwt, { silent: !!window.electron?.device?.ensureAuth });
+      if (ok) {
+        await loadDeviceModels(deviceJwt);
+        await checkOllama();
+        toast({ title: "Refreshed", description: "Models list updated" });
         return;
       }
-      await loadDeviceModels(deviceJwt);
-      await checkOllama();
-      toast({
-        title: "Refreshed",
-        description: "Models list updated",
-      });
+
+      // 2. If existing token failed, try immediate auto-recovery if in Electron
+      if (window.electron?.device?.ensureAuth) {
+        toast({ title: "Reconnecting…", description: "Fetching fresh device credentials." });
+        const res = await window.electron.device.ensureAuth();
+        if (res?.success && res.device_jwt) {
+          const ok2 = await verifyCloudSession(res.device_jwt);
+          if (ok2) {
+            setStoredDeviceJwt(res.device_jwt);
+            setDeviceJwt(res.device_jwt);
+            setIsConnected(true);
+            const devId = res.device_id || tryExtractDeviceIdFromJwt(res.device_jwt);
+            setDeviceId(devId);
+            if (devId) {
+              try { await linkDeviceById(devId); } catch { /* silent */ }
+            }
+            await loadDeviceModels(res.device_jwt);
+            return;
+          }
+        }
+        throw new Error("Could not restore device connection automatically.");
+      }
+      
+      // 3. Fallback for non-electron or if ensureAuth failed
+      throw new Error("Device token is invalid. Please contact an administrator.");
     } catch (error: any) {
       if (error instanceof ApiRequestError && error.isAuthError) {
         handleInvalidDeviceAuth(error.message);

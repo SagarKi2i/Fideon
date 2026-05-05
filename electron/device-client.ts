@@ -211,19 +211,15 @@ export async function ensureDeviceAuthAndStartHeartbeat(opts: {
   };
 
   try {
-    const existing = await getStoredDeviceJwtAsync();
-    if (existing) {
-      opts.log(`[device] using stored device JWT`);
-      startLoop(existing);
-      return { stop: () => (stopped = true, timer && clearInterval(timer)) };
-    }
-
-    opts.log(`[device] registering device... base=${apiBaseUrl()}`);
-    const reg = await ensureDeviceAuthAsync({ log: opts.log });
-    opts.log(`[device] registered device_id=${reg.device_id}`);
-    startLoop(reg.device_jwt);
+    // Always validate before starting the loop. ensureDeviceAuthAsync sends a heartbeat
+    // to confirm the stored JWT is still valid, and re-registers if it gets 401/403.
+    // This prevents a stale post-logout JWT from being mistaken for admin deactivation.
+    opts.log(`[device] validating device auth... base=${apiBaseUrl()}`);
+    const auth = await ensureDeviceAuthAsync({ log: opts.log });
+    opts.log(`[device] device auth ready device_id=${auth.device_id}`);
+    startLoop(auth.device_jwt);
   } catch (e) {
-    opts.log(`[device] registration failed: ${e instanceof Error ? e.message : String(e)}`);
+    opts.log(`[device] startup auth failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   return {
