@@ -3,7 +3,7 @@ import json
 import re
 from datetime import datetime, timezone
 from typing import Optional
-from urllib.parse import quote, urlparse, urlunparse
+from urllib.parse import quote, urlencode, urlparse, urlunparse, parse_qs
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -38,20 +38,32 @@ def _email_hash(value: str) -> str:
     return hashlib.sha256(value.strip().lower().encode("utf-8")).hexdigest()
 
 
-def _rewrite_action_link(action_link: str) -> str:
-    """Replace whatever host Supabase embedded in the link with our SUPABASE_URL.
+def _rewrite_action_link(action_link: str, desired_redirect_to: str = "") -> str:
+    """Fix two things Supabase gets wrong in the generated action link:
 
-    Supabase builds action_link using its own API_EXTERNAL_URL (e.g. APIM gateway).
-    That host may not expose /auth/v1/verify, so we swap it for the direct URL.
+    1. Host: Supabase stamps its API_EXTERNAL_URL (e.g. APIM) which has no
+       /auth/v1/verify route — replace with the direct SUPABASE_URL.
+    2. redirect_to param: Supabase overrides our requested redirect_to with its
+       own configured SITE_URL — forcibly replace it with the frontend URL so
+       the user lands on the correct reset-password page.
     """
     if not action_link or not SUPABASE_URL:
         return action_link
     parsed_link = urlparse(action_link)
     parsed_supabase = urlparse(SUPABASE_URL)
-    return urlunparse(parsed_link._replace(
+
+    rewritten = parsed_link._replace(
         scheme=parsed_supabase.scheme,
         netloc=parsed_supabase.netloc,
-    ))
+    )
+
+    if desired_redirect_to:
+        params = parse_qs(rewritten.query, keep_blank_values=True)
+        params["redirect_to"] = [desired_redirect_to]
+        new_query = urlencode({k: v[0] for k, v in params.items()})
+        rewritten = rewritten._replace(query=new_query)
+
+    return urlunparse(rewritten)
 
 
 async def _send_reset_email_via_resend(to_email: str, reset_link: str) -> None:
@@ -143,7 +155,9 @@ async def request_password_reset(request: Request):
             return _GENERIC_RESET_RESPONSE
 
         link_data = resp.json()
-        action_link = _rewrite_action_link(link_data.get("action_link", ""))
+        # Pass redirect_to so we forcibly override Supabase's SITE_URL in the link.
+        desired_redirect = f"{redirect_to}/reset-password" if redirect_to and not redirect_to.endswith("/reset-password") else redirect_to
+        action_link = _rewrite_action_link(link_data.get("action_link", ""), desired_redirect)
 
         if action_link and RESEND_API_KEY:
             await _send_reset_email_via_resend(email, action_link)
