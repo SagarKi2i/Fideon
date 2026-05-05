@@ -121,10 +121,7 @@ export default function DeviceSetup() {
     [handleInvalidDeviceAuth],
   );
 
-  useEffect(() => {
-    void checkElectron();
-    void checkOllama();
-  }, [checkElectron, checkOllama]);
+
 
   // Listen for device deactivation pushed from the Electron main process heartbeat loop.
   useEffect(() => {
@@ -226,6 +223,11 @@ export default function DeviceSetup() {
       }
     }
   };
+
+  useEffect(() => {
+    void checkElectron();
+    void checkOllama();
+  }, [checkElectron, checkOllama]);
 
   const checkOllama = async () => {
     const status = await checkOllamaStatus();
