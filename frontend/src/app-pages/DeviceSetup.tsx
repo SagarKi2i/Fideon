@@ -293,8 +293,8 @@ export default function DeviceSetup() {
         } catch (e) {
           const msg = e instanceof Error ? e.message : "Unknown error";
           if (msg.includes("401") || msg.includes("403")) {
-            setDeviceJwt(null);
-            setStoredDeviceJwt(null);
+            setDeviceJwt("");
+            setStoredDeviceJwt("");
           }
           const hint =
             typeof msg === "string" && msg.toLowerCase().includes("fetch failed")
@@ -341,8 +341,8 @@ export default function DeviceSetup() {
           } catch (e) {
             const msg = e instanceof Error ? e.message : "Unknown error";
             if (msg.includes("401") || msg.includes("403")) {
-              setDeviceJwt(null);
-              setStoredDeviceJwt(null);
+              setDeviceJwt("");
+              setStoredDeviceJwt("");
             }
             toast({
               title: "Reconnection failed",
