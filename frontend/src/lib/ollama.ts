@@ -156,6 +156,8 @@ declare global {
           | { success: true; machineName: string; machineId: string; platform: string }
           | { success: false; error?: string }
         >;
+        onDeactivated?: (callback: () => void) => void;
+        removeDeactivatedListener?: () => void;
       };
       webhooks?: {
         // Outbound webhook CRUD via backend (used by Settings UI in Electron).

@@ -517,40 +517,40 @@ export default function DeviceSetup() {
             </div>
           ) : null}
 
-          <div className=”space-y-2”>
+          <div className="space-y-2">
           <Label>Cloud device ID</Label>
           {isDisabled ? (
-            <p className=”text-sm text-destructive font-medium”>
-              Device is disabled — cloud device ID is not available until an admin re-enables this device.
+            <p className="text-sm text-destructive font-medium">
+              Device is disabled &mdash; cloud device ID is not available until an admin re-enables this device.
             </p>
           ) : (
-            <div className=”flex flex-col sm:flex-row gap-2”>
-              <Input value={deviceId ?? “Not registered yet”} readOnly className=”font-mono text-xs” />
+            <div className="flex flex-col sm:flex-row gap-2">
+              <Input value={deviceId ?? "Not registered yet"} readOnly className="font-mono text-xs" />
               <Button
-                type=”button”
-                variant=”outline”
+                type="button"
+                variant="outline"
                 disabled={!deviceId}
                 onClick={async () => {
                   if (!deviceId) return;
                   try {
                     await navigator.clipboard.writeText(deviceId);
-                    toast({ title: “Copied”, description: “Cloud device ID copied to clipboard.” });
+                    toast({ title: "Copied", description: "Cloud device ID copied to clipboard." });
                   } catch {
-                    toast({ title: “Copy failed”, description: “Please copy manually.”, variant: “destructive” });
+                    toast({ title: "Copy failed", description: "Please copy manually.", variant: "destructive" });
                   }
                 }}
               >
-                <Copy className=”h-4 w-4 mr-2” />
+                <Copy className="h-4 w-4 mr-2" />
                 Copy
               </Button>
             </div>
           )}
-          <p className=”text-xs text-muted-foreground”>
+          <p className="text-xs text-muted-foreground">
             {isDisabled
-              ? “Contact your administrator to re-enable this device, then click Refresh to reconnect.”
+              ? "Contact your administrator to re-enable this device, then click Refresh to reconnect."
               : deviceId
-              ? “This device is automatically registered and linked to your tenant.”
-              : “If this shows \”Not registered yet\”, click Refresh below to register/reconnect.”}
+              ? "This device is automatically registered and linked to your tenant."
+              : "If this shows \"Not registered yet\", click Refresh below to register/reconnect."}
           </p>
           </div>
         </CardContent>
