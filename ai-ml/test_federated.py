@@ -41,7 +41,7 @@ LOG_FILE = Path("/workspace/logs/federated_test.log")
 LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
@@ -49,6 +49,20 @@ logging.basicConfig(
         logging.FileHandler(str(LOG_FILE), mode="w", encoding="utf-8"),
     ],
 )
+
+# Suppress noisy Azure SDK / urllib3 HTTP-level debug spam
+for _noisy in (
+    "azure",
+    "azure.core",
+    "azure.core.pipeline",
+    "azure.storage",
+    "azure.storage.blob",
+    "urllib3",
+    "urllib3.connectionpool",
+    "http.client",
+):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 log = logging.getLogger("fed_test")
 
 
