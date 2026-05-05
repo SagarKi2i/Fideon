@@ -123,57 +123,8 @@ export default function DeviceSetup() {
 
   useEffect(() => {
     void checkElectron();
-    const storedJwt = getStoredDeviceJwt();
-    if (storedJwt) {
-      void (async () => {
-        setConnecting(true);
-        try {
-          const ok = await verifyCloudSession(storedJwt);
-          if (ok) {
-            setDeviceJwt(storedJwt);
-            setIsConnected(true);
-            const extractedId = tryExtractDeviceIdFromJwt(storedJwt);
-            setDeviceId((prev) => prev ?? extractedId);
-            
-            let finalDeviceId = extractedId;
-            if (window.electron?.device?.getDeviceId) {
-              try {
-                const res = await window.electron.device.getDeviceId();
-                if (res?.success && res.device_id) {
-                  setDeviceId(res.device_id);
-                  finalDeviceId = res.device_id;
-                }
-              } catch { /* ignore */ }
-            }
-            if (finalDeviceId) {
-              try { await linkDeviceById(finalDeviceId); } catch { /* silent */ }
-            }
-            void loadDeviceModels(storedJwt);
-          } else if (window.electron?.device?.ensureAuth) {
-            // Auto-recovery for Electron: if stored JWT failed, try to get a fresh one immediately.
-            const res = await window.electron.device.ensureAuth();
-            if (res?.success && res.device_jwt) {
-              setDeviceJwt(res.device_jwt);
-              setStoredDeviceJwt(res.device_jwt);
-              setIsConnected(true);
-              setDeviceId(res.device_id || tryExtractDeviceIdFromJwt(res.device_jwt));
-              if (res.device_id) {
-                try { await linkDeviceById(res.device_id); } catch { /* silent */ }
-              }
-              void loadDeviceModels(res.device_jwt);
-            }
-          }
-        } catch {
-          // ignore network errors
-        } finally {
-          setConnecting(false);
-        }
-      })();
-    }
     void checkOllama();
-    // Intentionally mount-only: avoid re-running Electron bootstrap when callbacks change.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [checkElectron, checkOllama]);
 
   // Listen for device deactivation pushed from the Electron main process heartbeat loop.
   useEffect(() => {
@@ -236,14 +187,28 @@ export default function DeviceSetup() {
           setDeviceId(res.device_id ?? null);
           if (res.device_jwt) {
             const ok = await verifyCloudSession(res.device_jwt);
-            if (!ok) return;
-            setStoredDeviceJwt(res.device_jwt);
-            setDeviceJwt(res.device_jwt);
-            setIsConnected(true);
-            if (res.device_id) {
-              try { await linkDeviceById(res.device_id); } catch { /* silent */ }
+            if (ok) {
+              setStoredDeviceJwt(res.device_jwt);
+              setDeviceJwt(res.device_jwt);
+              setIsConnected(true);
+              if (res.device_id) {
+                try { await linkDeviceById(res.device_id); } catch { /* silent */ }
+              }
+              await loadDeviceModels(res.device_jwt);
+            } else if (window.electron?.device?.ensureAuth) {
+              // Silent auto-recovery: if getAuth gave us a bad token, try to fix it immediately.
+              const res2 = await window.electron.device.ensureAuth();
+              if (res2?.success && res2.device_jwt) {
+                setDeviceJwt(res2.device_jwt);
+                setStoredDeviceJwt(res2.device_jwt);
+                setIsConnected(true);
+                setDeviceId(res2.device_id || tryExtractDeviceIdFromJwt(res2.device_jwt));
+                if (res2.device_id) {
+                  try { await linkDeviceById(res2.device_id); } catch { /* silent */ }
+                }
+                await loadDeviceModels(res2.device_jwt);
+              }
             }
-            await loadDeviceModels(res.device_jwt);
           }
         }
       } catch {
