@@ -165,6 +165,18 @@ export default function DeviceSetup() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Listen for device deactivation pushed from the Electron main process heartbeat loop.
+  useEffect(() => {
+    if (!isElectronApp || !window.electron?.device?.onDeactivated) return;
+    window.electron.device.onDeactivated(() => {
+      setIsDisabled(true);
+      handleInvalidDeviceAuth("This device was disabled by an administrator.");
+    });
+    return () => {
+      window.electron?.device?.removeDeactivatedListener?.();
+    };
+  }, [isElectronApp, handleInvalidDeviceAuth]);
+
   useEffect(() => {
     if (!isElectronApp || !window.electron?.device?.getDeviceInfo) return;
     void window.electron.device.getDeviceInfo().then((res) => {
@@ -505,32 +517,40 @@ export default function DeviceSetup() {
             </div>
           ) : null}
 
-          <div className="space-y-2">
+          <div className=”space-y-2”>
           <Label>Cloud device ID</Label>
-          <div className="flex flex-col sm:flex-row gap-2">
-            <Input value={deviceId ?? "Not registered yet"} readOnly className="font-mono text-xs" />
-            <Button
-              type="button"
-              variant="outline"
-              disabled={!deviceId}
-              onClick={async () => {
-                if (!deviceId) return;
-                try {
-                  await navigator.clipboard.writeText(deviceId);
-                  toast({ title: "Copied", description: "Cloud device ID copied to clipboard." });
-                } catch {
-                  toast({ title: "Copy failed", description: "Please copy manually.", variant: "destructive" });
-                }
-              }}
-            >
-              <Copy className="h-4 w-4 mr-2" />
-              Copy
-            </Button>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            {deviceId 
-              ? "This device is automatically registered and linked to your tenant." 
-              : "If this shows “Not registered yet”, click Refresh below to register/reconnect."}
+          {isDisabled ? (
+            <p className=”text-sm text-destructive font-medium”>
+              Device is disabled — cloud device ID is not available until an admin re-enables this device.
+            </p>
+          ) : (
+            <div className=”flex flex-col sm:flex-row gap-2”>
+              <Input value={deviceId ?? “Not registered yet”} readOnly className=”font-mono text-xs” />
+              <Button
+                type=”button”
+                variant=”outline”
+                disabled={!deviceId}
+                onClick={async () => {
+                  if (!deviceId) return;
+                  try {
+                    await navigator.clipboard.writeText(deviceId);
+                    toast({ title: “Copied”, description: “Cloud device ID copied to clipboard.” });
+                  } catch {
+                    toast({ title: “Copy failed”, description: “Please copy manually.”, variant: “destructive” });
+                  }
+                }}
+              >
+                <Copy className=”h-4 w-4 mr-2” />
+                Copy
+              </Button>
+            </div>
+          )}
+          <p className=”text-xs text-muted-foreground”>
+            {isDisabled
+              ? “Contact your administrator to re-enable this device, then click Refresh to reconnect.”
+              : deviceId
+              ? “This device is automatically registered and linked to your tenant.”
+              : “If this shows \”Not registered yet\”, click Refresh below to register/reconnect.”}
           </p>
           </div>
         </CardContent>

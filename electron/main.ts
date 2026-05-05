@@ -429,7 +429,16 @@ app.whenReady().then(async () => {
   }
 
   try {
-    const runner = await ensureDeviceAuthAndStartHeartbeat({ log, heartbeatSeconds: 60 });
+    const runner = await ensureDeviceAuthAndStartHeartbeat({
+      log,
+      heartbeatSeconds: 60,
+      onDeactivated: () => {
+        log(`[device] device deactivated by admin — notifying renderer`);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("device:deactivated");
+        }
+      },
+    });
     deviceHeartbeatStopper = runner.stop;
   } catch (err) {
     log(`[device] ensureDeviceAuthAndStartHeartbeat failed: ${formatUnknownError(err)}`);
@@ -529,7 +538,16 @@ ipcMain.handle("device:ensureAuth", async () => {
     log(`[ipc] device:ensureAuth success device_id=${String(auth.device_id || "")}`);
     // Ensure heartbeat loop is running after an explicit reconnect.
     try {
-      const runner = await ensureDeviceAuthAndStartHeartbeat({ log, heartbeatSeconds: 60 });
+      const runner = await ensureDeviceAuthAndStartHeartbeat({
+        log,
+        heartbeatSeconds: 60,
+        onDeactivated: () => {
+          log(`[device] device deactivated by admin — notifying renderer`);
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send("device:deactivated");
+          }
+        },
+      });
       deviceHeartbeatStopper = runner.stop;
     } catch (err) {
       log(`[device] ensureDeviceAuthAndStartHeartbeat failed: ${formatUnknownError(err)}`);

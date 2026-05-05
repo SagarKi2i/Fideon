@@ -43,6 +43,13 @@ contextBridge.exposeInMainWorld("electron", {
     getAuth: () => ipcRenderer.invoke("device:getAuth"),
     clearAuth: () => ipcRenderer.invoke("device:clearAuth"),
     ensureAuth: () => ipcRenderer.invoke("device:ensureAuth"),
+    getDeviceInfo: () => ipcRenderer.invoke("device:getDeviceInfo"),
+    onDeactivated: (callback: () => void) => {
+      ipcRenderer.on("device:deactivated", () => callback());
+    },
+    removeDeactivatedListener: () => {
+      ipcRenderer.removeAllListeners("device:deactivated");
+    },
   },
 
   webhooks: {

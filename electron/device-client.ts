@@ -134,6 +134,15 @@ async function registerDevice(): Promise<{ device_id: string; device_token: stri
   return payload as { device_id: string; device_token: string };
 }
 
+class DeviceAuthError extends Error {
+  status: number;
+  constructor(msg: string, status: number) {
+    super(msg);
+    this.name = "DeviceAuthError";
+    this.status = status;
+  }
+}
+
 async function heartbeat(deviceJwt: string): Promise<void> {
   const res = await fetch(`${apiBaseUrl()}/api/v1/devices/heartbeat`, {
     method: "PUT",
@@ -145,6 +154,9 @@ async function heartbeat(deviceJwt: string): Promise<void> {
     const payload = await res.json().catch(() => ({}));
     const p: any = payload;
     const msg = p?.error || p?.detail || JSON.stringify(payload) || `HTTP ${res.status}`;
+    if (res.status === 401 || res.status === 403) {
+      throw new DeviceAuthError(`Heartbeat failed: ${msg}`, res.status);
+    }
     throw new Error(`Heartbeat failed: ${msg}`);
   }
 }
@@ -152,6 +164,7 @@ async function heartbeat(deviceJwt: string): Promise<void> {
 export async function ensureDeviceAuthAndStartHeartbeat(opts: {
   log: (msg: string) => void;
   heartbeatSeconds?: number;
+  onDeactivated?: () => void;
 }): Promise<{ stop: () => void }> {
   const store = await getStore();
   const hbSeconds = Math.max(10, Math.floor(opts.heartbeatSeconds ?? 60));
@@ -165,6 +178,14 @@ export async function ensureDeviceAuthAndStartHeartbeat(opts: {
         await heartbeat(jwt);
         opts.log(`[device] heartbeat ok`);
       } catch (e) {
+        if (e instanceof DeviceAuthError) {
+          opts.log(`[device] heartbeat auth error (${e.status}) — device deactivated by admin`);
+          stopped = true;
+          if (timer) clearInterval(timer);
+          await clearStoredDeviceJwtAsync().catch(() => {});
+          opts.onDeactivated?.();
+          return;
+        }
         opts.log(`[device] heartbeat error: ${e instanceof Error ? e.message : String(e)}`);
       }
     };
