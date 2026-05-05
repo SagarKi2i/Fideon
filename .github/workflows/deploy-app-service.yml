@@ -158,6 +158,7 @@ jobs:
           NEXT_PUBLIC_APP_URL: ${{ secrets.NEXT_PUBLIC_APP_URL }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           RESEND_FROM_EMAIL: ${{ secrets.RESEND_FROM_EMAIL }}
+          FRONTEND_URL: ${{ secrets.FRONTEND_URL }}
         run: |
           set -e
           az account set --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
@@ -241,6 +242,21 @@ jobs:
           fi
           if [ -n "$RESEND_FROM_EMAIL" ]; then
             SETTINGS+=("RESEND_FROM_EMAIL=${RESEND_FROM_EMAIL}")
+          fi
+          # FRONTEND_URL: used in server-generated emails (invite approval, etc.)
+          # Use explicit secret; fall back to NEXT_PUBLIC_APP_URL or derive from frontend app name.
+          BE_FRONTEND_URL="${FRONTEND_URL}"
+          if [ -z "$BE_FRONTEND_URL" ] && [ -n "$NEXT_PUBLIC_APP_URL" ]; then
+            BE_FRONTEND_URL="$NEXT_PUBLIC_APP_URL"
+          fi
+          if [ -z "$BE_FRONTEND_URL" ]; then
+            FE_APP_VAR="${{ vars.AZURE_WEBAPP_FRONTEND }}"
+            if [ -n "$FE_APP_VAR" ]; then
+              BE_FRONTEND_URL="https://${FE_APP_VAR}.azurewebsites.net"
+            fi
+          fi
+          if [ -n "$BE_FRONTEND_URL" ]; then
+            SETTINGS+=("FRONTEND_URL=${BE_FRONTEND_URL}")
           fi
 
           az webapp config appsettings set \
