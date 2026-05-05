@@ -76,7 +76,11 @@ fi
 # ── Start FastAPI ──────────────────────────────────────────────────────────────
 _start_fastapi() {
     cd /app
-    "$VENV/bin/uvicorn" server:app --host 0.0.0.0 --port 8000 >> "$LOG" 2>&1 &
+    "$VENV/bin/uvicorn" server:app \
+        --host 0.0.0.0 \
+        --port 8000 \
+        --timeout-keep-alive 600 \
+        --h11-max-incomplete-event-size 524288 >> "$LOG" 2>&1 &
     echo $!
 }
 
@@ -155,8 +159,10 @@ else
     log "Starting Cloudflare tunnel..."
     # --no-autoupdate prevents cloudflared from trying to self-update inside the container
     # tee -a makes tunnel output visible in RunPod container logs AND the log file
-    cloudflared tunnel --no-autoupdate run \
-        --token "${CLOUDFLARE_TUNNEL_TOKEN}" 2>&1 | tee -a "$LOG" &
+    cloudflared tunnel --no-autoupdate \
+        --proxy-connection-timeout 600s \
+        --proxy-expect-continue-timeout 600s \
+        run --token "${CLOUDFLARE_TUNNEL_TOKEN}" 2>&1 | tee -a "$LOG" &
     TUNNEL_PID=$!
     sleep 10
     if kill -0 $TUNNEL_PID 2>/dev/null; then
