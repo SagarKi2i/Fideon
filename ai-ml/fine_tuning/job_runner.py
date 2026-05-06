@@ -157,7 +157,7 @@ def _load_eval_examples_from_config(config: Dict[str, Any]) -> List[Dict[str, An
     return examples
 
 
-def _evict_old_seaweedfs_caches(cache_root: Path, keep_version: int) -> None:
+def _evict_old_storage_caches(cache_root: Path, keep_version: int) -> None:
     """Delete all finetuned/v{N}/ cache dirs except the one we're about to use."""
     if not cache_root.exists():
         return
@@ -170,7 +170,7 @@ def _evict_old_seaweedfs_caches(cache_root: Path, keep_version: int) -> None:
             continue
         if v != keep_version:
             shutil.rmtree(d, ignore_errors=True)
-            print(f"[job_runner] Evicted old SeaweedFS cache: {d}")
+            print(f"[job_runner] Evicted old storage cache: {d}")
 
 
 def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Optional[Path] = None) -> str:
@@ -227,7 +227,7 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
 
         if _cache_is_complete(cache_path):
             print(f"[job_runner] Using cached storage model v{storage_version}: {cache_dir}")
-            _evict_old_seaweedfs_caches(cache_path.parent, keep_version=storage_version)
+            _evict_old_storage_caches(cache_path.parent, keep_version=storage_version)
             return cache_dir
         if cache_path.exists():
             print(f"[job_runner] Cached model v{storage_version} is incomplete — deleting and re-downloading …")
@@ -246,7 +246,7 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
             try:
                 storage.download_finetuned_model(storage_version, cache_dir)
                 print(f"[job_runner] Storage model v{storage_version} ready at {cache_dir}")
-                _evict_old_seaweedfs_caches(cache_path.parent, keep_version=storage_version)
+                _evict_old_storage_caches(cache_path.parent, keep_version=storage_version)
                 return cache_dir
             except Exception as exc:
                 print(f"[job_runner] Storage download failed (non-fatal): {exc}")
@@ -498,7 +498,7 @@ def run_cycle(
                 "job_id":            job_id,
                 "base_model":        base_model,
                 "replay_fraction":   replay_fraction,
-                "seaweedfs_pending": True,
+                "storage_pending": True,
             }
 
             # Update local version_registry so _resolve_active_model_path()
@@ -553,7 +553,7 @@ def run_cycle(
             "merged_model_path":  merge_result.output_path,
             "eval_scores":        combined_scores,
         })
-        print(f"[job_runner] Cycle complete — SLM v1.{new_version} ready. Click 'Share Gradients' to upload to SeaweedFS.")
+        print(f"[job_runner] Cycle complete — SLM v1.{new_version} ready. Click 'Share Gradients' to upload to storage.")
 
         return CycleResult(
             status="completed",

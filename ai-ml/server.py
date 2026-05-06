@@ -34,7 +34,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 # Ensure ai-ml/fine_tuning is resolved before any /workspace/fine_tuning that
 # may exist from the backend. Insert the directory containing this file (i.e.
@@ -44,9 +44,14 @@ _THIS_DIR = str(Path(__file__).parent.resolve())
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
+import logging
 import threading
 import uvicorn
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+
+# Suppress Azure SDK + urllib3 DEBUG spam that floods the uvicorn log
+for _noisy in ("azure", "azure.core", "azure.storage", "azure.storage.blob", "urllib3", "http.client"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
@@ -56,7 +61,7 @@ from fastapi.responses import Response
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "/workspace/uploads"))
 TRAINING_SAMPLES_FILE = Path(os.getenv("TRAINING_SAMPLES_FILE", "/workspace/training_samples.jsonl"))
 PENDING_SHARE_DIR = Path("/workspace/fine_tuning/pending_shares")
-PORT = int(os.getenv("UPLOAD_SERVER_PORT", "8080"))
+PORT = int(os.getenv("UPLOAD_SERVER_PORT", "8000"))
 OCR_WORKERS = int(os.getenv("OCR_WORKERS", "1"))  # 1 GPU → 1 worker
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -959,8 +964,24 @@ def _run_federated_job(job_id: str) -> None:
         _update_fed_job(job_id, "downloading_weights", versions_aggregated=versions_available)
         print(f"[federated] Aggregating versions: {versions_available}")
 
-        # ── 2. Download all versions (skip any that fail — partial FedAvg is better than none) ──
-        tmp_dir = Path(tempfile.mkdtemp(prefix="fedavg_"))
+        # ── 2. Pre-flight: ensure enough disk space on /workspace ────────────────
+        import shutil as _shutil_check
+        _ws_free_gb = _shutil_check.disk_usage("/workspace").free / (1024 ** 3)
+        _needed_gb  = 40  # download + FedAvg copy + upload buffer (~2× model size)
+        if _ws_free_gb < _needed_gb:
+            raise RuntimeError(
+                f"Not enough disk space on /workspace for Global Update: "
+                f"{_ws_free_gb:.1f} GB free, need ≥{_needed_gb} GB. "
+                "Free space by deleting old merged model directories under /workspace/fine_tuning/runs/."
+            )
+        print(f"[federated] Disk pre-check OK: {_ws_free_gb:.1f} GB free on /workspace")
+
+        # ── 3. Download all versions (skip any that fail — partial FedAvg is better than none) ──
+        # Use /workspace for temp dir — /tmp is a small tmpfs on RunPod and
+        # the model shards are ~20 GB, which exceeds typical /tmp capacity.
+        _ws_tmp = Path("/workspace/.fedavg_tmp")
+        _ws_tmp.mkdir(parents=True, exist_ok=True)
+        tmp_dir = Path(tempfile.mkdtemp(prefix="fedavg_", dir=str(_ws_tmp)))
         try:
             model_dirs: List[str] = []
             downloaded_versions: List[int] = []
@@ -989,7 +1010,7 @@ def _run_federated_job(job_id: str) -> None:
                     f"(skipped {skipped_versions} due to download errors)"
                 )
 
-            # ── 3. FedAvg aggregation ─────────────────────────────────────────
+            # ── 4. FedAvg aggregation ─────────────────────────────────────────
             def _avg_progress(shard_name: str, current: int, total: int) -> None:
                 _update_fed_job(job_id, "aggregating", progress={
                     "current_file": f"Averaging: {shard_name}",
@@ -1011,7 +1032,7 @@ def _run_federated_job(job_id: str) -> None:
                     "aggregation may have failed silently. Aborting upload."
                 )
 
-            # ── 4. Quantize aggregated model → GGUF ──────────────────────────
+            # ── 5. Quantize aggregated model → GGUF ──────────────────────────
             _update_fed_job(job_id, "quantizing", progress={
                 "current_file": "Converting to GGUF...",
                 "percentage": 0,
@@ -1034,7 +1055,7 @@ def _run_federated_job(job_id: str) -> None:
                 "total_bytes": 100
             })
 
-            # ── 5. Upload aggregated model + GGUFs as new version ─────────────
+            # ── 6. Upload aggregated model + GGUFs as new version ─────────────
             def _up_progress(fname: str, cur: int, tot: Optional[int]) -> None:
                 pct = (cur / tot * 100) if tot else 0
                 _update_fed_job(job_id, "uploading", progress={
@@ -1106,12 +1127,14 @@ def _run_share_job(job_id: str, pending_entries: List[tuple]) -> None:
 
     def _progress_cb(filename: str, current: int, total: Optional[int]) -> None:
         pct = (current / total * 100) if total else 0
-        _upd(_share_jobs[job_id]["phase"], progress={
-            "current_file": filename,
-            "percentage": round(pct, 1),
-            "transferred_bytes": current,
-            "total_bytes": total
-        })
+        with _share_jobs_lock:
+            if job_id in _share_jobs:
+                _share_jobs[job_id]["progress"] = {
+                    "current_file": filename,
+                    "percentage": round(pct, 1),
+                    "transferred_bytes": current,
+                    "total_bytes": total,
+                }
 
     try:
         from fine_tuning.training_orchestrator import promote_adapter

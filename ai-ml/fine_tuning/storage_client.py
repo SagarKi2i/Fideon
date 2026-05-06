@@ -1,8 +1,8 @@
 """
 Storage backend factory.
 
-Set STORAGE_BACKEND=azure  to use Azure Blob Storage.
-Set STORAGE_BACKEND=seaweedfs  (or leave unset) to use SeaweedFS (default).
+Set STORAGE_BACKEND=azure     to use Azure Blob Storage (default).
+Set STORAGE_BACKEND=seaweedfs to use SeaweedFS (legacy fallback).
 """
 from __future__ import annotations
 import os

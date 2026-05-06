@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, List, Optional
 
-_CHUNK_SIZE = 256 * 1024 * 1024  # 256 MB upload chunks
+_CHUNK_SIZE = 8 * 1024 * 1024   # 8 MB blocks — prevents ServiceResponseTimeoutError on large shards
 
 
 class AzureBlobClient:
@@ -93,15 +93,19 @@ class AzureBlobClient:
             for attempt in range(1, 6):
                 try:
                     blob_client = cc.get_blob_client(blob_name)
+                    file_size = f.stat().st_size
                     with open(f, "rb") as fh:
                         hook = None
                         if progress_callback:
-                            hook = lambda current, total: progress_callback(rel.as_posix(), current, total)
+                            hook = lambda current, total, _rel=rel.as_posix(): progress_callback(_rel, current, total)
                         blob_client.upload_blob(
-                            fh, 
-                            overwrite=True, 
-                            max_concurrency=2,
-                            progress_hook=hook
+                            fh,
+                            overwrite=True,
+                            max_concurrency=4,
+                            max_block_size=_CHUNK_SIZE,           # 8 MB blocks — avoids TCP timeout on each block
+                            max_single_put_size=_CHUNK_SIZE,      # force block-blob path even for small files
+                            length=file_size,
+                            progress_hook=hook,
                         )
                     last_exc = None
                     break

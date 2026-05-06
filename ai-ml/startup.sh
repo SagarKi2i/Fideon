@@ -19,6 +19,13 @@ export SEAWEEDFS_BUCKET="${SEAWEEDFS_BUCKET:-my-bucket}"
 export ACORD_NL_SUMMARY_ENABLED="${ACORD_NL_SUMMARY_ENABLED:-true}"
 log "SEAWEEDFS_BUCKET=${SEAWEEDFS_BUCKET}  ACORD_NL_SUMMARY_ENABLED=${ACORD_NL_SUMMARY_ENABLED}"
 
+# Storage backend — Azure Blob Storage (set STORAGE_BACKEND=seaweedfs to revert to legacy)
+export STORAGE_BACKEND="${STORAGE_BACKEND:-azure}"
+export AZURE_BLOB_ACCOUNT_URL="${AZURE_BLOB_ACCOUNT_URL:-https://swtier.blob.core.windows.net}"
+export AZURE_BLOB_SAS_TOKEN="${AZURE_BLOB_SAS_TOKEN:-sv=2025-11-05&ss=bfqt&srt=sco&sp=rwdlacupiytfx&se=2026-06-04T12:54:05Z&st=2026-05-04T04:39:05Z&spr=https&sig=ZVUsGfphbkOQwoyrmx7dv0mb1UR7LeV6N7bMFF97g%2Bo%3D}"
+export AZURE_BLOB_CONTAINER="${AZURE_BLOB_CONTAINER:-models}"
+log "STORAGE_BACKEND=${STORAGE_BACKEND}  AZURE_BLOB_CONTAINER=${AZURE_BLOB_CONTAINER}  AZURE_BLOB_ACCOUNT_URL=${AZURE_BLOB_ACCOUNT_URL}"
+
 # Warn if quantization tools are missing — operator needs to re-run setup.sh
 if ! command -v llama-quantize &>/dev/null; then
   log "WARNING: llama-quantize not found. Run: bash /workspace/ai-ml/setup.sh --skip-pip"

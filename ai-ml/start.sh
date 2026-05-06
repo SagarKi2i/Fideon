@@ -6,7 +6,7 @@
 set -e
 
 UPLOAD_DIR=${UPLOAD_DIR:-/workspace/uploads}
-PORT=${UPLOAD_SERVER_PORT:-8080}
+PORT=${UPLOAD_SERVER_PORT:-8000}
 
 # /workspace/bin persists across pod restarts — add it to PATH so
 # llama-quantize and llama-convert-hf-to-gguf are always discoverable.
@@ -18,7 +18,7 @@ export ACORD_NL_SUMMARY_ENABLED="${ACORD_NL_SUMMARY_ENABLED:-true}"
 export STORAGE_BACKEND="${STORAGE_BACKEND:-azure}"
 export AZURE_BLOB_ACCOUNT_URL="${AZURE_BLOB_ACCOUNT_URL:-https://swtier.blob.core.windows.net}"
 export AZURE_BLOB_SAS_TOKEN="${AZURE_BLOB_SAS_TOKEN:-sv=2025-11-05&ss=bfqt&srt=sco&sp=rwdlacupiytfx&se=2026-06-04T12:54:05Z&st=2026-05-04T04:39:05Z&spr=https&sig=ZVUsGfphbkOQwoyrmx7dv0mb1UR7LeV6N7bMFF97g%2Bo%3D}"
-export AZURE_BLOB_CONTAINER="${AZURE_BLOB_CONTAINER:-fideon-models}"
+export AZURE_BLOB_CONTAINER="${AZURE_BLOB_CONTAINER:-models}"
 
 if ! command -v llama-quantize &>/dev/null; then
   echo "[start.sh] WARNING: llama-quantize not found in /workspace/bin."
