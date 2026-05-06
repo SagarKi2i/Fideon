@@ -134,7 +134,10 @@ def _enforce_not_revoked(claims: dict[str, Any], jwt_issued_after_raw: Any) -> N
         issued_after_ts = _parse_utc_iso(jwt_issued_after_raw).timestamp()
     except ValueError:
         issued_after_ts = 0
-    if claims.get("iat", 0) < issued_after_ts:
+    # JWT iat is second-precision (int); jwt_issued_after may have sub-second precision.
+    # Truncate to whole seconds so a freshly-issued JWT (iat == floor(jwt_issued_after))
+    # is not incorrectly treated as revoked.
+    if claims.get("iat", 0) < int(issued_after_ts):
         raise HTTPException(status_code=401, detail="Device token has been revoked — please re-register")
 
 
@@ -254,6 +257,11 @@ async def _upsert_device_for_registration(
     )
     if existing:
         device = existing[0]
+        if not device.get("is_active", True):
+            raise HTTPException(
+                status_code=403,
+                detail="Device is deactivated — ask an administrator to re-enable it before re-registering",
+            )
         await postgrest_patch(
             "devices",
             f"id=eq.{quote(device['id'], safe='')}",

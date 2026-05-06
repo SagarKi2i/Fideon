@@ -188,55 +188,43 @@ async function heartbeat(deviceJwt: string): Promise<void> {
   }
 }
 
-export async function ensureDeviceAuthAndStartHeartbeat(opts: {
-  log: (msg: string) => void;
-  heartbeatSeconds?: number;
-  onDeactivated?: () => void;
-}): Promise<{ stop: () => void }> {
-  const store = await getStore();
+export function startHeartbeatLoop(
+  deviceJwt: string,
+  opts: {
+    log: (msg: string) => void;
+    heartbeatSeconds?: number;
+    onDeactivated?: () => void;
+  },
+): { stop: () => void } {
   const hbSeconds = Math.max(10, Math.floor(opts.heartbeatSeconds ?? 60));
   let stopped = false;
   let timer: NodeJS.Timeout | null = null;
 
-  const startLoop = (jwt: string) => {
-    const tick = async () => {
-      if (stopped) return;
-      try {
-        await heartbeat(jwt);
-        opts.log(`[device] heartbeat ok`);
-      } catch (e) {
-        if (e instanceof DeviceAuthError) {
-          // Guard: if stop() was called between when this tick started and now,
-          // don't treat the 401 as admin-deactivation — the loop was intentionally stopped.
-          if (stopped) return;
-          opts.log(`[device] heartbeat auth error (${e.status}) — device deactivated by admin`);
-          stopped = true;
-          if (timer) clearInterval(timer);
-          await clearStoredDeviceJwtAsync().catch(() => {});
-          opts.onDeactivated?.();
-          return;
-        }
-        opts.log(`[device] heartbeat error: ${e instanceof Error ? e.message : String(e)}`);
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      await heartbeat(deviceJwt);
+      opts.log(`[device] heartbeat ok`);
+    } catch (e) {
+      if (e instanceof DeviceAuthError) {
+        // Guard: if stop() was called between when this tick started and now,
+        // don't treat the 401 as admin-deactivation — the loop was intentionally stopped.
+        if (stopped) return;
+        opts.log(`[device] heartbeat auth error (${e.status}) — device deactivated by admin`);
+        stopped = true;
+        if (timer) clearInterval(timer);
+        await clearStoredDeviceJwtAsync().catch(() => {});
+        opts.onDeactivated?.();
+        return;
       }
-    };
-    // Do NOT run an immediate tick. ensureDeviceAuthAsync already validated (or freshly
-    // issued) the JWT right before startLoop is called. An instant heartbeat on a
-    // brand-new JWT can hit the backend's propagation window, return 401, and be
-    // misread as admin deactivation — disconnecting a device that is actually enabled.
-    timer = setInterval(() => void tick(), hbSeconds * 1000);
+      opts.log(`[device] heartbeat error: ${e instanceof Error ? e.message : String(e)}`);
+    }
   };
 
-  try {
-    // Always validate before starting the loop. ensureDeviceAuthAsync sends a heartbeat
-    // to confirm the stored JWT is still valid, and re-registers if it gets 401/403.
-    // This prevents a stale post-logout JWT from being mistaken for admin deactivation.
-    opts.log(`[device] validating device auth... base=${apiBaseUrl()}`);
-    const auth = await ensureDeviceAuthAsync({ log: opts.log });
-    opts.log(`[device] device auth ready device_id=${auth.device_id}`);
-    startLoop(auth.device_jwt);
-  } catch (e) {
-    opts.log(`[device] startup auth failed: ${e instanceof Error ? e.message : String(e)}`);
-  }
+  // Do NOT run an immediate tick. ensureDeviceAuthAsync already validated (or freshly
+  // issued) the JWT right before this is called. An instant heartbeat on a brand-new JWT
+  // can hit the backend's propagation window and be misread as admin deactivation.
+  timer = setInterval(() => void tick(), hbSeconds * 1000);
 
   return {
     stop: () => {
@@ -244,5 +232,25 @@ export async function ensureDeviceAuthAndStartHeartbeat(opts: {
       if (timer) clearInterval(timer);
     },
   };
+}
+
+export async function ensureDeviceAuthAndStartHeartbeat(opts: {
+  log: (msg: string) => void;
+  heartbeatSeconds?: number;
+  onDeactivated?: () => void;
+}): Promise<{ stop: () => void }> {
+  try {
+    // Validate (or freshly register) before starting the loop. ensureDeviceAuthAsync
+    // sends a heartbeat to confirm the stored JWT is still valid, and re-registers if
+    // it gets 401/403. This prevents a stale post-logout JWT from being mistaken for
+    // admin deactivation.
+    opts.log(`[device] validating device auth... base=${apiBaseUrl()}`);
+    const auth = await ensureDeviceAuthAsync({ log: opts.log });
+    opts.log(`[device] device auth ready device_id=${auth.device_id}`);
+    return startHeartbeatLoop(auth.device_jwt, opts);
+  } catch (e) {
+    opts.log(`[device] startup auth failed: ${e instanceof Error ? e.message : String(e)}`);
+    return { stop: () => {} };
+  }
 }
 
