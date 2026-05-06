@@ -195,11 +195,11 @@ export default function DeviceSetup() {
               setStoredDeviceJwt(res.device_jwt);
               setDeviceJwt(res.device_jwt);
               setIsConnected(true);
+              setIsDisabled(false);
               if (res.device_id) {
                 try { await linkDeviceById(res.device_id); } catch { /* silent */ }
               }
-              await loadDeviceModels(res.device_jwt);
-              setIsDisabled(false);
+              try { await loadDeviceModels(res.device_jwt); } catch { /* models may lag */ }
             } else if (window.electron?.device?.ensureAuth) {
               // Silent auto-recovery: if getAuth gave us a bad token, try to fix it immediately.
               const res2 = await window.electron.device.ensureAuth();
@@ -207,12 +207,12 @@ export default function DeviceSetup() {
                 setDeviceJwt(res2.device_jwt);
                 setStoredDeviceJwt(res2.device_jwt);
                 setIsConnected(true);
+                setIsDisabled(false);
                 setDeviceId(res2.device_id || tryExtractDeviceIdFromJwt(res2.device_jwt));
                 if (res2.device_id) {
                   try { await linkDeviceById(res2.device_id); } catch { /* silent */ }
                 }
-                await loadDeviceModels(res2.device_jwt);
-                setIsDisabled(false);
+                try { await loadDeviceModels(res2.device_jwt); } catch { /* models may lag */ }
               }
             }
           } else if (window.electron?.device?.ensureAuth) {
@@ -224,12 +224,12 @@ export default function DeviceSetup() {
               setDeviceJwt(res2.device_jwt);
               setStoredDeviceJwt(res2.device_jwt);
               setIsConnected(true);
+              setIsDisabled(false);
               setDeviceId(newId);
               if (newId) {
                 try { await linkDeviceById(newId); } catch { /* silent */ }
               }
-              await loadDeviceModels(res2.device_jwt);
-              setIsDisabled(false);
+              try { await loadDeviceModels(res2.device_jwt); } catch { /* models may lag */ }
             }
           }
         }

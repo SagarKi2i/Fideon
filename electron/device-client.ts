@@ -219,8 +219,10 @@ export async function ensureDeviceAuthAndStartHeartbeat(opts: {
         opts.log(`[device] heartbeat error: ${e instanceof Error ? e.message : String(e)}`);
       }
     };
-    // Run an initial beat quickly, then every hbSeconds.
-    void tick();
+    // Do NOT run an immediate tick. ensureDeviceAuthAsync already validated (or freshly
+    // issued) the JWT right before startLoop is called. An instant heartbeat on a
+    // brand-new JWT can hit the backend's propagation window, return 401, and be
+    // misread as admin deactivation — disconnecting a device that is actually enabled.
     timer = setInterval(() => void tick(), hbSeconds * 1000);
   };
 
