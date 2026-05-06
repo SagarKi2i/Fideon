@@ -146,24 +146,11 @@ const getPodStats = (modelId: string) => {
     case "carrier-claims-adjudication":
       return { total: 89, success: 82, errors: 3, label: "Claims Adjudicated" };
     default:
-      return { total: 0, success: 0, errors: 0, label: "Operations" };
+      return { total: 100, success: 95, errors: 5, label: "Operations" };
   }
 };
 
-function relativeTime(isoDate: string | null): string {
-  if (!isoDate) return "Never";
-  const diff = Date.now() - new Date(isoDate).getTime();
-  const secs = Math.floor(diff / 1000);
-  if (secs < 60) return `${secs}s ago`;
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
-
-function PodSpecificTable({ modelId, acordRuns }: Readonly<{ modelId: string; acordRuns?: any[] }>) {
+function PodSpecificTable({ modelId }: Readonly<{ modelId: string }>) {
   const statusClassForDocRetrieval = (status: string): string => {
     if (status === "success") return "text-green-600 border-green-600";
     if (status === "warning") return "text-amber-600 border-amber-600";
@@ -511,66 +498,6 @@ function PodSpecificTable({ modelId, acordRuns }: Readonly<{ modelId: string; ac
         </Table>
       );
 
-    case "acord-parser": {
-      const runs = acordRuns ?? [];
-      if (runs.length === 0) {
-        return (
-          <div className="text-center py-8 text-muted-foreground">
-            <Activity className="h-12 w-12 mx-auto mb-4 opacity-50" />
-            <p>No extractions yet — upload a PDF in the Playground to get started.</p>
-          </div>
-        );
-      }
-      const statusClass = (s: string) => {
-        if (s === "approved") return "text-green-600 border-green-600";
-        if (s === "submitted") return "text-blue-600 border-blue-600";
-        if (s === "needs_admin_review") return "text-amber-600 border-amber-600";
-        return "text-muted-foreground border-border";
-      };
-      const statusLabel: Record<string, string> = {
-        draft: "Extracted",
-        submitted: "Correction Saved",
-        needs_admin_review: "Admin Review",
-        approved: "Trained",
-      };
-      return (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Date</TableHead>
-              <TableHead>Filename</TableHead>
-              <TableHead>Form Type</TableHead>
-              <TableHead>Status</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {runs.map((run: any) => (
-              <TableRow key={run.id}>
-                <TableCell className="font-medium text-muted-foreground">
-                  {new Date(run.created_at).toLocaleDateString()}
-                </TableCell>
-                <TableCell>
-                  <div className="flex items-center gap-2">
-                    <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
-                    <span className="truncate max-w-[220px]">{run.source_filename || "—"}</span>
-                  </div>
-                </TableCell>
-                <TableCell>ACORD {run.form_type_detected || "—"}</TableCell>
-                <TableCell>
-                  <Badge variant="outline" className={statusClass(run.status)}>
-                    {run.status === "approved" && <CheckCircle2 className="h-3 w-3 mr-1" />}
-                    {run.status === "submitted" && <CheckCircle2 className="h-3 w-3 mr-1" />}
-                    {run.status === "needs_admin_review" && <AlertCircle className="h-3 w-3 mr-1" />}
-                    {statusLabel[run.status] ?? run.status}
-                  </Badge>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      );
-    }
-
     default:
       return (
         <div className="text-center py-8 text-muted-foreground">
@@ -588,25 +515,10 @@ export default function PodDashboard() {
   const [pod, setPod] = useState<ActivatedPod | null>(null);
   const [loading, setLoading] = useState(true);
   const [deactivating, setDeactivating] = useState(false);
-  const [acordRuns, setAcordRuns] = useState<any[]>([]);
-  const [acordStats, setAcordStats] = useState<{ total: number; lastActivity: string | null } | null>(null);
 
   useEffect(() => {
     loadPodData();
   }, [podId]);
-
-  const loadAcordStats = async () => {
-    const db = supabase as any;
-    const { data } = await db
-      .from("acord_extraction_runs")
-      .select("id, source_filename, form_type_detected, status, created_at")
-      .order("created_at", { ascending: false })
-      .limit(100);
-    if (data) {
-      setAcordRuns(data);
-      setAcordStats({ total: data.length, lastActivity: data[0]?.created_at ?? null });
-    }
-  };
 
   const loadPodData = async () => {
     if (!podId) {
@@ -641,9 +553,6 @@ export default function PodDashboard() {
       }
 
       setPod(data);
-      if (data.model_id === "acord-parser") {
-        loadAcordStats();
-      }
     } catch (error) {
       console.error("Error loading pod:", error);
     } finally {
@@ -694,16 +603,6 @@ export default function PodDashboard() {
 
   const PodIcon = getPodIcon(pod.model_id);
   const stats = getPodStats(pod.model_id);
-  const isAcord = pod.model_id === "acord-parser";
-  const displayTotal   = isAcord ? (acordStats?.total ?? 0) : stats.total;
-  const displayErrors  = isAcord ? acordRuns.filter((r) => r.status === "draft").length : stats.errors;
-  const displaySuccess = displayTotal > 0
-    ? (((displayTotal - displayErrors) / displayTotal) * 100).toFixed(1) + "%"
-    : "—";
-  const displayLabel   = isAcord ? "PDFs Extracted" : stats.label;
-  const displayLastActivity = isAcord
-    ? relativeTime(acordStats?.lastActivity ?? null)
-    : "—";
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
@@ -774,8 +673,8 @@ export default function PodDashboard() {
           <CardContent className="pt-6">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm text-muted-foreground">{displayLabel}</p>
-                <p className="text-2xl font-bold text-foreground">{displayTotal}</p>
+                <p className="text-sm text-muted-foreground">{stats.label}</p>
+                <p className="text-2xl font-bold text-foreground">{stats.total}</p>
               </div>
               <div className="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center">
                 <PodIcon className="h-5 w-5 text-primary" />
@@ -789,7 +688,9 @@ export default function PodDashboard() {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-muted-foreground">Success Rate</p>
-                <p className="text-2xl font-bold text-foreground">{displaySuccess}</p>
+                <p className="text-2xl font-bold text-foreground">
+                  {((stats.success / stats.total) * 100).toFixed(1)}%
+                </p>
               </div>
               <div className="h-10 w-10 rounded-full bg-green-500/10 flex items-center justify-center">
                 <CheckCircle2 className="h-5 w-5 text-green-500" />
@@ -802,8 +703,8 @@ export default function PodDashboard() {
           <CardContent className="pt-6">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm text-muted-foreground">Corrections Pending</p>
-                <p className="text-2xl font-bold text-foreground">{displayErrors}</p>
+                <p className="text-sm text-muted-foreground">Errors</p>
+                <p className="text-2xl font-bold text-foreground">{stats.errors}</p>
               </div>
               <div className="h-10 w-10 rounded-full bg-destructive/10 flex items-center justify-center">
                 <XCircle className="h-5 w-5 text-destructive" />
@@ -817,7 +718,7 @@ export default function PodDashboard() {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-muted-foreground">Last Activity</p>
-                <p className="text-2xl font-bold text-foreground">{displayLastActivity}</p>
+                <p className="text-2xl font-bold text-foreground">2m ago</p>
               </div>
               <div className="h-10 w-10 rounded-full bg-accent/10 flex items-center justify-center">
                 <Clock className="h-5 w-5 text-accent" />
@@ -834,7 +735,7 @@ export default function PodDashboard() {
           <CardDescription>Recent operations for this pod</CardDescription>
         </CardHeader>
         <CardContent>
-          <PodSpecificTable modelId={pod.model_id} acordRuns={acordRuns} />
+          <PodSpecificTable modelId={pod.model_id} />
         </CardContent>
       </Card>
     </div>

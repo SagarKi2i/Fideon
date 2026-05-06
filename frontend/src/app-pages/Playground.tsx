@@ -1,4 +1,4 @@
-﻿import { useState, useEffect } from "react";
+import { useState, useEffect } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -179,6 +179,50 @@ export default function Playground() {
     setIsRunning(true);
     setResult("");
 
+    // FOR TESTING: Mock success result
+    if (data?.type === "mock-success") {
+      setTimeout(() => {
+        const mockJson = {
+          taxonomy: {
+            domain: "insurance",
+            doc_type_a: "Policy (Expiring)",
+            doc_type_b: "Proposal (Renewal)",
+            lines_of_business: ["Commercial Auto"],
+          },
+          extracted_fields: {
+            policyA: {
+              agency: "AssuredPartners — Midwest",
+              premium: 2517,
+              policy_number: "BA-1L251829-25-42-G",
+              carrier: "Travelers Casualty Insurance Co. of America",
+            },
+            policyB: {
+              agency: "AssuredPartners — Midwest",
+              premium: 2517,
+              policy_number: "BA-1L251829-1",
+              carrier: "Travelers Casualty Insurance Co. of America",
+            },
+          },
+          clause_diff: {
+            clauses: [
+              { id: "1", title: "Named Insured", status: "changed", before: "ABC Construction Inc", after: "ABC Construction Group LLC" },
+              { id: "2", title: "Pollution Exclusion", status: "added", after: "Total pollution exclusion endorsement CA 21 02 included in renewal." },
+            ],
+          },
+          deviation_percent: 6,
+          deviation_exceeds_threshold: false,
+          recommendation: {
+            recommended_policy: "B",
+            rationale: ["Renewal includes updated entity name", "Added fellow employee coverage"],
+          },
+          warnings: ["Policy number mismatch detected"],
+        };
+        setResult(JSON.stringify(mockJson, null, 2));
+        setIsRunning(false);
+      }, 1500);
+      return;
+    }
+
     try {
       // Policy comparison: extract both documents with the ACORD pipeline and compare.
       if (data?.type === "policy-comparison" && data?.policyAFile instanceof File && data?.policyBFile instanceof File) {
@@ -192,6 +236,7 @@ export default function Playground() {
           setIsRunning(false);
           return;
         } catch (e: any) {
+          console.error("Policy comparison extraction/prompt error:", e);
           toast({
             title: "Policy comparison failed",
             description: e?.message ? String(e.message) : "Failed to compare documents",
@@ -428,19 +473,13 @@ export default function Playground() {
 
       <div className="relative z-10 space-y-6 animate-fade-in">
         {/* Hero Header */}
-        <div className="relative rounded-2xl bg-gradient-hero p-8 border border-border/50 backdrop-blur-sm shadow-premium">
-          <div className="absolute inset-0 bg-gradient-subtle rounded-2xl opacity-50" />
+        <div className="relative p-2">
           <div className="relative">
-            <div className="flex items-center gap-3 mb-2">
-              <div className="p-2 rounded-lg bg-primary/10">
-                <Brain className="h-8 w-8 text-primary animate-float" />
-              </div>
-              <h1 className="text-4xl font-bold tracking-tight bg-gradient-to-r from-primary via-primary to-accent bg-clip-text text-transparent">
-                Fideon Playground
-              </h1>
-            </div>
-            <p className="text-muted-foreground text-lg">
-              Test and experiment with your activated AI models
+            <h1 className="text-3xl font-bold tracking-tight text-foreground">
+              Playground
+            </h1>
+            <p className="text-muted-foreground text-base mt-1">
+              Test and experiment with your activated AI agents
             </p>
           </div>
         </div>
@@ -449,9 +488,9 @@ export default function Playground() {
         <Card className="bg-card/80 backdrop-blur-sm border-border/50 shadow-card hover:shadow-elevated transition-shadow animate-scale-in">
           <CardContent className="pt-6 space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="model" className="text-foreground">Select Model</Label>
+              <Label htmlFor="model" className="text-foreground">Select Agent</Label>
               <Select value={selectedModel} onValueChange={setSelectedModel}>
-                <SelectTrigger id="model" className="bg-background border-input text-foreground">
+                <SelectTrigger id="model" className="bg-background border-input text-foreground h-12 shadow-sm">
                   <SelectValue placeholder="Choose a model" />
                 </SelectTrigger>
                 <SelectContent>
@@ -465,8 +504,8 @@ export default function Playground() {
             </div>
             
             {selectedModelData && (
-              <div className="pt-4 border-t border-border">
-                <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-primary/10 text-primary">
+              <div className="flex">
+                <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-primary/10 text-primary border border-primary/20">
                   {selectedModelData.domain}
                 </span>
               </div>

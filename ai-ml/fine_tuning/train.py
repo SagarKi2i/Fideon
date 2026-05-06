@@ -64,10 +64,11 @@ def run_training(
     """
     import torch
     from datasets import Dataset
-    from peft import LoraConfig, TaskType, get_peft_model
+    from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
     from transformers import (
         AutoProcessor,
-        DataCollatorForSeq2Seq,
+        BitsAndBytesConfig,
+        DataCollatorForLanguageModeling,
         Qwen2VLForConditionalGeneration,
         TrainingArguments,
         Trainer,
@@ -76,9 +77,19 @@ def run_training(
     output_dir = str(output_dir)
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-    lora_cfg   = config.get("lora", {})
-    train_cfg  = config.get("training", {})
+    lora_cfg  = config.get("lora", {})
+    train_cfg = config.get("training", {})
     local_only = str(config.get("local_files_only", "true")).lower() in {"1", "true", "yes"}
+
+    # Free any VRAM left from the OCR/VLM extraction model before training
+    try:
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            print("[train] VRAM cleared before loading training model.")
+    except Exception:
+        pass
 
     print(f"[train] Loading processor from {base_model} …")
     try:
@@ -90,59 +101,46 @@ def run_training(
     tokenizer = processor.tokenizer
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "right"
 
-    # ── Load model in BF16 (H100 SXM 80 GB — no quantization needed) ─────────
-    # BF16 gives full-precision LoRA gradients vs the degraded NF4 compute path.
-    # Flash Attention 2 is used when available: reduces memory and speeds up
-    # attention on long (4096-token) sequences with H100's HBM3 bandwidth.
-    print(f"[train] Loading model {base_model} in BF16 …")
-    _load_kwargs: Dict[str, Any] = {
-        "torch_dtype": torch.bfloat16,
-        "device_map": "auto",
-        "local_files_only": local_only,
-    }
-    try:
-        model = Qwen2VLForConditionalGeneration.from_pretrained(
-            base_model, attn_implementation="flash_attention_2", **_load_kwargs
-        )
-        print("[train] Flash Attention 2 enabled")
-    except Exception:
-        model = Qwen2VLForConditionalGeneration.from_pretrained(base_model, **_load_kwargs)
-        print("[train] Flash Attention 2 unavailable — using default attention")
+    # ── Load model in 4-bit QLoRA ────────────────────────────────────────────
+    print(f"[train] Loading model {base_model} in 4-bit …")
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type=config.get("bnb_4bit_quant_type", "nf4"),
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_use_double_quant=True,
+    )
+    model = Qwen2VLForConditionalGeneration.from_pretrained(
+        base_model,
+        quantization_config=bnb_config,
+        device_map="auto",
+        local_files_only=local_only,
+    )
+    model = prepare_model_for_kbit_training(
+        model,
+        use_gradient_checkpointing=bool(train_cfg.get("gradient_checkpointing", True)),
+    )
 
     # ── Apply LoRA ───────────────────────────────────────────────────────────
-    # r=64, alpha=128 from config — 4× larger rank than the old 24 GB default (r=16)
-    # gives significantly more expressive adapters on the H100.
     target_modules = lora_cfg.get(
         "target_modules",
         ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
     )
     lora_config = LoraConfig(
-        r=int(lora_cfg.get("r", 64)),
-        lora_alpha=int(lora_cfg.get("lora_alpha", 128)),
+        r=int(lora_cfg.get("r", 16)),
+        lora_alpha=int(lora_cfg.get("lora_alpha", 32)),
         target_modules=target_modules,
         lora_dropout=float(lora_cfg.get("lora_dropout", 0.05)),
         bias=lora_cfg.get("bias", "none"),
         task_type=TaskType.CAUSAL_LM,
     )
     model = get_peft_model(model, lora_config)
-    
-    # Required for Gradient Checkpointing to work with LoRA
-    model.enable_input_require_grads()
-    
-    # Explicitly enable gradient checkpointing on the model
-    model.gradient_checkpointing_enable()
-    
-    # Ensure config allows gradient checkpointing
-    model.config.use_cache = False 
-    
     model.print_trainable_parameters()
 
     # ── Tokenise dataset ─────────────────────────────────────────────────────
     print(f"[train] Loading dataset from {dataset_path} …")
     rows = _load_jsonl(Path(dataset_path))
-    max_seq = int(train_cfg.get("max_seq_length", 4096))
+    max_seq = int(train_cfg.get("max_seq_length", 2048))
 
     texts = []
     for row in rows:
@@ -152,81 +150,63 @@ def run_training(
 
     print(f"[train] Tokenising {len(texts)} examples (max_seq={max_seq}) …")
 
-    # Only the assistant turn is used as the training target (SFT).
-    # System + user tokens are masked to -100 so the loss is not computed on them.
+    # Qwen2-VL chat template wraps the assistant turn with <|im_start|>assistant\n
+    # We mask all non-assistant tokens to -100 so the loss is only computed on
+    # the model's actual outputs, not on the system prompt or user content.
     _ASSISTANT_PREFIX = "<|im_start|>assistant\n"
 
     def _tokenise(batch: Dict[str, Any]) -> Dict[str, Any]:
-        # Tokenise all texts in the batch at once
         enc = tokenizer(
             batch["text"],
             truncation=True,
             max_length=max_seq,
             padding=False,
-            add_special_tokens=False,
         )
-        
-        all_input_ids = enc["input_ids"]
-        all_labels = []
-        
-        for i, text in enumerate(batch["text"]):
-            input_ids = all_input_ids[i]
-            # Create a label copy and mask the non-assistant parts with -100
-            labels = [int(token_id) for token_id in input_ids]
-            
-            # Find the start of the assistant turn to mask everything before it
+        labels_list = []
+        for text, input_ids in zip(batch["text"], enc["input_ids"]):
+            labels = [-100] * len(input_ids)
+            # Find where the last (assistant) turn begins and unmask from there
             prefix_end = text.rfind(_ASSISTANT_PREFIX)
             if prefix_end != -1:
-                # Tokenise the prefix to know exactly how many tokens to mask
                 prefix_text = text[: prefix_end + len(_ASSISTANT_PREFIX)]
-                prefix_enc = tokenizer(prefix_text, add_special_tokens=False)
-                prefix_len = len(prefix_enc["input_ids"])
-                
-                # Mask tokens from 0 to prefix_len with -100
-                for j in range(min(prefix_len, len(labels))):
-                    labels[j] = -100
-            
-            all_labels.append(labels)
-
-        # Return a plain dict of lists (required for Dataset.map to work reliably with the Trainer)
-        return {
-            "input_ids": [list(map(int, ids)) for ids in all_input_ids],
-            "attention_mask": [list(map(int, mask)) for mask in enc["attention_mask"]],
-            "labels": all_labels,
-        }
+                prefix_len = len(
+                    tokenizer(prefix_text, add_special_tokens=False)["input_ids"]
+                )
+                for i in range(prefix_len, len(input_ids)):
+                    labels[i] = input_ids[i]
+            else:
+                # Fallback: train on full sequence if template boundary not found
+                labels = input_ids[:]
+            labels_list.append(labels)
+        enc["labels"] = labels_list
+        return enc
 
     hf_dataset = Dataset.from_dict({"text": texts})
     tokenised  = hf_dataset.map(_tokenise, batched=True, remove_columns=["text"])
 
     # ── Train ────────────────────────────────────────────────────────────────
-    # H100 defaults: batch=8, accumulation=1, adamw_torch, no gradient checkpointing.
     training_args = TrainingArguments(
         output_dir=output_dir,
         num_train_epochs=int(train_cfg.get("num_epochs", 3)),
-        per_device_train_batch_size=int(train_cfg.get("per_device_train_batch_size", 8)),
-        gradient_accumulation_steps=int(train_cfg.get("gradient_accumulation_steps", 1)),
+        per_device_train_batch_size=int(train_cfg.get("per_device_train_batch_size", 1)),
+        gradient_accumulation_steps=int(train_cfg.get("gradient_accumulation_steps", 4)),
         learning_rate=float(train_cfg.get("learning_rate", 2e-5)),
         weight_decay=float(train_cfg.get("weight_decay", 0.01)),
-        max_grad_norm=float(train_cfg.get("max_grad_norm", 1.0)),
+        max_grad_norm=float(train_cfg.get("max_grad_norm", 0.3)),
         fp16=False,
         bf16=bool(train_cfg.get("bf16", True)),
-        gradient_checkpointing=bool(train_cfg.get("gradient_checkpointing", False)),
+        gradient_checkpointing=bool(train_cfg.get("gradient_checkpointing", True)),
         warmup_ratio=float(train_cfg.get("warmup_ratio", 0.10)),
         logging_steps=int(train_cfg.get("logging_steps", 5)),
         save_strategy=train_cfg.get("save_strategy", "epoch"),
-        save_total_limit=int(train_cfg.get("save_total_limit", 3)),
-        optim=train_cfg.get("optim", "adamw_torch"),
+        save_total_limit=int(train_cfg.get("save_total_limit", 2)),
+        optim=train_cfg.get("optim", "paged_adamw_8bit"),
         report_to="none",
         run_name=f"fideon-acord-{job_id}",
         dataloader_num_workers=0,
     )
 
-    collator = DataCollatorForSeq2Seq(
-        tokenizer=tokenizer,
-        model=model,
-        label_pad_token_id=-100,
-        padding=True,
-    )
+    collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
     trainer  = Trainer(
         model=model,
         args=training_args,
@@ -235,21 +215,12 @@ def run_training(
     )
 
     print("[train] Starting training …")
-    if torch.cuda.is_available():
-        import gc
-        gc.collect()
-        torch.cuda.empty_cache()
-        print(f"[train] VRAM cleared before training. Free: {torch.cuda.memory_reserved() / 1e9:.1f}GB reserved.")
-        
-    train_output = trainer.train()
+    trainer.train()
 
     adapter_path = output_dir
     print(f"[train] Saving adapter to {adapter_path} …")
     model.save_pretrained(adapter_path)
     processor.save_pretrained(adapter_path)
-
-    training_loss = round(float(train_output.training_loss), 4)
-    print(f"[train] Final training loss: {training_loss}  epochs: {training_args.num_train_epochs}")
 
     # Write adapter manifest
     manifest = {
@@ -260,8 +231,6 @@ def run_training(
         "lora_r": lora_config.r,
         "lora_alpha": lora_config.lora_alpha,
         "num_epochs": training_args.num_train_epochs,
-        "training_loss": training_loss,
-        "global_step": train_output.global_step,
         "learning_rate": training_args.learning_rate,
         "trained_at": datetime.now(timezone.utc).isoformat(),
     }

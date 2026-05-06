@@ -34,7 +34,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 # Ensure ai-ml/fine_tuning is resolved before any /workspace/fine_tuning that
 # may exist from the backend. Insert the directory containing this file (i.e.
@@ -44,14 +44,8 @@ _THIS_DIR = str(Path(__file__).parent.resolve())
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
-import logging
-import threading
 import uvicorn
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
-
-# Suppress Azure SDK + urllib3 DEBUG spam that floods the uvicorn log
-for _noisy in ("azure", "azure.core", "azure.storage", "azure.storage.blob", "urllib3", "http.client"):
-    logging.getLogger(_noisy).setLevel(logging.WARNING)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
@@ -60,8 +54,7 @@ from fastapi.responses import Response
 # ---------------------------------------------------------------------------
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "/workspace/uploads"))
 TRAINING_SAMPLES_FILE = Path(os.getenv("TRAINING_SAMPLES_FILE", "/workspace/training_samples.jsonl"))
-PENDING_SHARE_DIR = Path("/workspace/fine_tuning/pending_shares")
-PORT = int(os.getenv("UPLOAD_SERVER_PORT", "8000"))
+PORT = int(os.getenv("UPLOAD_SERVER_PORT", "8080"))
 OCR_WORKERS = int(os.getenv("OCR_WORKERS", "1"))  # 1 GPU → 1 worker
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -71,10 +64,6 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 # ---------------------------------------------------------------------------
 _uploads: Dict[str, Dict[str, Any]] = {}
 _ocr_jobs: Dict[str, Dict[str, Any]] = {}
-
-# Share-gradients jobs (user-triggered storage upload after local training)
-_share_jobs: Dict[str, Dict[str, Any]] = {}
-_share_jobs_lock = threading.Lock()
 
 # Thread pool for background OCR (GPU work runs in a thread, not async)
 _executor = ThreadPoolExecutor(max_workers=OCR_WORKERS)
@@ -91,19 +80,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.on_event("startup")
-async def startup_event():
-    """
-    Trigger background model warmup on startup.
-    This loads the heavy Qwen2-VL model into GPU VRAM immediately so that the
-    first extraction request doesn't time out.
-    """
-    import threading
-    from extractor import _load_qwen
-    print("[server] Triggering background model warmup...")
-    threading.Thread(target=_load_qwen, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -672,58 +648,7 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
             if outcome.version_snapshot_path:
                 snapshot_path = outcome.version_snapshot_path
         except Exception as exc:
-            import traceback as _tb
-            print(f"[finetune/start] ERROR on sample {sample.get('sample_id')} — stays pending for retry:\n"
-                  f"  {exc}\n{''.join(_tb.format_tb(_tb.sys.exc_info()[2]))}")
-
-    # ── Also ingest 'Submit Training Feedback' form data from Supabase ────────
-    fb_rows = _fetch_unused_training_feedback()
-    ingested_fb_ids: List[str] = []
-    for fb in fb_rows:
-        answer = (fb.get("corrected_response") or "").strip() or (fb.get("original_response") or "").strip()
-        prompt = (fb.get("prompt") or "").strip()
-        if not prompt or not answer:
-            print(f"[finetune/start] Feedback {fb.get('id')} skipped — missing prompt or response (cannot train on empty content)")
-            continue
-        try:
-            chat_row = {
-                "messages": [
-                    {"role": "system", "content": (
-                        "You are an expert insurance document parser. "
-                        "Given raw OCR text from an insurance document, extract all fields. "
-                        "Output exactly three sections in order: "
-                        "FIELDS: (a JSON object of all extracted fields), "
-                        "RAW TEXT: (the source OCR text), "
-                        "MARKDOWN: (a summary table). "
-                        "No commentary outside these sections."
-                    )},
-                    {"role": "user",      "content": prompt},
-                    {"role": "assistant", "content": answer},
-                ],
-                "domain": "insurance",
-                "metadata": {
-                    "form_type":     fb.get("form_type") or "feedback",
-                    "feedback_id":   str(fb.get("id", "")),
-                    "feedback_type": fb.get("feedback_type") or "correction",
-                    "rating":        fb.get("rating"),
-                    "created_at":    datetime.now(timezone.utc).isoformat(),
-                },
-            }
-            outcome = append_training_sample(
-                root=feedback_dir,
-                row=chat_row,
-                retrain_threshold=threshold,
-            )
-            ingested += 1
-            ingested_fb_ids.append(str(fb["id"]))
-            if outcome.version_snapshot_path:
-                snapshot_path = outcome.version_snapshot_path
-        except Exception as exc:
-            import traceback as _tb
-            print(f"[finetune/start] ERROR on feedback {fb.get('id')} — will retry next cycle:\n"
-                  f"  {exc}\n{''.join(_tb.format_tb(_tb.sys.exc_info()[2]))}")
-
-    print(f"[finetune/start] Ingested {len(ingested_fb_ids)} training_feedback row(s) from Supabase.")
+            print(f"[finetune/start] skipping sample {sample.get('sample_id')} (stays pending for retry): {exc}")
 
     if not snapshot_path:
         # Force a snapshot from whatever is pending now (manual trigger bypasses threshold)
@@ -794,13 +719,10 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
         "status": "queued",
         "job_id": job_id,
         "message": (
-            f"Fine-tuning started with {ingested} sample(s) "
-            f"({len(ingested_fb_ids)} from Training Feedback form). "
+            f"Fine-tuning started with {ingested} sample(s). "
             f"Poll GET /finetune/jobs/{job_id} for progress."
         ),
         "total_samples": ingested,
-        "acord_samples": ingested - len(ingested_fb_ids),
-        "feedback_samples": len(ingested_fb_ids),
         "snapshot_path": snapshot_path,
     }
 
@@ -817,29 +739,9 @@ def finetune_job_status(job_id: str) -> Dict[str, Any]:
     """
     from fine_tuning.job_runner import get_job_status
     job = get_job_status(job_id)
-    if job:
-        return job
-
-    # Fallback: check version registry for historical jobs
-    try:
-        from fine_tuning.registry.version_registry import VersionRegistry
-        registry_path = os.getenv("VERSION_REGISTRY_PATH", "/workspace/fine_tuning/registry/version_registry.json")
-        reg = VersionRegistry(registry_path)
-        versions = reg.list_versions()
-        for v in versions:
-            if v.get("job_id") == job_id:
-                return {
-                    "job_id":      job_id,
-                    "status":      "completed" if v.get("status") == "promoted" else v.get("status"),
-                    "phase":       "done",
-                    "version":     v.get("version"),
-                    "eval_scores": v.get("eval_scores"),
-                    "finished_at": v.get("promoted_at"),
-                }
-    except Exception:
-        pass
-
-    raise HTTPException(status_code=404, detail=f"Fine-tuning job '{job_id}' not found")
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Fine-tuning job '{job_id}' not found")
+    return job
 
 
 @app.get("/finetune/jobs")

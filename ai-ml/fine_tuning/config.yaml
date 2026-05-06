@@ -1,7 +1,6 @@
 # =============================================================================
 # Fideon RunPod — Fine-Tuning Config
 # QLoRA continuous-learning pipeline for Qwen2-VL-7B (ACORD field extraction)
-# Tuned for RunPod H100 SXM (80 GB HBM3).
 # Model lives at /workspace/models/qwen2-vl-7b on the RunPod pod.
 # =============================================================================
 
@@ -22,13 +21,15 @@ continuous_learning:
   retrain_threshold: 25
   feedback_datasets_dir: "/workspace/fine_tuning/datasets/feedback_learning"
 
-# ── LoRA — H100 allows a larger rank for more expressive adapters ─────────────
-# r=16 was sized for 24 GB GPUs; H100 80 GB can comfortably run r=64.
-# lora_alpha = 2 * r keeps the effective learning rate stable as rank grows.
+# ── QLoRA ─────────────────────────────────────────────────────────────────────
+load_in_4bit: true
+bnb_4bit_quant_type: "nf4"
+bnb_4bit_compute_dtype: "bfloat16"
+
 lora:
-  r: 64
-  lora_alpha: 128
-  # Full set of Qwen2-VL-7B attention + MLP projection layers
+  r: 16
+  lora_alpha: 32
+  # Qwen2-VL-7B attention + MLP projection layers
   target_modules:
     - "q_proj"
     - "k_proj"
@@ -41,28 +42,23 @@ lora:
   bias: "none"
   task_type: "CAUSAL_LM"
 
-# ── Training — H100 SXM 80 GB ─────────────────────────────────────────────────
+# ── Training ──────────────────────────────────────────────────────────────────
 training:
   num_epochs: 3
-  # Reduced from 8 to 4 to avoid OOM when Flash Attention 2 is missing.
-  per_device_train_batch_size: 4
-  # Increased from 1 to 2 to maintain an effective batch size of 8.
-  gradient_accumulation_steps: 2
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 4
   learning_rate: 2.0e-5
   weight_decay: 0.01
-  max_grad_norm: 1.0
-  # 4096-token window fits full multi-page ACORD forms (vs 2048 on smaller GPUs).
-  max_seq_length: 4096
+  max_grad_norm: 0.3
+  max_seq_length: 2048
   fp16: false
   bf16: true
-  # Enabled to reduce VRAM usage since Flash Attention 2 is unavailable.
   gradient_checkpointing: true
   warmup_ratio: 0.10
   logging_steps: 5
   save_strategy: "epoch"
-  save_total_limit: 3
-  # Standard AdamW — no memory-paged variant needed with 80 GB VRAM.
-  optim: "adamw_torch"
+  save_total_limit: 2
+  optim: "paged_adamw_8bit"
   # Fraction of older training data replayed each cycle (anti-forgetting).
   replay_fraction: 0.30
 

@@ -21,7 +21,6 @@ import {
 import {
   fetchDeviceModels,
   performDeviceCheckin,
-  getStoredDeviceJwt,
   setStoredDeviceJwt,
   clearStoredDeviceJwt,
   sendDeviceHeartbeat,
@@ -74,6 +73,8 @@ export default function DeviceSetup() {
     platform: string;
   } | null>(null);
   const authLossToastShown = useRef(false);
+  // Tracks background model-polling after fresh registration so a new Refresh cancels the old poll.
+  const modelsPollRef = useRef<{ cancelled: boolean } | null>(null);
 
   const handleInvalidDeviceAuth = useCallback(
     (message?: string) => {
@@ -82,7 +83,9 @@ export default function DeviceSetup() {
       setDeviceId(null);
       setIsConnected(false);
       setAllocatedModels([]);
-      if (message?.toLowerCase().includes("deactivated") || message?.toLowerCase().includes("disabled")) {
+      const isDeviceDisabledMsg =
+        message?.toLowerCase().includes("deactivated") || message?.toLowerCase().includes("disabled");
+      if (isDeviceDisabledMsg) {
         setIsDisabled(true);
       }
       if (window.electron?.device?.clearAuth) {
@@ -91,7 +94,7 @@ export default function DeviceSetup() {
       if (!authLossToastShown.current) {
         authLossToastShown.current = true;
         toast({
-          title: isDisabled ? "Device Disabled" : "Device no longer connected",
+          title: isDeviceDisabledMsg ? "Device Disabled" : "Device no longer connected",
           description:
             message ||
             "This device was disabled or its token was revoked. Ask an admin to re-enable it if needed, then use Refresh to register again.",
@@ -99,11 +102,11 @@ export default function DeviceSetup() {
         });
       }
     },
-    [toast, isDisabled],
+    [toast],
   );
 
   const verifyCloudSession = useCallback(
-    async (jwt: string): Promise<boolean> => {
+    async (jwt: string, { silent = false }: { silent?: boolean } = {}): Promise<boolean> => {
       try {
         await sendDeviceHeartbeat(jwt);
         authLossToastShown.current = false;
@@ -111,7 +114,7 @@ export default function DeviceSetup() {
         return true;
       } catch (e) {
         if (e instanceof ApiRequestError && e.isAuthError) {
-          handleInvalidDeviceAuth(e.message);
+          if (!silent) handleInvalidDeviceAuth(e.message);
           return false;
         }
         throw e;
@@ -120,49 +123,11 @@ export default function DeviceSetup() {
     [handleInvalidDeviceAuth],
   );
 
+
   useEffect(() => {
-    void checkElectron();
-    const storedJwt = getStoredDeviceJwt();
-    if (storedJwt) {
-      void (async () => {
-        setConnecting(true);
-        try {
-          const ok = await verifyCloudSession(storedJwt);
-          if (ok) {
-            setDeviceJwt(storedJwt);
-            setIsConnected(true);
-            // Ensure Cloud device ID renders even if Electron store is slow/unavailable.
-            const extractedId = tryExtractDeviceIdFromJwt(storedJwt);
-            setDeviceId((prev) => prev ?? extractedId);
-            
-            let finalDeviceId = extractedId;
-            if (window.electron?.device?.getDeviceId) {
-              try {
-                const res = await window.electron.device.getDeviceId();
-                if (res?.success && res.device_id) {
-                  setDeviceId(res.device_id);
-                  finalDeviceId = res.device_id;
-                }
-              } catch {
-                // ignore
-              }
-            }
-            // Auto-link device to tenant
-            if (finalDeviceId) {
-              try { await linkDeviceById(finalDeviceId); } catch { /* silent fail if not logged in or already linked */ }
-            }
-            void loadDeviceModels(storedJwt);
-          }
-        } catch {
-          // ignore network errors
-        } finally {
-          setConnecting(false);
-        }
-      })();
-    }
-    void checkOllama();
-    // Intentionally mount-only: avoid re-running Electron bootstrap when callbacks change.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Reset any "sticky" disabled state on mount (e.g. after fresh login)
+    setIsDisabled(false);
+    authLossToastShown.current = false;
   }, []);
 
   // Listen for device deactivation pushed from the Electron main process heartbeat loop.
@@ -192,7 +157,7 @@ export default function DeviceSetup() {
 
   // Background heartbeat: every 60s, report device + local model status to cloud.
   useEffect(() => {
-    if (!isElectronApp || !deviceJwt || !isConnected) {
+    if (!isElectronApp || !deviceJwt || !isConnected || connecting || loading) {
       return;
     }
 
@@ -225,21 +190,54 @@ export default function DeviceSetup() {
         if (res?.success) {
           setDeviceId(res.device_id ?? null);
           if (res.device_jwt) {
-            const ok = await verifyCloudSession(res.device_jwt);
-            if (!ok) return;
-            setStoredDeviceJwt(res.device_jwt);
-            setDeviceJwt(res.device_jwt);
-            setIsConnected(true);
-            if (res.device_id) {
-              try { await linkDeviceById(res.device_id); } catch { /* silent */ }
+            const ok = await verifyCloudSession(res.device_jwt, { silent: true });
+            if (ok) {
+              setStoredDeviceJwt(res.device_jwt);
+              setDeviceJwt(res.device_jwt);
+              setIsConnected(true);
+              setIsDisabled(false);
+              if (res.device_id) {
+                try { await linkDeviceById(res.device_id); } catch { /* silent */ }
+              }
+              try { await loadDeviceModels(res.device_jwt); } catch { /* models may lag */ }
+            } else if (window.electron?.device?.ensureAuth) {
+              // Silent auto-recovery: if getAuth gave us a bad token, try to fix it immediately.
+              const res2 = await window.electron.device.ensureAuth();
+              if (res2?.success && res2.device_jwt) {
+                setDeviceJwt(res2.device_jwt);
+                setStoredDeviceJwt(res2.device_jwt);
+                setIsConnected(true);
+                setIsDisabled(false);
+                setDeviceId(res2.device_id || tryExtractDeviceIdFromJwt(res2.device_jwt));
+                if (res2.device_id) {
+                  try { await linkDeviceById(res2.device_id); } catch { /* silent */ }
+                }
+                try { await loadDeviceModels(res2.device_jwt); } catch { /* models may lag */ }
+              }
             }
-            await loadDeviceModels(res.device_jwt);
+          } else if (window.electron?.device?.ensureAuth) {
+            // No JWT at all — main process cleared it (stale token) before renderer loaded.
+            // Auto-register without showing any error to the user.
+            const res2 = await window.electron.device.ensureAuth();
+            if (res2?.success && res2.device_jwt) {
+              const newId = res2.device_id || tryExtractDeviceIdFromJwt(res2.device_jwt);
+              setDeviceJwt(res2.device_jwt);
+              setStoredDeviceJwt(res2.device_jwt);
+              setIsConnected(true);
+              setIsDisabled(false);
+              setDeviceId(newId);
+              if (newId) {
+                try { await linkDeviceById(newId); } catch { /* silent */ }
+              }
+              try { await loadDeviceModels(res2.device_jwt); } catch { /* models may lag */ }
+            }
           }
         }
       } catch {
         // ignore
       } finally {
         setConnecting(false);
+        setLoading(false);
       }
     }
     if (result && window.electron?.device?.getDeviceId && !deviceId) {
@@ -251,6 +249,8 @@ export default function DeviceSetup() {
       }
     }
   };
+
+
 
   const checkOllama = async () => {
     const status = await checkOllamaStatus();
@@ -266,93 +266,93 @@ export default function DeviceSetup() {
     setAllocatedModels(response.models);
   };
 
+  useEffect(() => {
+    void checkElectron();
+    void checkOllama();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleRefresh = async () => {
-    if (!deviceJwt) {
-      if (window.electron?.device?.ensureAuth) {
-        try {
-          setConnecting(true);
-          setLoading(true);
-          toast({ title: "Refreshing…", description: "Registering/reconnecting this device." });
-          const res = await window.electron.device.ensureAuth();
-          if (res?.success && res.device_jwt) {
-            const ok = await verifyCloudSession(res.device_jwt);
-            if (!ok) return;
-            setStoredDeviceJwt(res.device_jwt);
-            setDeviceJwt(res.device_jwt);
-            setIsConnected(true);
-            const devId = res.device_id ?? tryExtractDeviceIdFromJwt(res.device_jwt);
-            setDeviceId(devId);
-            if (devId) {
-              try { await linkDeviceById(devId); } catch { /* silent */ }
-            }
-            await loadDeviceModels(res.device_jwt);
-          } else {
-            throw new Error(res?.error || "Could not register device");
-          }
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : "Unknown error";
-          const hint =
-            typeof msg === "string" && msg.toLowerCase().includes("fetch failed")
-              ? " Check the backend is running and Electron main uses the same API port as the app (electron/.env ELECTRON_API_BASE_URL, default 127.0.0.1:8080)."
-              : "";
-          toast({
-            title: "Reconnect failed",
-            description: msg + hint,
-            variant: "destructive",
-          });
-        } finally {
-          setLoading(false);
-          setConnecting(false);
-        }
-        return;
-      }
-      await checkElectron();
-      return;
-    }
+    // Cancel any previous background model poll from a prior Refresh.
+    if (modelsPollRef.current) modelsPollRef.current.cancelled = true;
+
+    setIsDisabled(false);
+    authLossToastShown.current = false;
     setLoading(true);
+    setConnecting(true);
+
     try {
-      const ok = await verifyCloudSession(deviceJwt);
-      if (!ok) {
-        // Token was invalid/revoked. Auto re-register in Electron so Refresh is one-click recovery.
-        if (window.electron?.device?.ensureAuth) {
-          toast({ title: "Reconnecting…", description: "Device token was invalid. Re-registering now." });
-          const res = await window.electron.device.ensureAuth();
-          if (res?.success && res.device_jwt) {
-            const ok2 = await verifyCloudSession(res.device_jwt);
-            if (!ok2) return;
-            setStoredDeviceJwt(res.device_jwt);
-            setDeviceJwt(res.device_jwt);
-            setIsConnected(true);
-            const devId = res.device_id ?? tryExtractDeviceIdFromJwt(res.device_jwt);
-            setDeviceId(devId);
-            if (devId) {
-              try { await linkDeviceById(devId); } catch { /* silent */ }
-            }
-            await loadDeviceModels(res.device_jwt);
-          } else {
-            throw new Error(res?.error || "Could not re-register device");
-          }
-        }
+      // Hard reset: stop heartbeat and clear credentials before re-registering.
+      if (window.electron?.device?.clearAuth) {
+        await window.electron.device.clearAuth();
+      }
+      setDeviceJwt("");
+      setStoredDeviceJwt("");
+      setDeviceId(null);
+      setIsConnected(false);
+
+      if (!window.electron?.device?.ensureAuth) {
+        await checkElectron();
         return;
       }
-      await loadDeviceModels(deviceJwt);
-      await checkOllama();
-      toast({
-        title: "Refreshed",
-        description: "Models list updated",
-      });
-    } catch (error: any) {
-      if (error instanceof ApiRequestError && error.isAuthError) {
-        handleInvalidDeviceAuth(error.message);
-      } else {
-        toast({
-          title: "Error",
-          description: error.message,
-          variant: "destructive",
-        });
+
+      toast({ title: "Connecting…", description: "Registering device with fresh credentials." });
+      const res = await window.electron.device.ensureAuth();
+
+      if (res?.success && res.device_jwt) {
+        const jwt = res.device_jwt;
+        setDeviceJwt(jwt);
+        setStoredDeviceJwt(jwt);
+        setIsConnected(true);
+
+        const devId = res.device_id || tryExtractDeviceIdFromJwt(jwt);
+        setDeviceId(devId);
+        if (devId) {
+          try { await linkDeviceById(devId); } catch { /* silent */ }
+        }
+
+        // Try loading models immediately.
+        let modelsLoaded = false;
+        try { await loadDeviceModels(jwt); modelsLoaded = true; } catch { /* may lag */ }
+
+        if (!modelsLoaded) {
+          // Backend JWT propagation to the models endpoint can take 30-40s after fresh
+          // registration. Poll silently in the background — user is already shown Connected.
+          const pollCtx = { cancelled: false };
+          modelsPollRef.current = pollCtx;
+          void (async () => {
+            for (let i = 0; i < 15 && !pollCtx.cancelled; i++) {
+              await new Promise(r => setTimeout(r, 4000));
+              if (pollCtx.cancelled) break;
+              try { await loadDeviceModels(jwt); break; } catch { /* keep polling */ }
+            }
+          })();
+        }
+
+        try { await checkOllama(); } catch { /* Ollama not running */ }
+
+        toast({ title: "Connected", description: "Device re-registered successfully" });
+        return;
       }
+
+      // Registration failed — distinguish admin-disable from network/other errors.
+      const errMsg = res?.error ?? "Reconnection failed.";
+      const isAdminDisabled =
+        errMsg.toLowerCase().includes("disabled") ||
+        errMsg.toLowerCase().includes("deactivated") ||
+        errMsg.toLowerCase().includes("forbidden");
+
+      if (isAdminDisabled) {
+        handleInvalidDeviceAuth(errMsg);
+      } else {
+        toast({ title: "Refresh failed", description: errMsg, variant: "destructive" });
+      }
+    } catch (e: any) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast({ title: "Refresh failed", description: msg, variant: "destructive" });
     } finally {
       setLoading(false);
+      setConnecting(false);
     }
   };
 

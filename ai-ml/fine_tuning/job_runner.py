@@ -157,22 +157,6 @@ def _load_eval_examples_from_config(config: Dict[str, Any]) -> List[Dict[str, An
     return examples
 
 
-def _evict_old_storage_caches(cache_root: Path, keep_version: int) -> None:
-    """Delete all finetuned/v{N}/ cache dirs except the one we're about to use."""
-    if not cache_root.exists():
-        return
-    for d in cache_root.iterdir():
-        if not d.is_dir() or not d.name.startswith("v"):
-            continue
-        try:
-            v = int(d.name[1:])
-        except ValueError:
-            continue
-        if v != keep_version:
-            shutil.rmtree(d, ignore_errors=True)
-            print(f"[job_runner] Evicted old storage cache: {d}")
-
-
 def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Optional[Path] = None) -> str:
     """
     Return the base model path to train from, in priority order:
@@ -184,11 +168,11 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
 
     Cleans up old merged runs before attempting SeaweedFS download to free space.
     """
-    from fine_tuning.storage_client import get_storage_client
+    from fine_tuning.seaweedfs_client import SeaweedFSClient
     from fine_tuning.registry.version_registry import VersionRegistry
 
     registry = VersionRegistry(registry_path)
-    storage = get_storage_client()
+    seaweed = SeaweedFSClient()
 
     # ── Pre-flight: clean up old merged runs to reclaim disk ─────────────────
     if runs_dir and runs_dir.exists():
@@ -197,13 +181,10 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
         free_gb = _free_disk_gb()
         print(f"[job_runner] Free disk after cleanup: {free_gb:.1f} GB")
 
-    # ── 1. Storage: latest fine-tuned version ────────────────────────────────
-    storage_version = storage.get_latest_finetuned_version()
-    if storage_version is None:
-        print("[job_runner] WARNING: Storage returned no version (unreachable or no uploads yet). "
-              "Falling back to local registry or base model.")
-    if storage_version is not None:
-        cache_dir = f"/workspace/fine_tuning/models/finetuned/v{storage_version}"
+    # ── 1. SeaweedFS: latest fine-tuned version ───────────────────────────────
+    seaweed_version = seaweed.get_latest_finetuned_version()
+    if seaweed_version is not None:
+        cache_dir = f"/workspace/fine_tuning/models/finetuned/v{seaweed_version}"
         cache_path = Path(cache_dir)
         # Validate cached model is complete — a partial upload/download with missing shards
         # causes OSError at training time. Check config.json AND all shards from the index.
@@ -219,37 +200,35 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
                     existing = {f.name for f in p.glob("*.safetensors")}
                     if expected and not expected.issubset(existing):
                         missing = expected - existing
-                        print(f"[job_runner] Cache v{storage_version} missing shards: {missing}")
+                        print(f"[job_runner] Cache v{seaweed_version} missing shards: {missing}")
                         return False
                 except Exception:
                     pass
             return any(f.suffix == ".safetensors" for f in p.iterdir())
 
         if _cache_is_complete(cache_path):
-            print(f"[job_runner] Using cached storage model v{storage_version}: {cache_dir}")
-            _evict_old_storage_caches(cache_path.parent, keep_version=storage_version)
+            print(f"[job_runner] Using cached SeaweedFS model v{seaweed_version}: {cache_dir}")
             return cache_dir
         if cache_path.exists():
-            print(f"[job_runner] Cached model v{storage_version} is incomplete — deleting and re-downloading …")
+            print(f"[job_runner] Cached model v{seaweed_version} is incomplete — deleting and re-downloading …")
             shutil.rmtree(cache_path, ignore_errors=True)
         free_gb = _free_disk_gb()
         if free_gb < _MIN_FREE_DISK_GB:
             print(
-                f"[job_runner] Skipping storage download — only {free_gb:.1f} GB free "
+                f"[job_runner] Skipping SeaweedFS download — only {free_gb:.1f} GB free "
                 f"(need ≥{_MIN_FREE_DISK_GB} GB). Falling back to local model."
             )
         else:
             print(
-                f"[job_runner] Downloading fine-tuned model v{storage_version} "
-                f"from storage → {cache_dir} …"
+                f"[job_runner] Downloading fine-tuned model v{seaweed_version} "
+                f"from SeaweedFS → {cache_dir} …"
             )
             try:
-                storage.download_finetuned_model(storage_version, cache_dir)
-                print(f"[job_runner] Storage model v{storage_version} ready at {cache_dir}")
-                _evict_old_storage_caches(cache_path.parent, keep_version=storage_version)
+                seaweed.download_finetuned_model(seaweed_version, cache_dir)
+                print(f"[job_runner] SeaweedFS model v{seaweed_version} ready at {cache_dir}")
                 return cache_dir
             except Exception as exc:
-                print(f"[job_runner] Storage download failed (non-fatal): {exc}")
+                print(f"[job_runner] SeaweedFS download failed (non-fatal): {exc}")
                 # Remove partial download to reclaim space
                 if cache_path.exists():
                     shutil.rmtree(cache_path, ignore_errors=True)
@@ -298,7 +277,7 @@ def run_cycle(
     from fine_tuning.evaluation.deepeval_runner import run_deepeval
     from fine_tuning.evaluation.forgetting_eval import ForgettingEvaluator
     from fine_tuning.evaluation.eval_gate import run_eval_gate
-    # promote_adapter is NOT called here — user must click "Share Gradients" to upload to SeaweedFS
+    from fine_tuning.training_orchestrator import promote_adapter
 
     started_at = _utc_now()
     cycle_id   = str(uuid.uuid4())[:12]
@@ -377,10 +356,7 @@ def run_cycle(
 
             # ── 6. Train (QLoRA SFT) ──────────────────────────────────────────
             _update("training")
-            # H100 SXM 80 GB: inference model (BF16 ~14 GB) + training model (BF16 ~14 GB)
-            # + merge peak (~28 GB) totals ~56 GB — well within 80 GB. No VRAM unload needed.
-            # Extractions continue serving normally throughout the training window.
-            print(f"[job_runner] Starting BF16 LoRA training — version={new_version} …")
+            print(f"[job_runner] Starting QLoRA training — version={new_version} …")
             adapter_path = run_training(
                 config=config,
                 dataset_path=build_result.train_jsonl_path,
@@ -389,28 +365,9 @@ def run_cycle(
                 base_model=base_model,
             )
 
-            # Read training metrics from adapter manifest written by run_training()
-            _train_stats: Dict[str, Any] = {}
-            try:
-                import json as _json
-                _manifest_path = Path(adapter_path) / "adapter_manifest.json"
-                if _manifest_path.exists():
-                    _m = _json.loads(_manifest_path.read_text(encoding="utf-8"))
-                    _train_stats = {
-                        "training_loss": _m.get("training_loss"),
-                        "num_epochs":    _m.get("num_epochs"),
-                    }
-            except Exception:
-                pass
-
             # ── 7. Evaluation ─────────────────────────────────────────────────
             _update("evaluating")
             eval_examples = _load_eval_examples_from_config(config)
-            if not eval_examples:
-                print(
-                    "[job_runner] WARNING: No eval examples loaded — gate will trivially pass. "
-                    "Add eval files to config.evaluation to enable real quality checks."
-                )
             print(f"[job_runner] Running local eval on {len(eval_examples)} examples …")
 
             local_result     = run_local_eval(adapter_path, config, eval_examples)
@@ -433,13 +390,11 @@ def run_cycle(
             gate = run_eval_gate(
                 local_result, deepeval_result, parent_scores, config, forgetting
             )
-            # Merge training metrics into eval_scores so they are available in the registry and UI
-            combined_scores = {**gate.scores, **_train_stats}
-            _update("gate_checked", gate_passed=gate.passed, eval_scores=combined_scores)
+            _update("gate_checked", gate_passed=gate.passed, eval_scores=gate.scores)
 
             print(
                 f"[job_runner] Gate: passed={gate.passed}  "
-                f"scores={combined_scores}  failures={gate.failures}"
+                f"scores={gate.scores}  failures={gate.failures}"
             )
 
             if not gate.passed:
@@ -479,66 +434,25 @@ def run_cycle(
                 version=new_version,
             )
 
-            # ── 8b. Validate merge output before writing pending share ─────────
-            _merged_path = Path(merge_result.output_path)
-            if not _merged_path.exists() or not (_merged_path / "config.json").exists():
-                raise RuntimeError(
-                    f"Merge output missing or incomplete at {merge_result.output_path}. "
-                    "Cannot write pending share — check AdapterMerger logs above."
-                )
-
-            # ── 9. Local-only promote + write pending_shares/v{N}.json ──────────
-            # SeaweedFS upload is deferred — user must click "Share Gradients".
-            # Each training run gets its own file so multiple runs can accumulate
-            # and ALL are uploaded when the user clicks Share Gradients.
-            _update("pending_share")
+            # ── 9. Promote (registry + SeaweedFS + model card + alert) ────────
+            _update("promoting")
             training_meta = {
-                "backend":           "qlora_hf",
-                "fingerprint":       build_result.fingerprint,
-                "job_id":            job_id,
-                "base_model":        base_model,
-                "replay_fraction":   replay_fraction,
-                "storage_pending": True,
+                "backend":       "qlora_hf",
+                "fingerprint":   build_result.fingerprint,
+                "job_id":        job_id,
+                "base_model":    base_model,
+                "replay_fraction": replay_fraction,
             }
-
-            # Update local version_registry so _resolve_active_model_path()
-            # picks up the merged model on pod restart.
-            VersionRegistry(reg_path).promote_version(
+            promote_adapter(
+                adapter_id=job_id,
+                registry_path=reg_path,
                 version=new_version,
                 merged_model_path=merge_result.output_path,
                 adapter_path=adapter_path,
-                eval_scores=combined_scores,
+                eval_scores=gate.scores,
                 training_meta=training_meta,
+                base_model=base_model,
             )
-
-            # Each version gets its own pending file — never overwritten.
-            _PENDING_SHARE_DIR = Path("/workspace/fine_tuning/pending_shares")
-            _PENDING_SHARE_DIR.mkdir(parents=True, exist_ok=True)
-            (_PENDING_SHARE_DIR / f"v{new_version}.json").write_text(
-                json.dumps({
-                    "job_id":            job_id,
-                    "registry_path":     reg_path,
-                    "version":           new_version,
-                    "merged_model_path": merge_result.output_path,
-                    "adapter_path":      adapter_path,
-                    "eval_scores":       combined_scores,
-                    "training_meta":     training_meta,
-                    "base_model":        base_model,
-                    "created_at":        _utc_now(),
-                }, indent=2),
-                encoding="utf-8",
-            )
-            pending_count = len(list(_PENDING_SHARE_DIR.glob("*.json")))
-            print(f"[job_runner] Weights v{new_version} ready at {merge_result.output_path}. "
-                  f"({pending_count} version(s) pending 'Share Gradients')")
-
-            # Hot-swap inference immediately so next extraction uses fine-tuned weights.
-            try:
-                import extractor as _ext
-                _ext.reload_qwen_model(merge_result.output_path)
-                print(f"[job_runner] Extractor hot-swapped to fine-tuned model v{new_version}")
-            except Exception as _swap_exc:
-                print(f"[job_runner] Model hot-swap warning (non-fatal): {_swap_exc}")
 
         # ── Done ──────────────────────────────────────────────────────────────
         finished_at = _utc_now()
@@ -551,9 +465,9 @@ def run_cycle(
             "version":            new_version,
             "adapter_path":       adapter_path,
             "merged_model_path":  merge_result.output_path,
-            "eval_scores":        combined_scores,
+            "eval_scores":        gate.scores,
         })
-        print(f"[job_runner] Cycle complete — SLM v1.{new_version} ready. Click 'Share Gradients' to upload to storage.")
+        print(f"[job_runner] Cycle complete — SLM v1.{new_version} promoted.")
 
         return CycleResult(
             status="completed",

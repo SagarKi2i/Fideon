@@ -32,7 +32,7 @@ def write_model_card(merged_model_path: str, meta: Dict[str, Any]) -> Path:
 **Base model**: `{base_model}`
 **Fine-tuned version**: v1.{version} (cycle `{cycle_id}`)
 **Promoted at**: {promoted_at}
-**Training backend**: BF16 LoRA (PEFT, r=64) — H100 SXM 80 GB
+**Training backend**: QLoRA (bitsandbytes 4-bit + PEFT LoRA)
 
 ## Evaluation Scores
 
