@@ -207,6 +207,20 @@ export default function Training() {
       setIsConnected(connected);
       setWebMode(!electron || !connected);
       await refreshLocalAcordCount();
+      // If there are submitted samples but at least one completed training job exists,
+      // those samples were already trained — mark them approved now.
+      // This fixes the case where the browser was closed before the polling callback fired.
+      (() => {
+        const completedJobs = getLocalJobs().filter((j: any) => j.status === "completed");
+        if (completedJobs.length > 0) {
+          getAcordTrainingSamples().then((pending) => {
+            if (pending.length > 0) {
+              markAcordSamplesUsed(pending.map((s) => s.run_id)).catch(() => {});
+              refreshLocalAcordCount();
+            }
+          }).catch(() => {});
+        }
+      })();
       // Check if there are locally trained weights pending upload
       try {
         const pendingStatus = await getShareGradientsStatus();
@@ -593,6 +607,7 @@ export default function Training() {
           original_response: s.original_response,
           corrected_response: s.corrected_response,
           form_type: s.form_type,
+          run_id: s.run_id,
         })),
         ...acordFormFeedback.map((f: any) => ({
           prompt: f.prompt,
@@ -616,7 +631,9 @@ export default function Training() {
 
       // Step 3: Trigger fine-tuning on RunPod
       setFinetuneStatus("Starting fine-tuning job…");
-      const result = await startRunpodFinetune();
+      const result = await startRunpodFinetune({
+        acord_run_ids: samples.map((s) => s.run_id).filter(Boolean),
+      });
       setFinetuneStatus(
         result.status === "queued"
           ? `Fine-tuning queued with ${result.total_samples} sample(s). Running on RunPod GPU…`

@@ -243,38 +243,46 @@ class AzureBlobClient:
         cc = self._container_client(create_if_missing=True)
         files = list(local.glob("*.gguf")) + list(local.glob("manifest.json"))
         print(f"[azure_blob] Uploading {len(files)} quantized file(s) → {self._container}/{prefix}/")
-        _RETRY_DELAYS = [30, 90]
+        _RETRY_DELAYS = [30, 60, 120, 240]
         failed: list[str] = []
 
         for f in sorted(files):
             blob_name = f"{prefix}/{f.name}"
-            size_mb = f.stat().st_size // 1_000_000
+            file_size = f.stat().st_size
+            size_mb = file_size // 1_000_000
             print(f"[azure_blob]   {f.name} ({size_mb} MB) …")
             last_exc: Exception | None = None
-            for attempt in range(1, 4):
+            for attempt in range(1, 6):
                 try:
                     with open(f, "rb") as fh:
                         hook = None
                         if progress_callback:
                             hook = lambda current, total: progress_callback(f.name, current, total)
                         cc.get_blob_client(blob_name).upload_blob(
-                            fh, 
-                            overwrite=True, 
-                            max_concurrency=2,
-                            progress_hook=hook
+                            fh,
+                            overwrite=True,
+                            max_concurrency=4,
+                            max_block_size=_CHUNK_SIZE,
+                            max_single_put_size=_CHUNK_SIZE,
+                            length=file_size,
+                            progress_hook=hook,
                         )
                     last_exc = None
                     keys.append(blob_name)
                     break
                 except Exception as exc:
                     last_exc = exc
-                    if attempt < 3:
-                        wait = _RETRY_DELAYS[attempt - 1]
-                        print(f"[azure_blob]   Retry {attempt}/3 for {f.name} (waiting {wait}s): {exc}")
+                    if attempt < 5:
+                        import random
+                        wait = _RETRY_DELAYS[min(attempt - 1, len(_RETRY_DELAYS) - 1)]
+                        wait += random.randint(0, 15)
+                        print(f"[azure_blob]   Retry {attempt}/5 for {f.name} (waiting {wait}s): {exc}")
                         time.sleep(wait)
+                    else:
+                        print(f"[azure_blob]   Retry 5/5 for {f.name}: {exc}")
             if last_exc is not None:
                 failed.append(f.name)
-                print(f"[azure_blob]   FAILED after 3 attempts: {f.name} — {last_exc}")
+                print(f"[azure_blob]   FAILED after 5 attempts: {f.name} — {last_exc}")
 
         if failed:
             print(f"[azure_blob] WARNING: {len(failed)} GGUF file(s) failed to upload: {', '.join(failed)}")
@@ -311,13 +319,18 @@ class AzureBlobClient:
 
     # ── Version listing (used by federated job) ───────────────────────────────
 
-    def list_finetuned_versions(self, latest: int, count: int = 10) -> List[int]:
-        """Return available version numbers from finetuned/ prefix."""
+    def list_finetuned_versions(self, latest: int = 0, count: int = 0) -> List[int]:
+        """Return ALL available version numbers from the finetuned/ prefix (full blob scan)."""
         cc = self._container_client()
-        found: List[int] = []
-        for v in range(max(1, latest - count + 1), latest + 1):
-            # Stop at first blob — we only need to know the version exists
-            hit = next(iter(cc.list_blobs(name_starts_with=f"finetuned/v{v}/", results_per_page=1)), None)
-            if hit is not None:
-                found.append(v)
-        return found or [latest]
+        found: set[int] = set()
+        for blob_props in cc.list_blobs(name_starts_with="finetuned/v"):
+            blob_name: str = blob_props["name"]
+            # blob_name is like "finetuned/v3/model.safetensors"
+            try:
+                seg = blob_name.split("/")[1]   # "v3"
+                if seg.startswith("v"):
+                    found.add(int(seg[1:]))
+            except (IndexError, ValueError):
+                pass
+        result = sorted(found)
+        return result or ([latest] if latest else [])

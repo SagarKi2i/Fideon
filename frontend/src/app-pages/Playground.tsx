@@ -28,9 +28,7 @@ import {
   getOllamaModelName,
   listOllamaModels,
 } from "@/lib/ollama";
-import { extractAcord } from "@/lib/acordWorkflowApi";
-import { extractDocumentText } from "@/lib/documentText";
-import { buildPolicyComparisonPrompt } from "@/lib/policyComparisonPrompt";
+import { extractAcord, compareAcordPolicies } from "@/lib/acordWorkflowApi";
 import { apiUrl } from "@/lib/apiBaseUrl";
 
 interface ActivatedModel {
@@ -182,46 +180,16 @@ export default function Playground() {
     setResult("");
 
     try {
-      // Policy comparison: extract doc text and force structured JSON output.
+      // Policy comparison: extract both documents with the ACORD pipeline and compare.
       if (data?.type === "policy-comparison" && data?.policyAFile instanceof File && data?.policyBFile instanceof File) {
-        const docAFile: File = data.policyAFile;
-        const docBFile: File = data.policyBFile;
-
         try {
-          const [docA, docB] = await Promise.all([extractDocumentText(docAFile), extractDocumentText(docBFile)]);
-          const prompt = buildPolicyComparisonPrompt({
-            docA,
-            docB,
-            deviationThresholdPercent: 10,
-          });
-
-          if (useLocalModel && isElectronApp) {
-            const ollamaModelName = getOllamaModelName("policy-comparison");
-            await generateWithOllama(
-              ollamaModelName,
-              prompt,
-              "You are a strict JSON generator. Output ONLY valid JSON.",
-              (chunk) => setResult((prev) => prev + chunk),
-            );
-            setIsRunning(false);
-            return;
-          }
-
-          await streamChat({
-            messages: [{ role: "user" as const, content: prompt }],
-            modelId: selectedModelData?.domain,
-            onDelta: (delta) => setResult((prev) => prev + delta),
-            onDone: () => setIsRunning(false),
-            onError: (error) => {
-              console.error("Streaming error:", error);
-              toast({
-                title: "Error",
-                description: typeof error === "string" ? error : "Failed to run policy comparison",
-                variant: "destructive",
-              });
-              setIsRunning(false);
-            },
-          });
+          const comparisonResult = await compareAcordPolicies(
+            data.policyAFile,
+            data.policyBFile,
+            data.deviationThresholdPercent ?? 10,
+          );
+          setResult(JSON.stringify(comparisonResult, null, 2));
+          setIsRunning(false);
           return;
         } catch (e: any) {
           toast({

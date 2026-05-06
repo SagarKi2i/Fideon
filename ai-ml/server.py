@@ -486,6 +486,36 @@ def _fetch_unused_training_feedback() -> List[Dict[str, Any]]:
         return []
 
 
+def _mark_acord_runs_approved(run_ids: List[str]) -> None:
+    """Set status='approved' on acord_extraction_runs rows so they leave the training queue.
+    Uses the mark_acord_runs_approved RPC (SECURITY DEFINER) to bypass RLS."""
+    if not run_ids:
+        return
+    supabase_url = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    if not supabase_url or not supabase_key:
+        print("[finetune/start] Supabase not configured — skipping acord_runs approval")
+        return
+    try:
+        import httpx
+        # Call SECURITY DEFINER RPC — bypasses RLS, works for any user's runs
+        resp = httpx.post(
+            f"{supabase_url}/rest/v1/rpc/mark_acord_runs_approved",
+            headers={
+                "apikey": supabase_key,
+                "Authorization": f"Bearer {supabase_key}",
+                "Content-Type": "application/json",
+            },
+            json={"run_ids": run_ids},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        updated = resp.json() if resp.text.strip() else 0
+        print(f"[finetune/start] Marked {updated} acord_extraction_run(s) as approved in Supabase")
+    except Exception as exc:
+        print(f"[finetune/start] Could not mark acord_extraction_runs as approved: {exc}")
+
+
 def _mark_training_feedback_used(ids: List[str]) -> None:
     """Mark a list of training_feedback rows as used in Supabase."""
     if not ids:
@@ -538,6 +568,7 @@ async def store_training_sample(body: Dict[str, Any] = Body(...)) -> Dict[str, A
         "original_fields": body.get("original_fields") or {},
         "corrected_fields": body.get("corrected_fields") or {},
         "raw_text": body.get("raw_text", ""),
+        "run_id": body.get("run_id") or "",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "status": "pending",
     }
@@ -585,6 +616,16 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
     from fine_tuning.continuous_learning.ingest import build_training_sample_from_correction
     from fine_tuning.continuous_learning.version_store import append_training_sample
     from fine_tuning.job_runner import launch_cycle_background
+
+    # Mark the Supabase acord_extraction_runs rows as approved immediately — before
+    # training even starts. This is the most reliable path: the frontend passes the
+    # exact run IDs it fetched, and we mark them here using the service role key.
+    # This removes the dependency on the browser staying open until job completion.
+    explicit_run_ids: List[str] = [
+        str(rid) for rid in (body.get("acord_run_ids") or []) if rid
+    ]
+    if explicit_run_ids:
+        _mark_acord_runs_approved(explicit_run_ids)
 
     samples = [s for s in _load_training_samples() if s.get("status") == "pending"]
     if not samples:
@@ -729,6 +770,14 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
         "\n".join(json.dumps(s) for s in updated_samples) + "\n",
         encoding="utf-8",
     )
+
+    # ── Mark Supabase acord_extraction_runs as approved ──────────────────────
+    supabase_run_ids = [
+        s.get("run_id")
+        for s in all_samples
+        if s.get("sample_id") in used_ids and s.get("run_id")
+    ]
+    _mark_acord_runs_approved(supabase_run_ids)
 
     # ── Mark Supabase training_feedback rows as used ──────────────────────────
     _mark_training_feedback_used(ingested_fb_ids)
@@ -944,16 +993,22 @@ def _run_federated_job(job_id: str) -> None:
         versions_available: List[int] = []
         try:
             if hasattr(seaweed, "list_finetuned_versions"):
-                versions_available = seaweed.list_finetuned_versions(latest, count=10)
+                # Full scan — discovers ALL stored versions, not just the last N
+                versions_available = seaweed.list_finetuned_versions(latest)
             else:
-                # SeaweedFS fallback — use boto3 list
+                # SeaweedFS fallback — paginate through ALL finetuned/v* prefixes
                 client = seaweed._boto_client()
-                for v in range(max(1, latest - 9), latest + 1):
-                    resp = client.list_objects_v2(
-                        Bucket=seaweed._bucket, Prefix=f"finetuned/v{v}/", MaxKeys=1
-                    )
-                    if resp.get("Contents"):
-                        versions_available.append(v)
+                paginator = client.get_paginator("list_objects_v2")
+                seen: set[int] = set()
+                for page in paginator.paginate(Bucket=seaweed._bucket, Prefix="finetuned/v", Delimiter="/"):
+                    for cp in page.get("CommonPrefixes", []):
+                        seg = cp.get("Prefix", "").rstrip("/").split("/")[-1]
+                        if seg.startswith("v"):
+                            try:
+                                seen.add(int(seg[1:]))
+                            except ValueError:
+                                pass
+                versions_available = sorted(seen)
         except Exception as exc:
             print(f"[federated] Version discovery error (using latest only): {exc}")
             versions_available = [latest]
@@ -1138,68 +1193,89 @@ def _run_share_job(job_id: str, pending_entries: List[tuple]) -> None:
 
     try:
         from fine_tuning.training_orchestrator import promote_adapter
+        import shutil as _shutil
 
         uploaded_versions: List[int] = []
+        failed_versions: List[tuple] = []   # (version, error_str)
+
         for file_path, pending in pending_entries:
             version = pending.get("version", "?")
-            _upd(f"uploading_v{version}")
+            _upd(f"uploading_v{version}", current_version=version)
             print(f"[share-gradients] Uploading v{version} ({file_path.name})…")
 
-            # B4: validate paths exist before calling promote_adapter
-            merged_model_path = pending.get("merged_model_path", "")
-            adapter_path = pending.get("adapter_path", "")
-            if not merged_model_path or not Path(merged_model_path).exists():
-                raise RuntimeError(
-                    f"v{version}: merged_model_path missing or not on disk: '{merged_model_path}'. "
-                    "The pod may have restarted and lost the merged weights."
+            try:
+                # Validate paths exist before calling promote_adapter
+                merged_model_path = pending.get("merged_model_path", "")
+                adapter_path = pending.get("adapter_path", "")
+                if not merged_model_path or not Path(merged_model_path).exists():
+                    raise RuntimeError(
+                        f"merged_model_path missing or not on disk: '{merged_model_path}'. "
+                        "The pod may have restarted and lost the merged weights."
+                    )
+                if not adapter_path or not Path(adapter_path).exists():
+                    raise RuntimeError(
+                        f"adapter_path missing or not on disk: '{adapter_path}'."
+                    )
+
+                promote_adapter(
+                    adapter_id=pending["job_id"],
+                    registry_path=pending["registry_path"],
+                    version=pending["version"],
+                    merged_model_path=pending["merged_model_path"],
+                    adapter_path=pending["adapter_path"],
+                    eval_scores=pending.get("eval_scores", {}),
+                    training_meta=pending.get("training_meta", {}),
+                    base_model=pending.get("base_model", ""),
+                    progress_callback=_progress_cb
                 )
-            if not adapter_path or not Path(adapter_path).exists():
-                raise RuntimeError(
-                    f"v{version}: adapter_path missing or not on disk: '{adapter_path}'."
+                # Delete pending-share manifest only after confirmed upload success
+                file_path.unlink(missing_ok=True)
+
+                # Delete local weight directories — they are now safely in storage
+                _merged = Path(merged_model_path)
+                if _merged.exists():
+                    _shutil.rmtree(_merged, ignore_errors=True)
+                    print(f"[share-gradients] Deleted local merged model: {_merged}")
+                # GGUF dir sits next to the merged dir as {version}-gguf/
+                _gguf_dir = _merged.parent / f"{version}-gguf"
+                if _gguf_dir.exists():
+                    _shutil.rmtree(_gguf_dir, ignore_errors=True)
+                    print(f"[share-gradients] Deleted local GGUF dir: {_gguf_dir}")
+                _adapter = Path(adapter_path)
+                if _adapter.exists():
+                    _shutil.rmtree(_adapter, ignore_errors=True)
+                    print(f"[share-gradients] Deleted local adapter: {_adapter}")
+
+                uploaded_versions.append(version)
+                print(f"[share-gradients] v{version} uploaded, local weights cleared.")
+
+            except Exception as ver_exc:
+                import traceback as _tb
+                print(
+                    f"[share-gradients] v{version} FAILED (continuing with remaining versions): "
+                    f"{ver_exc}\n{_tb.format_exc()[-600:]}"
                 )
+                failed_versions.append((version, str(ver_exc)))
 
-            promote_adapter(
-                adapter_id=pending["job_id"],
-                registry_path=pending["registry_path"],
-                version=pending["version"],
-                merged_model_path=pending["merged_model_path"],
-                adapter_path=pending["adapter_path"],
-                eval_scores=pending.get("eval_scores", {}),
-                training_meta=pending.get("training_meta", {}),
-                base_model=pending.get("base_model", ""),
-                progress_callback=_progress_cb
-            )
-            # Delete pending-share manifest only after confirmed upload success
-            file_path.unlink(missing_ok=True)
-
-            # Delete local weight directories — they are now safely in storage
-            import shutil as _shutil
-            _merged = Path(merged_model_path)
-            if _merged.exists():
-                _shutil.rmtree(_merged, ignore_errors=True)
-                print(f"[share-gradients] Deleted local merged model: {_merged}")
-            # GGUF dir sits next to the merged dir as {version}-gguf/
-            _gguf_dir = _merged.parent / f"{version}-gguf"
-            if _gguf_dir.exists():
-                _shutil.rmtree(_gguf_dir, ignore_errors=True)
-                print(f"[share-gradients] Deleted local GGUF dir: {_gguf_dir}")
-            _adapter = Path(adapter_path)
-            if _adapter.exists():
-                _shutil.rmtree(_adapter, ignore_errors=True)
-                print(f"[share-gradients] Deleted local adapter: {_adapter}")
-
-            uploaded_versions.append(version)
-            print(f"[share-gradients] v{version} uploaded, local weights cleared.")
-
+        final_status = "completed" if not failed_versions else (
+            "partial" if uploaded_versions else "failed"
+        )
         with _share_jobs_lock:
             _share_jobs[job_id].update({
-                "status":            "completed",
+                "status":            final_status,
                 "phase":             "done",
                 "finished_at":       datetime.now(timezone.utc).isoformat(),
                 "uploaded_versions": uploaded_versions,
+                "failed_versions":   [str(v) for v, _ in failed_versions],
                 "version":           uploaded_versions[-1] if uploaded_versions else None,
             })
-        print(f"[share-gradients] All done — uploaded: {uploaded_versions}")
+        if failed_versions:
+            print(
+                f"[share-gradients] Done — uploaded: {uploaded_versions}, "
+                f"failed: {[v for v, _ in failed_versions]}"
+            )
+        else:
+            print(f"[share-gradients] All done — uploaded: {uploaded_versions}")
 
     except Exception as exc:
         import traceback

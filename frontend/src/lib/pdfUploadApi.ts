@@ -293,6 +293,7 @@ export async function syncFeedbacksToRunpod(
     original_response: string;
     corrected_response?: string;
     form_type?: string;
+    run_id?: string;
   }>
 ): Promise<{ synced: number; failed: number }> {
   if (feedbacks.length === 0) return { synced: 0, failed: 0 };
@@ -313,6 +314,7 @@ export async function syncFeedbacksToRunpod(
           original_fields: originalFields,
           corrected_fields: correctedFields,
           form_type: fb.form_type || "25",
+          run_id: fb.run_id ?? null,
         }),
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -423,12 +425,12 @@ export async function getShareGradientsJobStatus(jobId: string): Promise<{
 }
 
 /** Trigger fine-tuning on RunPod with all pending training samples. */
-export async function startRunpodFinetune(): Promise<{ status: string; job_id?: string; message?: string; total_samples?: number }> {
+export async function startRunpodFinetune(opts: { acord_run_ids?: string[] } = {}): Promise<{ status: string; job_id?: string; message?: string; total_samples?: number }> {
   const headers = await authHeader();
   const resp = await fetch(apiUrl("/api/v1/pdf/finetune/start"), {
     method: "POST",
     headers: { ...headers, "Content-Type": "application/json" },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ acord_run_ids: opts.acord_run_ids ?? [] }),
   });
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ detail: resp.statusText }));
