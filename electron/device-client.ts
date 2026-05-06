@@ -87,17 +87,25 @@ export async function ensureDeviceAuthAsync(opts?: { log?: (msg: string) => void
   if (existingJwt && existingId) {
     try {
       // Prefer heartbeat: validates JWT without adapter_registry domain setup.
-      // 401 = invalid/expired JWT → re-register; otherwise token is accepted.
-      const res = await fetch(`${apiBaseUrl()}/api/v1/devices/heartbeat`, {
-        method: "PUT",
-        headers: { Authorization: `Bearer ${existingJwt}` },
-      });
-      if (res.status !== 401) {
+      // 401/403 = invalid/expired/revoked JWT → re-register; otherwise token is accepted.
+      const validateCtrl = new AbortController();
+      const validateTimeout = setTimeout(() => validateCtrl.abort(), 30000);
+      let res: Response;
+      try {
+        res = await fetch(`${apiBaseUrl()}/api/v1/devices/heartbeat`, {
+          method: "PUT",
+          headers: { Authorization: `Bearer ${existingJwt}` },
+          signal: validateCtrl.signal,
+        });
+      } finally {
+        clearTimeout(validateTimeout);
+      }
+      if (res.status !== 401 && res.status !== 403) {
         return { device_id: existingId, device_jwt: existingJwt };
       }
-      opts?.log?.("[device] stored JWT rejected by backend — re-registering");
+      opts?.log?.(`[device] stored JWT rejected by backend (${res.status}) — re-registering`);
     } catch {
-      // Network error — use stored JWT so brief outages do not force re-register.
+      // Network error or timeout — use stored JWT so brief outages do not force re-register.
       return { device_id: existingId, device_jwt: existingJwt };
     }
   }
@@ -112,26 +120,38 @@ export async function ensureDeviceAuthAsync(opts?: { log?: (msg: string) => void
 
 async function registerDevice(): Promise<{ device_id: string; device_token: string }> {
   const hw = getMachineId();
-  const res = await fetch(`${apiBaseUrl()}/api/v1/devices/register`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      hardware_fingerprint: hw,
-      device_name: deviceLabel(),
-      os_type: process.platform,
-      app_version: process.env.npm_package_version || undefined,
-      metadata: {
-        source: "electron-main",
-      },
-    }),
-  });
-  const payload = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const p: any = payload;
-    const msg = p?.error || p?.detail || JSON.stringify(payload) || `HTTP ${res.status}`;
-    throw new Error(`Device register failed: ${msg}`);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 60000);
+  try {
+    const res = await fetch(`${apiBaseUrl()}/api/v1/devices/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        hardware_fingerprint: hw,
+        device_name: deviceLabel(),
+        os_type: process.platform,
+        app_version: process.env.npm_package_version || undefined,
+        metadata: {
+          source: "electron-main",
+        },
+      }),
+    });
+    clearTimeout(timeoutId);
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const p: any = payload;
+      const msg = p?.error || p?.detail || JSON.stringify(payload) || `HTTP ${res.status}`;
+      throw new Error(`Device register failed: ${msg}`);
+    }
+    return payload as { device_id: string; device_token: string };
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    if (err?.name === "AbortError") {
+      throw new Error(`Device registration timed out — backend unreachable at ${apiBaseUrl()}. Check your network or API URL.`);
+    }
+    throw err;
   }
-  return payload as { device_id: string; device_token: string };
 }
 
 class DeviceAuthError extends Error {
@@ -144,20 +164,27 @@ class DeviceAuthError extends Error {
 }
 
 async function heartbeat(deviceJwt: string): Promise<void> {
-  const res = await fetch(`${apiBaseUrl()}/api/v1/devices/heartbeat`, {
-    method: "PUT",
-    headers: {
-      Authorization: `Bearer ${deviceJwt}`,
-    },
-  });
-  if (!res.ok) {
-    const payload = await res.json().catch(() => ({}));
-    const p: any = payload;
-    const msg = p?.error || p?.detail || JSON.stringify(payload) || `HTTP ${res.status}`;
-    if (res.status === 401 || res.status === 403) {
-      throw new DeviceAuthError(`Heartbeat failed: ${msg}`, res.status);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 60000);
+  try {
+    const res = await fetch(`${apiBaseUrl()}/api/v1/devices/heartbeat`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${deviceJwt}` },
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!res.ok) {
+      const payload = await res.json().catch(() => ({}));
+      const p: any = payload;
+      const msg = p?.error || p?.detail || JSON.stringify(payload) || `HTTP ${res.status}`;
+      if (res.status === 401 || res.status === 403) {
+        throw new DeviceAuthError(`Heartbeat failed: ${msg}`, res.status);
+      }
+      throw new Error(`Heartbeat failed: ${msg}`);
     }
-    throw new Error(`Heartbeat failed: ${msg}`);
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    throw err;
   }
 }
 
@@ -179,6 +206,9 @@ export async function ensureDeviceAuthAndStartHeartbeat(opts: {
         opts.log(`[device] heartbeat ok`);
       } catch (e) {
         if (e instanceof DeviceAuthError) {
+          // Guard: if stop() was called between when this tick started and now,
+          // don't treat the 401 as admin-deactivation — the loop was intentionally stopped.
+          if (stopped) return;
           opts.log(`[device] heartbeat auth error (${e.status}) — device deactivated by admin`);
           stopped = true;
           if (timer) clearInterval(timer);
@@ -189,25 +219,23 @@ export async function ensureDeviceAuthAndStartHeartbeat(opts: {
         opts.log(`[device] heartbeat error: ${e instanceof Error ? e.message : String(e)}`);
       }
     };
-    // Run an initial beat quickly, then every hbSeconds.
-    void tick();
+    // Do NOT run an immediate tick. ensureDeviceAuthAsync already validated (or freshly
+    // issued) the JWT right before startLoop is called. An instant heartbeat on a
+    // brand-new JWT can hit the backend's propagation window, return 401, and be
+    // misread as admin deactivation — disconnecting a device that is actually enabled.
     timer = setInterval(() => void tick(), hbSeconds * 1000);
   };
 
   try {
-    const existing = await getStoredDeviceJwtAsync();
-    if (existing) {
-      opts.log(`[device] using stored device JWT`);
-      startLoop(existing);
-      return { stop: () => (stopped = true, timer && clearInterval(timer)) };
-    }
-
-    opts.log(`[device] registering device... base=${apiBaseUrl()}`);
-    const reg = await ensureDeviceAuthAsync({ log: opts.log });
-    opts.log(`[device] registered device_id=${reg.device_id}`);
-    startLoop(reg.device_jwt);
+    // Always validate before starting the loop. ensureDeviceAuthAsync sends a heartbeat
+    // to confirm the stored JWT is still valid, and re-registers if it gets 401/403.
+    // This prevents a stale post-logout JWT from being mistaken for admin deactivation.
+    opts.log(`[device] validating device auth... base=${apiBaseUrl()}`);
+    const auth = await ensureDeviceAuthAsync({ log: opts.log });
+    opts.log(`[device] device auth ready device_id=${auth.device_id}`);
+    startLoop(auth.device_jwt);
   } catch (e) {
-    opts.log(`[device] registration failed: ${e instanceof Error ? e.message : String(e)}`);
+    opts.log(`[device] startup auth failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   return {
