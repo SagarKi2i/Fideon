@@ -63,7 +63,7 @@ class AdapterMerger:
 
         base_model = Qwen2VLForConditionalGeneration.from_pretrained(
             base_model_path,
-            dtype=dtype,
+            torch_dtype=dtype,
             device_map="auto",
             local_files_only=local_only,
         )

@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
+import { jsPDF } from "jspdf";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Upload, FileText, Loader2, FileCheck, CheckCircle2, AlertCircle, RefreshCw, Scan, FileDigit } from "lucide-react";
+import { Upload, FileText, Loader2, FileCheck, CheckCircle2, AlertCircle, RefreshCw, Scan, FileDigit, Download } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
@@ -192,35 +193,83 @@ function serializeFieldValue(v: unknown): string {
 
 function flattenAcordFields(result: AcordExtractionResult): Array<{ key: string; value: string }> {
   const raw = result.extracted_json ?? result.extracted_fields ?? result.fields ?? {};
-  return Object.entries(raw)
-    .map(([key, v]) => {
-      if (v === null || v === undefined) return null;
-      const val = serializeFieldValue(v);
-      return val !== null && val !== undefined ? { key, value: val } : null;
-    })
-    .filter(Boolean) as Array<{ key: string; value: string }>;
+  const out: Array<{ key: string; value: string }> = [];
+
+  function walk(obj: any, prefix: string) {
+    if (obj === null || obj === undefined) return;
+    if (Array.isArray(obj)) {
+      if (obj.length > 0 && prefix) {
+        const joined = obj
+          .map((item: any) => (typeof item === "object" && item !== null ? JSON.stringify(item) : String(item)))
+          .join("; ");
+        if (joined) out.push({ key: prefix, value: joined });
+      }
+      return;
+    }
+    if (typeof obj === "object") {
+      // Leaf node: {"value": ..., "confidence": ..., "page": ...}
+      if ("value" in obj && (typeof obj.value === "string" || typeof obj.value === "number" || typeof obj.value === "boolean" || obj.value === null)) {
+        const val = serializeFieldValue(obj.value);
+        if (val !== null && val !== undefined && val !== "" && prefix) out.push({ key: prefix, value: val });
+        return;
+      }
+      // Group node — recurse into children
+      for (const [k, v] of Object.entries(obj)) {
+        if (k === "raw_text") continue;
+        const newKey = prefix ? `${prefix}.${k}` : k;
+        if (typeof v === "object" && v !== null) {
+          walk(v, newKey);
+        } else {
+          const val = serializeFieldValue(v);
+          if (val !== null && val !== undefined && val !== "") out.push({ key: newKey, value: val });
+        }
+      }
+      return;
+    }
+    if (prefix) {
+      const val = serializeFieldValue(obj);
+      if (val !== null && val !== undefined && val !== "") out.push({ key: prefix, value: val });
+    }
+  }
+
+  walk(raw, "");
+  return out;
 }
 
 function fieldsToMarkdown(
   fields: Array<{ key: string; value: string }>,
   formType: string,
   pdfType: string,
+  rawText?: string,
 ): string {
   const formLabel = formType.replace(/^acord/i, "");
   const pdfLabel = pdfType === "scanned" ? "Scanned PDF" : pdfType === "digital" ? "Digital PDF" : pdfType || "Unknown";
-  const rows = fields.map(
+  // Exclude raw_text from the field table — it gets its own section below
+  const tableFields = fields.filter((f) => f.key !== "raw_text");
+  const rows = tableFields.map(
     (f) => `| ${f.key.replace(/\|/g, "\\|")} | ${String(f.value).replace(/\|/g, "\\|")} |`
   );
-  return [
+  const parts = [
     `## ACORD ${formLabel} — Extracted Fields`,
     ``,
     `**PDF Type:** ${pdfLabel}  `,
-    `**Total Fields:** ${fields.length}`,
+    `**Total Fields:** ${tableFields.length}`,
     ``,
     `| Field | Value |`,
     `|-------|-------|`,
     ...rows,
-  ].join("\n");
+  ];
+  if (rawText && rawText.trim()) {
+    parts.push(
+      ``,
+      `## Raw Extracted Text`,
+      ``,
+      "```",
+      rawText.trim(),
+      "```",
+    );
+  }
+  return parts.join("\n");
 }
 
 function parseMarkdownTableToJson(markdown: string): Record<string, string> {
@@ -305,7 +354,8 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
       const result = await triggerFullExtraction(uploadId, formType);
       setExtractionState({ phase: "completed", result });
       const fields = flattenAcordFields(result);
-      setMarkdownEditText(fieldsToMarkdown(fields, result.form_type_detected || formType, result.pdf_type || smartResult.pdf_type));
+      const fullRawText = result.full_text ?? result.raw_text ?? "";
+      setMarkdownEditText(fieldsToMarkdown(fields, result.form_type_detected || formType, result.pdf_type || smartResult.pdf_type, fullRawText));
       setProcessingPhase("done");
       const fieldCount = Object.keys(
         result.extracted_json ?? result.extracted_fields ?? result.fields ?? {}
@@ -478,6 +528,124 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
     }
   };
 
+  const handleDownloadPdf = () => {
+    if (extractionState.phase !== "completed") return;
+
+    const fields = flattenAcordFields(extractionState.result);
+    const formTypeDetected = (extractionState.result.form_type_detected || formType).toUpperCase();
+    const pdfTypeLabel =
+      extractionState.result.pdf_type === "scanned" ? "Scanned PDF"
+      : extractionState.result.pdf_type === "digital" ? "Digital PDF"
+      : extractionState.result.pdf_type || "Unknown";
+    const sourceFilename = file?.name || "acord-form";
+
+    const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+    const pageW = doc.internal.pageSize.getWidth();
+    const pageH = doc.internal.pageSize.getHeight();
+    const margin = 15;
+    const contentW = pageW - margin * 2;
+    const col1W = contentW * 0.44;
+    const col2W = contentW * 0.56;
+    const rowH = 7;
+
+    // ── Header bar ───────────────────────────────────────────────────────────
+    doc.setFillColor(91, 33, 182);
+    doc.rect(0, 0, pageW, 30, "F");
+    doc.setTextColor(255, 255, 255);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(13);
+    doc.text(`ACORD ${formTypeDetected} — Extracted Fields`, margin, 12);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8.5);
+    doc.text(`Source: ${sourceFilename}`, margin, 20);
+    doc.text(
+      `PDF Type: ${pdfTypeLabel}   |   Fields: ${fields.length}   |   ${new Date().toLocaleDateString()}`,
+      margin, 26
+    );
+
+    // ── Table header row ─────────────────────────────────────────────────────
+    let y = 36;
+    doc.setFillColor(237, 233, 254);
+    doc.rect(margin, y, contentW, rowH, "F");
+    doc.setTextColor(91, 33, 182);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8.5);
+    doc.text("Field", margin + 2, y + 5);
+    doc.text("Value", margin + col1W + 2, y + 5);
+    doc.setDrawColor(167, 139, 250);
+    doc.setLineWidth(0.4);
+    doc.line(margin, y + rowH, margin + contentW, y + rowH);
+    doc.line(margin + col1W, y, margin + col1W, y + rowH);
+    y += rowH;
+
+    // ── Field rows ───────────────────────────────────────────────────────────
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+    doc.setLineWidth(0.15);
+
+    for (let i = 0; i < fields.length; i++) {
+      if (y + rowH > pageH - margin) {
+        doc.addPage();
+        y = margin;
+        // Repeat table header on new page
+        doc.setFillColor(237, 233, 254);
+        doc.rect(margin, y, contentW, rowH, "F");
+        doc.setTextColor(91, 33, 182);
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(8.5);
+        doc.text("Field", margin + 2, y + 5);
+        doc.text("Value", margin + col1W + 2, y + 5);
+        doc.setDrawColor(167, 139, 250);
+        doc.setLineWidth(0.4);
+        doc.line(margin, y + rowH, margin + contentW, y + rowH);
+        doc.line(margin + col1W, y, margin + col1W, y + rowH);
+        y += rowH;
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(8);
+        doc.setLineWidth(0.15);
+      }
+
+      if (i % 2 === 0) {
+        doc.setFillColor(250, 249, 255);
+        doc.rect(margin, y, contentW, rowH, "F");
+      }
+
+      doc.setTextColor(80, 60, 120);
+      const keyLines = doc.splitTextToSize(fields[i].key, col1W - 4);
+      doc.text(keyLines[0], margin + 2, y + 5);
+
+      doc.setTextColor(20, 20, 20);
+      const valLines = doc.splitTextToSize(fields[i].value, col2W - 4);
+      doc.text(valLines[0], margin + col1W + 2, y + 5);
+
+      doc.setDrawColor(220, 215, 240);
+      doc.line(margin, y + rowH, margin + contentW, y + rowH);
+      doc.line(margin + col1W, y, margin + col1W, y + rowH);
+      y += rowH;
+    }
+
+    // ── Outer border ──────────────────────────────────────────────────────────
+    doc.setDrawColor(167, 139, 250);
+    doc.setLineWidth(0.4);
+    doc.rect(margin, 36, contentW, y - 36);
+
+    // ── Footer ───────────────────────────────────────────────────────────────
+    const totalPages = (doc as any).internal.getNumberOfPages();
+    for (let p = 1; p <= totalPages; p++) {
+      doc.setPage(p);
+      doc.setTextColor(160, 160, 160);
+      doc.setFont("helvetica", "italic");
+      doc.setFontSize(7);
+      doc.text(
+        `Generated by Fideon AI · ${new Date().toISOString()}   |   Page ${p} of ${totalPages}`,
+        margin, pageH - 6
+      );
+    }
+
+    const safeName = sourceFilename.replace(/\.pdf$/i, "").replace(/[^a-zA-Z0-9-_]/g, "_");
+    doc.save(`acord-${formTypeDetected}-${safeName}.pdf`);
+  };
+
   return (
     <div className="space-y-6">
       <Card className="bg-card border-border">
@@ -628,7 +796,7 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
               <CardTitle className="text-card-foreground flex items-center gap-2 flex-wrap">
                 <CheckCircle2 className="h-5 w-5 text-violet-400" />
                 ACORD Extraction Results
-                <div className="ml-auto flex gap-2">
+                <div className="ml-auto flex items-center gap-2">
                   {formTypeDetected && (
                     <Badge variant="outline" className="border-violet-500 text-violet-400 text-xs">
                       {formTypeDetected.toUpperCase()}
@@ -642,6 +810,16 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
                   <Badge variant="outline" className="border-violet-500 text-violet-400 text-xs">
                     {extractedFields.length} field{extractedFields.length !== 1 ? "s" : ""}
                   </Badge>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleDownloadPdf}
+                    className="h-7 px-2 gap-1.5 text-xs border-violet-500/50 text-violet-400 hover:bg-violet-500/10 hover:text-violet-300"
+                    title="Download extracted fields as PDF"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    PDF
+                  </Button>
                 </div>
               </CardTitle>
             </CardHeader>
@@ -719,9 +897,15 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
                 </TabsContent>
 
                 <TabsContent value="markdown" className="mt-3 space-y-3">
-                  <p className="text-xs text-muted-foreground">
-                    Edit the fields below — correct any wrong values — then click <strong>Submit &amp; Train</strong>.
-                  </p>
+                  {detectedPdfType === "digital" ? (
+                    <p className="text-xs text-muted-foreground">
+                      Training is only available for <strong>scanned PDFs</strong>. Digital PDFs are not processed by the fine-tunable model.
+                    </p>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      Edit the fields below — correct any wrong values — then click <strong>Submit &amp; Train</strong>.
+                    </p>
+                  )}
                   <Textarea
                     value={markdownEditText}
                     onChange={(e) => { setMarkdownEditText(e.target.value); setTrainSubmittedRunpod(false); }}
@@ -730,15 +914,17 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
                   />
                   <div className="flex items-center justify-between gap-3 pt-1">
                     <p className="text-xs text-muted-foreground">
-                      Each save adds one sample to <strong>Model Training → Local Training</strong>.
+                      {detectedPdfType === "digital"
+                        ? "Fine-tuning is not supported for digital PDFs."
+                        : <>Each save adds one sample to <strong>Model Training → Local Training</strong>.</>}
                     </p>
                     <Button
                       onClick={async () => {
                         await handleSubmitAndTrain();
                         setTimeout(() => setTrainSubmittedRunpod(false), 2000);
                       }}
-                      disabled={isSubmittingTrain}
-                      className="shrink-0 bg-gradient-to-r from-green-600 to-emerald-600 hover:opacity-90 text-white"
+                      disabled={isSubmittingTrain || detectedPdfType === "digital"}
+                      className="shrink-0 bg-gradient-to-r from-green-600 to-emerald-600 hover:opacity-90 text-white disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       {isSubmittingTrain ? (
                         <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Saving…</>
@@ -1040,8 +1226,8 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
                 Reset
               </Button>
               <Button
-                disabled={isRunning || trainSubmitted}
-                className="bg-gradient-primary hover:opacity-90"
+                disabled={isRunning || trainSubmitted || detectedPdfType === "digital"}
+                className="bg-gradient-primary hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
                 onClick={handleTrain}
               >
                 Train

@@ -8,6 +8,24 @@ log_err() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $1" | tee -a "$LOG" >&2;
 
 log "Starting Fideon AI-ML Server..."
 
+# ── /workspace/bin persists across pod restarts ───────────────────────────────
+# system volume (/usr/local/) is reset on restart; /workspace/ is not.
+export PATH="/workspace/bin:$PATH"
+log "PATH includes /workspace/bin (llama.cpp binaries)"
+
+# ── Env var defaults ──────────────────────────────────────────────────────────
+export SEAWEEDFS_BUCKET="${SEAWEEDFS_BUCKET:-my-bucket}"
+export ACORD_NL_SUMMARY_ENABLED="${ACORD_NL_SUMMARY_ENABLED:-true}"
+log "SEAWEEDFS_BUCKET=${SEAWEEDFS_BUCKET}  ACORD_NL_SUMMARY_ENABLED=${ACORD_NL_SUMMARY_ENABLED}"
+
+# ── Storage backend — Azure Blob Storage ─────────────────────────────────────
+# Set STORAGE_BACKEND=seaweedfs to revert to legacy SeaweedFS.
+export STORAGE_BACKEND="${STORAGE_BACKEND:-azure}"
+export AZURE_BLOB_ACCOUNT_URL="${AZURE_BLOB_ACCOUNT_URL:-https://swtier.blob.core.windows.net}"
+export AZURE_BLOB_SAS_TOKEN="${AZURE_BLOB_SAS_TOKEN:-sv=2025-11-05&ss=bfqt&srt=sco&sp=rwdlacupiytfx&se=2026-06-04T12:54:05Z&st=2026-05-04T04:39:05Z&spr=https&sig=ZVUsGfphbkOQwoyrmx7dv0mb1UR7LeV6N7bMFF97g%2Bo%3D}"
+export AZURE_BLOB_CONTAINER="${AZURE_BLOB_CONTAINER:-models}"
+log "STORAGE_BACKEND=${STORAGE_BACKEND}  AZURE_BLOB_CONTAINER=${AZURE_BLOB_CONTAINER}  AZURE_BLOB_ACCOUNT_URL=${AZURE_BLOB_ACCOUNT_URL}"
+
 # ── Persist Surya/Datalab model cache ─────────────────────────────────────────
 mkdir -p /workspace/.cache/datalab
 export DATALAB_CACHE_PATH=/workspace/.cache/datalab
@@ -29,7 +47,7 @@ if [ ! -f "$VENV/bin/activate" ]; then
     "$PY" -m ensurepip --upgrade 2>>"$LOG" || \
         curl -sS https://bootstrap.pypa.io/get-pip.py | "$PY" 2>>"$LOG"
     "$PY" -m pip install --upgrade pip --quiet --no-cache-dir 2>>"$LOG"
-    if "$PY" -m pip install -r /app/requirements.txt --quiet --no-cache-dir 2>>"$LOG"; then
+    if "$PY" -m pip install -r /workspace/ai-ml/requirements.txt --quiet --no-cache-dir 2>>"$LOG"; then
         log "Packages installed to venv"
     else
         log_err "pip install failed — some packages may be missing (check $LOG)"
@@ -38,7 +56,7 @@ else
     log "venv exists — syncing packages..."
     # Ensure pip module is present (some base images omit it)
     "$PY" -m ensurepip --upgrade 2>>"$LOG" || true
-    if ! "$PY" -m pip install -q --no-cache-dir -r /app/requirements.txt 2>>"$LOG"; then
+    if ! "$PY" -m pip install -q --no-cache-dir -r /workspace/ai-ml/requirements.txt 2>>"$LOG"; then
         log_err "pip sync failed — continuing with existing packages (check $LOG)"
     fi
 fi
@@ -51,10 +69,10 @@ if [ ! -f "$LLAMA_BIN" ]; then
     log "First boot: compiling llama.cpp with CUDA (~40 min)..."
     # Use || true so that a SIGTERM at the very end (e.g. the cp step) does not
     # cause startup.sh to skip the binary-exists check below.
-    bash /app/setup.sh --skip-pip --skip-verify 2>>"$LOG" || true
+    bash /workspace/ai-ml/setup.sh --skip-pip --skip-verify 2>>"$LOG" || true
     # Trust the binary on disk, not setup.sh's exit code
     if [ -f "$LLAMA_BIN" ]; then
-        cp "$LLAMA_BIN" /usr/local/bin/llama-quantize 2>>"$LOG" || true
+        cp "$LLAMA_BIN" /workspace/bin/llama-quantize 2>>"$LOG" || true
         [ -f /workspace/llama.cpp/requirements.txt ] && \
             "$PY" -m pip install -q -r /workspace/llama.cpp/requirements.txt 2>>"$LOG" || true
         "$PY" -m pip install -q gguf 2>>"$LOG" || true
@@ -64,18 +82,18 @@ if [ ! -f "$LLAMA_BIN" ]; then
     fi
 else
     log "llama.cpp already compiled — linking binaries..."
-    cp "$LLAMA_BIN" /usr/local/bin/llama-quantize 2>>"$LOG" || true
+    cp "$LLAMA_BIN" /workspace/bin/llama-quantize 2>>"$LOG" || true
     "$PY" -m pip install -q gguf 2>>"$LOG" || true
-    cat > /usr/local/bin/llama-convert-hf-to-gguf <<'WRAPPER'
+    cat > /workspace/bin/llama-convert-hf-to-gguf <<'WRAPPER'
 #!/usr/bin/env bash
 exec python3 /workspace/llama.cpp/convert_hf_to_gguf.py "$@"
 WRAPPER
-    chmod +x /usr/local/bin/llama-convert-hf-to-gguf
+    chmod +x /workspace/bin/llama-convert-hf-to-gguf
 fi
 
 # ── Start FastAPI ──────────────────────────────────────────────────────────────
 _start_fastapi() {
-    cd /app
+    cd /workspace/ai-ml
     "$VENV/bin/uvicorn" server:app \
         --host 0.0.0.0 \
         --port 8000 \

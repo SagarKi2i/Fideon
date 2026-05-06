@@ -64,38 +64,51 @@ def _upload_base() -> str:
     return base
 
 
-# ── helpers ───────────────────────────────────────────────────────────────────
-async def _runpod_get(path: str) -> Dict[str, Any]:
+# ── helpers with Retries ───────────────────────────────────────────────────────
+async def _runpod_get(path: str, max_retries: int = 3, timeout: float = 60.0) -> Dict[str, Any]:
     base = _upload_base()
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.get(f"{base}{path}")
-            if resp.status_code == 404:
-                raise HTTPException(status_code=404, detail=f"Not found on RunPod: {path}")
-            resp.raise_for_status()
-            return resp.json()
-    except HTTPException:
-        raise
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=502, detail=f"RunPod unreachable: {type(e).__name__}: {e}")
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(f"{base}{path}")
+                if resp.status_code == 404:
+                    raise HTTPException(status_code=404, detail=f"Not found on RunPod: {path}")
+                resp.raise_for_status()
+                return resp.json()
+        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+            last_exc = e
+            if attempt < max_retries - 1:
+                import asyncio
+                await asyncio.sleep(2 * (attempt + 1))  # Backoff: 2s, 4s...
+                continue
+            raise HTTPException(status_code=502, detail=f"RunPod unreachable after {max_retries} attempts: {e}")
 
-
-async def _runpod_post(path: str, timeout: Optional[float] = 120.0, **kwargs: Any) -> Dict[str, Any]:
+async def _runpod_post(path: str, timeout: Optional[float] = 300.0, max_retries: int = 3, **kwargs: Any) -> Dict[str, Any]:
     base = _upload_base()
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(f"{base}{path}", **kwargs)
-            resp.raise_for_status()
-            return resp.json()
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail=f"RunPod request timed out: POST {path}")
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"RunPod returned {e.response.status_code}: {(e.response.text or '')[:400]}",
-        )
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=502, detail=f"RunPod unreachable: {type(e).__name__}: {e}")
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(f"{base}{path}", **kwargs)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.TimeoutException:
+            # Don't retry on actual timeouts, as the job is likely already running
+            raise HTTPException(status_code=504, detail=f"RunPod request timed out: POST {path}")
+        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+            last_exc = e
+            if attempt < max_retries - 1:
+                import asyncio
+                await asyncio.sleep(2 * (attempt + 1))
+                continue
+            
+            detail = f"RunPod error after {max_retries} attempts: "
+            if isinstance(e, httpx.HTTPStatusError):
+                detail += f"{e.response.status_code}: {(e.response.text or '')[:200]}"
+            else:
+                detail += str(e)
+            raise HTTPException(status_code=502, detail=detail)
 
 
 # ── PDF type detection (CPU-only, PyMuPDF) ───────────────────────────────────
@@ -162,6 +175,7 @@ async def smart_extract_pdf(
     log.info("smart_extract.uploading_to_runpod", filename=filename, pdf_type=pdf_type)
     result = await _runpod_post(
         "/upload",
+        timeout=300.0,
         files={"file": (filename, content, file.content_type or "application/pdf")},
         params={"form_type": form_type},
     )
@@ -287,17 +301,25 @@ async def extract_acord_from_upload(
     # internal extraction missed them (e.g. truncated context, partial model output).
     llm_fields = await _llm_extract_from_raw_text(raw_text, form_type_hint=form_type)
     if llm_fields:
-        # RunPod values win over LLM when both exist and RunPod value is non-null.
+        # Merge strategy: LLM fills gaps, RunPod (fine-tuned) wins for any field it extracted.
+        # LLM is used as a baseline; RunPod's non-null/non-empty values always override it
+        # so that corrections learned through fine-tuning are never silently overridden.
+        merged_fields = dict(llm_fields)
         for k, v in runpod_fields.items():
-            if k not in llm_fields or llm_fields[k] is None:
-                llm_fields[k] = v
-        result["extracted_json"] = llm_fields
-        log.info("acord_extract.llm_supplement_done", upload_id=upload_id, field_count=len(llm_fields))
+            if v is not None and v != "" and v != [] and v != {}:
+                merged_fields[k] = v
+        result["extracted_json"] = merged_fields
+        log.info("acord_extract.llm_supplement_done", upload_id=upload_id, field_count=len(merged_fields))
     else:
         result["extracted_json"] = runpod_fields
         log.info("acord_extract.llm_supplement_skipped", upload_id=upload_id)
 
-    nl_summary = await generate_nl_summary(result["extracted_json"], raw_text)
+    # Always regenerate NL summary on the backend using the fully-merged fields
+    # (RunPod fields + LLM-supplemented fields). The pod's version is discarded
+    # because it was built from pod-only fields before the LLM supplement step.
+    # Falls back to the pod's version if the backend generate call returns None.
+    backend_summary = await generate_nl_summary(result["extracted_json"], raw_text)
+    nl_summary = backend_summary or result.get("natural_language_summary")
     if nl_summary:
         result["natural_language_summary"] = nl_summary
     return result
@@ -394,3 +416,71 @@ async def start_finetune(
     result = await _runpod_post("/finetune/start", json=body)
     log.info("finetune.queued", status=result.get("status"), samples=result.get("total_samples"))
     return result
+
+
+# ── POST /api/v1/pdf/federated/start ─────────────────────────────────────────
+@router.post("/api/v1/pdf/federated/start")
+async def start_federated(
+    body: Dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """
+    Trigger federated aggregation on the pod.
+    Pod collects all fine-tuned weight versions from SeaweedFS and runs FedAvg.
+    Returns immediately with job_id; poll GET /api/v1/pdf/federated/jobs/{job_id}.
+    """
+    await verify_user(authorization)
+    log.info("federated.start_requested")
+    # Increased timeout to 120s to allow pod to check SeaweedFS and start aggregation.
+    result = await _runpod_post("/federated/start", json=body, timeout=120.0)
+    log.info("federated.queued", status=result.get("status"))
+    return result
+
+
+# ── GET /api/v1/pdf/federated/jobs/{job_id} ──────────────────────────────────
+@router.get("/api/v1/pdf/federated/jobs/{job_id}")
+async def get_federated_job_status(
+    job_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Poll the status of a federated aggregation job launched via POST /federated/start."""
+    await verify_user(authorization)
+    # Short timeout + no retry for polling: fail fast so the frontend can count
+    # consecutive failures and reset the spinner instead of hanging for minutes.
+    return await _runpod_get(f"/federated/jobs/{job_id}", timeout=10.0, max_retries=1)
+
+
+# ── POST /api/v1/pdf/share-gradients ─────────────────────────────────────────
+@router.post("/api/v1/pdf/share-gradients")
+async def share_gradients(
+    body: Dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Upload locally-trained weights to SeaweedFS. Reads pending_share.json from pod."""
+    await verify_user(authorization)
+    log.info("share_gradients.start_requested")
+    # Increased timeout to 120s to allow pod to start the share job.
+    result = await _runpod_post("/share-gradients", json=body, timeout=120.0)
+    log.info("share_gradients.queued", status=result.get("status"))
+    return result
+
+
+# ── GET /api/v1/pdf/share-gradients/status ───────────────────────────────────
+@router.get("/api/v1/pdf/share-gradients/status")
+async def get_share_gradients_status(
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Check if there are locally trained weights pending upload to SeaweedFS."""
+    await verify_user(authorization)
+    return await _runpod_get("/share-gradients/status")
+
+
+# ── GET /api/v1/pdf/share-gradients/jobs/{job_id} ────────────────────────────
+@router.get("/api/v1/pdf/share-gradients/jobs/{job_id}")
+async def get_share_gradients_job(
+    job_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Poll the status of a share-gradients upload job."""
+    await verify_user(authorization)
+    return await _runpod_get(f"/share-gradients/jobs/{job_id}")

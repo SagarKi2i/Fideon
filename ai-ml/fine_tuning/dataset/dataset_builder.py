@@ -41,6 +41,34 @@ class DatasetBuildResult:
 
 # ── Validation ────────────────────────────────────────────────────────────────
 
+def _repair_chat_row(row: Dict[str, Any], row_index: int) -> bool:
+    """
+    Attempt to repair a chat row in-place so it passes validation.
+    Returns True if the row is usable after repair, False if it is unrecoverable.
+    """
+    msgs = row.get("messages")
+    if not isinstance(msgs, list) or len(msgs) == 0:
+        return False
+    has_assistant = any(m.get("role") == "assistant" for m in msgs)
+    if not has_assistant:
+        return False
+    for i, m in enumerate(msgs):
+        content = m.get("content")
+        if not isinstance(content, str):
+            # Convert non-string content (e.g. dict/list) to JSON string
+            try:
+                import json as _j
+                m["content"] = _j.dumps(content, ensure_ascii=False) if content is not None else ""
+            except Exception:
+                m["content"] = str(content) if content is not None else ""
+            print(f"[dataset_builder] Row {row_index} msg {i}: repaired non-string content → str")
+        if not m["content"].strip():
+            role = m.get("role", f"msg{i}")
+            m["content"] = f"[{role} content unavailable]"
+            print(f"[dataset_builder] Row {row_index} msg {i} ({role}): repaired empty content with placeholder")
+    return True
+
+
 def validate_chat_format(row: Dict[str, Any], row_index: int) -> None:
     """Raise InvalidChatFormatError if row is not a valid chat sample."""
     msgs = row.get("messages")
@@ -66,15 +94,18 @@ def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     if not path.exists():
         return rows
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for lineno, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
         s = line.strip()
-        if s:
-            try:
-                obj = json.loads(s)
-                if isinstance(obj, dict):
-                    rows.append(obj)
-            except Exception:
-                continue
+        if not s:
+            continue
+        try:
+            obj = json.loads(s)
+            if isinstance(obj, dict):
+                rows.append(obj)
+            else:
+                print(f"[dataset_builder] {path.name}:{lineno} skipped — not a JSON object (got {type(obj).__name__})")
+        except Exception as exc:
+            print(f"[dataset_builder] {path.name}:{lineno} skipped — JSON parse error: {exc}")
     return rows
 
 
@@ -147,15 +178,26 @@ class DatasetBuilder:
             "/workspace/fine_tuning/datasets/feedback_learning",
         )
 
-        # 1. Load new rows
+        # 1. Load new rows — repair instead of reject where possible
         new_rows: List[Dict[str, Any]] = []
         rejected = 0
         for i, row in enumerate(_read_jsonl(Path(new_data_path))):
             try:
                 validate_chat_format(row, i)
                 new_rows.append(row)
-            except InvalidChatFormatError:
-                rejected += 1
+            except InvalidChatFormatError as fmt_err:
+                # Attempt repair before giving up
+                if _repair_chat_row(row, i):
+                    try:
+                        validate_chat_format(row, i)
+                        new_rows.append(row)
+                        print(f"[dataset_builder] Row {i}: included after repair")
+                    except InvalidChatFormatError as still_bad:
+                        rejected += 1
+                        print(f"[dataset_builder] Row {i}: REJECTED even after repair — {still_bad}")
+                else:
+                    rejected += 1
+                    print(f"[dataset_builder] Row {i}: REJECTED (unrecoverable) — {fmt_err}")
 
         # 2. Replay rows from previous versions
         n_replay = max(0, int(len(new_rows) * replay_fraction))

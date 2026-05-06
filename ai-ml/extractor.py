@@ -48,6 +48,69 @@ def _patch_transformers_compat() -> None:
         except ImportError:
             _iu.VideoInput = list  # type: ignore[attr-defined]
 
+    # Qwen2-VL cache_position bug: during the prefill→decode transition, image-token
+    # expansion makes the embedding sequence longer than input_ids, leaving
+    # cache_position as an empty tensor. Fix it at the Qwen2VL level before it
+    # propagates into the base-class generation loop.
+    # Note: do NOT patch GenerationMixin._cache_dependant_input_preparation — its
+    # signature changed between transformers versions (model_kwargs dropped in 4.50+),
+    # so patching it breaks on newer installs. The Qwen2VL-level patch is sufficient.
+    import torch as _torch
+
+    try:
+        from transformers.models.qwen2_vl import modeling_qwen2_vl as _qvl
+        _orig_qvl_prep = _qvl.Qwen2VLForConditionalGeneration.prepare_inputs_for_generation
+
+        def _fixed_qvl_prep(self, input_ids, past_key_values=None, attention_mask=None,
+                             inputs_embeds=None, cache_position=None, **kwargs):
+            # Fix 1: rebuild empty cache_position from KV-cache length.
+            if cache_position is not None and cache_position.numel() == 0:
+                device = input_ids.device if input_ids is not None else (
+                    inputs_embeds.device if inputs_embeds is not None else _torch.device("cpu")
+                )
+                past_len = past_key_values.get_seq_length() if past_key_values is not None else 0
+                cache_position = _torch.arange(past_len, past_len + 1, device=device)
+
+            try:
+                return _orig_qvl_prep(self, input_ids, past_key_values=past_key_values,
+                                      attention_mask=attention_mask, inputs_embeds=inputs_embeds,
+                                      cache_position=cache_position, **kwargs)
+            except RuntimeError as _rope_err:
+                if "non-empty list" not in str(_rope_err):
+                    raise
+                # Fix 2: get_rope_index builds an empty llm_pos_ids_list during decode
+                # (transformers 4.49.x bug — fixed in 4.50.0).
+                # Temporarily replace get_rope_index with a safe version that uses
+                # cache_position (the correct decode-step sequence position), then retry.
+                _dev = input_ids.device if input_ids is not None else _torch.device("cpu")
+                _bs  = input_ids.shape[0] if input_ids is not None else 1
+                _sl  = input_ids.shape[-1] if input_ids is not None else 1
+                _pos = (cache_position
+                        if cache_position is not None and cache_position.numel() > 0
+                        else _torch.arange(_sl, dtype=_torch.long, device=_dev))
+                _pids   = _pos.view(1, -1).expand(3, -1).contiguous()  # [3, seq_len]
+                _rdelta = _torch.zeros(_bs, dtype=_torch.long, device=_dev)
+
+                _orig_gri = type(self.model).get_rope_index
+
+                def _tmp_gri(model_self, _iids, _igt=None, _vgt=None, _am=None):
+                    try:
+                        return _orig_gri(model_self, _iids, _igt, _vgt, _am)
+                    except Exception:
+                        return _pids, _rdelta
+
+                type(self.model).get_rope_index = _tmp_gri
+                try:
+                    return _orig_qvl_prep(self, input_ids, past_key_values=past_key_values,
+                                          attention_mask=attention_mask, inputs_embeds=inputs_embeds,
+                                          cache_position=cache_position, **kwargs)
+                finally:
+                    type(self.model).get_rope_index = _orig_gri
+
+        _qvl.Qwen2VLForConditionalGeneration.prepare_inputs_for_generation = _fixed_qvl_prep
+    except Exception:
+        pass  # not installed or already patched
+
 
 _patch_transformers_compat()
 
@@ -69,6 +132,72 @@ _qwen_processor = None
 _qwen_loaded = False
 
 QWEN_MODEL_ID = os.getenv("QWEN_MODEL_ID", "/workspace/models/qwen2-vl-7b")
+
+# Mutable pointer to whichever model is active (base or latest fine-tuned).
+# _load_qwen() resolves the best available path on first load; reload_qwen_model()
+# hot-swaps it after each successful fine-tuning cycle.
+_active_model_path: str = QWEN_MODEL_ID
+
+
+
+def _resolve_active_model_path() -> str:
+    """
+    Return the best available model path at load time:
+      1. Already explicitly set via reload_qwen_model() (non-default _active_model_path)
+      2. Latest promoted merged model in version_registry.json (if on disk)
+      3. Storage download cache (/workspace/fine_tuning/models/finetuned/v{N}/)
+         — used when local merged weights were deleted after Share Gradients
+      4. QWEN_MODEL_ID (original base model)
+    """
+    global _active_model_path
+    if _active_model_path != QWEN_MODEL_ID:
+        # Explicit override already set — honour it.
+        return _active_model_path
+
+    registry_file = Path("/workspace/fine_tuning/registry/version_registry.json")
+    if registry_file.exists():
+        try:
+            reg = json.loads(registry_file.read_text(encoding="utf-8"))
+            current_base = reg.get("current_base")
+            if current_base and Path(current_base).exists() and (Path(current_base) / "config.json").exists():
+                print(f"[extractor] Fine-tuned model found in registry → {current_base}")
+                _active_model_path = current_base
+                return current_base
+
+            # Local merged path is gone (deleted after Share Gradients).
+            # Check if storage download cache already exists from a prior training cycle.
+            current_version = reg.get("current_version")
+            if current_version:
+                cache_dir = f"/workspace/fine_tuning/models/finetuned/v{current_version}"
+                cache_path = Path(cache_dir)
+                if cache_path.exists() and (cache_path / "config.json").exists():
+                    print(f"[extractor] Using storage cache for v{current_version} → {cache_dir}")
+                    _active_model_path = cache_dir
+                    return cache_dir
+        except Exception as exc:
+            print(f"[extractor] Registry read warning (using base model): {exc}")
+
+    return QWEN_MODEL_ID
+
+
+def reload_qwen_model(new_model_path: str) -> None:
+    """
+    Hot-swap the Qwen model to a newly-promoted fine-tuned version.
+    Called by job_runner.py after each successful promote_adapter().
+    Thread-safe — waits for any in-progress inference to finish before swapping.
+    On H100 SXM 80 GB, training and inference run simultaneously so this is
+    called only at the end of the cycle to pick up the improved weights.
+    """
+    global _qwen_model, _qwen_processor, _qwen_loaded, _active_model_path
+    print(f"[extractor] Hot-swapping Qwen model → {new_model_path}")
+    with _qwen_lock:
+        _qwen_model = None
+        _qwen_processor = None
+        _qwen_loaded = False
+        _active_model_path = new_model_path
+    # Re-load outside the lock so _load_qwen() can acquire it normally.
+    _load_qwen()
+    print(f"[extractor] Qwen model hot-swap complete (now using fine-tuned weights)")
 
 
 # ── Fast native extraction for digital PDFs (RunPod-local, no Surya/Qwen) ────
@@ -205,19 +334,36 @@ def _load_qwen() -> None:
         import torch
         from transformers import AutoConfig, AutoProcessor, Qwen2VLForConditionalGeneration
 
-        # Load config first and patch fields missing from older model checkpoints
-        # that transformers 4.57 now requires during weight initialisation.
-        config = AutoConfig.from_pretrained(QWEN_MODEL_ID)
+        model_path = _resolve_active_model_path()
+        print(f"[extractor] Loading Qwen model from: {model_path}")
+
+        # Patch missing fields from older checkpoints that transformers 4.57+ requires.
+        config = AutoConfig.from_pretrained(model_path)
         if hasattr(config, "vision_config") and not hasattr(config.vision_config, "initializer_range"):
             config.vision_config.initializer_range = 0.02
 
-        _qwen_processor = AutoProcessor.from_pretrained(QWEN_MODEL_ID)
-        _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
-            QWEN_MODEL_ID,
-            config=config,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto",
-        )
+        _qwen_processor = AutoProcessor.from_pretrained(model_path)
+
+        # H100 SXM: BF16 is natively faster than FP16 on H100 tensor cores.
+        # Flash Attention 2 accelerates long-context inference (8-page documents)
+        # using H100's HBM3 bandwidth. Falls back to default attention if not installed.
+        _dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+        _load_kw: Dict[str, Any] = {
+            "config": config,
+            "torch_dtype": _dtype,
+            "device_map": "auto",
+        }
+        try:
+            _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
+                model_path, attn_implementation="flash_attention_2", **_load_kw
+            )
+            print("[extractor] Flash Attention 2 enabled")
+        except Exception:
+            _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
+                model_path, **_load_kw
+            )
+            print("[extractor] Flash Attention 2 unavailable — using default attention")
+
         _qwen_model.eval()
         _qwen_loaded = True
 
@@ -346,56 +492,303 @@ def _parse_qwen_output(text: str) -> Tuple[Optional[Dict], str, str]:
     return parsed, raw_text, qwen_markdown
 
 
-# ── Qwen2-VL prompt ───────────────────────────────────────────────────────────
+# ── Qwen2-VL prompt (split to avoid escaping JSON braces in the output format example) ────
 
-_PROMPT_TEMPLATE = """\
-You are an expert insurance document parser. You are given page images of an ACORD form,
-plus pre-processed outputs from two independent parsers (Surya OCR and Docling).
+_PROMPT_INSTRUCTIONS = """\
+You are an expert insurance document parser. You are given:
+1. MULTIPLE IMAGES — one per page of an insurance document (provided in order: Page 1, Page 2, ... Page N)
+2. RAW TEXT from Surya OCR — concatenated across all pages
+3. RAW TEXT from Docling — structured document parser output across all pages
 
-Use ALL inputs — the images (ground truth), Surya OCR text, Docling markdown, and Docling KV pairs —
-to produce three outputs:
+The document may be ANY type of insurance document, including but not limited to:
+  - ACORD Forms (ACORD 25, 125, 126, 127, 130, 140, etc.)
+  - Policy Declaration Pages (Auto, Home, Commercial, Life, Health, etc.)
+  - Certificate of Insurance
+  - Endorsements / Riders
+  - Insurance Binders
+  - Evidence of Property Insurance
+  - Loss Runs / Claims History Reports
+  - Premium Finance Agreements
+  - Insurance Schedules / Summaries
+  - Umbrella / Excess Liability Policies
+  - Workers Compensation Policies
+  - Inland Marine / Floater Schedules
+  - Any other insurance-related document
 
+STEP 1 — DOCUMENT IDENTIFICATION:
+Before extracting any fields, first identify:
+  - Document Type (e.g., "ACORD 25 – Certificate of Liability Insurance", "Auto Policy Declaration", "Endorsement – Additional Insured")
+  - Issuing Organization (e.g., insurer name, agency, or platform)
+  - Form Number and Edition Date if printed on the document
+  - Total number of pages
+  - Line of Business (e.g., Commercial General Liability, Personal Auto, Homeowners, Workers Comp, Life, Health)
+  - Whether the document is a standalone form or part of a larger policy package
+
+Use this identification to dynamically determine which fields and sections to extract in STEP 2.
+
+STEP 2 — FIELD EXTRACTION:
+Extract ALL fields relevant to the identified document type. Do not limit extraction to a fixed field list — adapt based on what is actually present on the document.
+
+Common field categories across document types (extract all that apply):
+  PARTIES: Named Insured / Policyholder, Additional Insureds, Insurer / Company, Agency / Broker / Producer, Mortgagee / Loss Payee, Certificate Holder
+  POLICY IDENTIFIERS: Policy Number, Endorsement Number, Certificate Number, Binder Number, Claim Number
+  DATES: Policy Effective Date, Policy Expiration Date, Issue Date, Endorsement Effective Date, Date of Loss
+  COVERAGE DETAILS: Line of Business / Coverage Type, Coverage Parts, Limits of Liability, Deductibles, Sublimits, Exclusions, Endorsements attached
+  FINANCIAL: Total Premium, Per-coverage Premium breakdown, Taxes and Fees, Finance Charge / APR, Minimum Earned Premium
+  INSURED PROPERTY / RISK: Mailing Address, Risk / Property Location, Vehicle(s), Driver(s), Property Description, Occupancy Type, Schedule of Values
+  CHECKBOXES & ELECTIONS: All checkbox fields with their labels and states, Election options
+  REMARKS & CONDITIONS: Special Conditions, Endorsement Text, Remarks / Notes
+
+STEP 3 — OUTPUT GENERATION:
+Produce the three outputs: FIELDS:, then RAW TEXT:, then MARKDOWN:"""
+
+_PROMPT_OUTPUT_FORMAT = """\
 ---
+OUTPUT FORMAT (follow exactly)
+---
+
 FIELDS:
-{{
-  "Agency": "...",
-  "Agency Customer ID": "...",
-  "Date": "...",
-  "Insured Name": "...",
-  "Mailing Address": "...",
-  "City": "...",
-  "State": "...",
-  "ZIP Code": "...",
-  "Phone": "...",
-  "Policy Number": "...",
-  "Effective Date": "...",
-  "Expiration Date": "...",
-  "Company": "...",
-  "Coverage Type": "...",
-  "Premium": "...",
-  ... (include ALL other fields visible on the form, even if blank — use "" for empty fields)
-}}
+{
+  "document_identification": {
+    "document_type": "...",
+    "form_number": "...",
+    "edition_date": "...",
+    "issuing_organization": "...",
+    "line_of_business": "...",
+    "total_pages": 1,
+    "is_standalone": true,
+    "part_of_policy_package": null
+  },
+  "extraction_meta": {
+    "sources_used": ["image", "surya_ocr", "docling"],
+    "conflicts_detected": [],
+    "low_confidence_fields": [],
+    "cross_page_fields": [],
+    "blank_pages": [],
+    "handwritten_fields": []
+  },
+  "parties": {
+    "named_insured": {"value": "...", "page": 1, "confidence": "high"},
+    "additional_insureds": [],
+    "insurer": {"value": "...", "page": 1, "confidence": "high"},
+    "agency": {"value": "...", "page": 1, "confidence": "high"},
+    "broker_producer": {"value": "...", "page": 1, "confidence": "medium"},
+    "mortgagee_loss_payee": {"value": "...", "page": 1, "confidence": "high"},
+    "certificate_holder": {"value": "...", "page": 1, "confidence": "high"}
+  },
+  "policy_identifiers": {
+    "policy_number": {"value": "...", "page": 1, "confidence": "high"},
+    "endorsement_number": {"value": "...", "page": 1, "confidence": "high"},
+    "certificate_number": {"value": "...", "page": 1, "confidence": "high"},
+    "binder_number": {"value": "...", "page": 1, "confidence": "medium"}
+  },
+  "dates": {
+    "effective_date": {"value": "...", "page": 1, "confidence": "high"},
+    "expiration_date": {"value": "...", "page": 1, "confidence": "high"},
+    "issue_date": {"value": "...", "page": 1, "confidence": "high"},
+    "endorsement_effective_date": {"value": "...", "page": 1, "confidence": "medium"}
+  },
+  "insured_address": {
+    "mailing_address": {"value": "...", "page": 1, "confidence": "high"},
+    "city": {"value": "...", "page": 1, "confidence": "high"},
+    "state": {"value": "...", "page": 1, "confidence": "high"},
+    "zip_code": {"value": "...", "page": 1, "confidence": "high"},
+    "risk_location": {"value": "...", "page": 1, "confidence": "medium"}
+  },
+  "coverages": [
+    {
+      "coverage_name": "...",
+      "limit": "...",
+      "deductible": "...",
+      "premium": "...",
+      "sublimit": "...",
+      "page": 1,
+      "confidence": "high"
+    }
+  ],
+  "financial_summary": {
+    "total_premium": {"value": "...", "page": 1, "confidence": "high"},
+    "taxes_and_fees": {"value": "...", "page": 1, "confidence": "medium"},
+    "minimum_earned_premium": {"value": "...", "page": 1, "confidence": "low"}
+  },
+  "vehicles": [],
+  "drivers": [],
+  "properties": [],
+  "checkboxes": [
+    {
+      "label": "...",
+      "checked": true,
+      "mark_type": "tick",
+      "page": 1,
+      "confidence": "high"
+    }
+  ],
+  "remarks_and_conditions": [
+    {"text": "...", "page": 1, "confidence": "medium"}
+  ],
+  "additional_fields": {}
+}
 
 RAW TEXT:
-<full verbatim text extracted from the form, line by line, preserving reading order top-to-bottom>
+=== PAGE 1 ===
+<Fused verbatim text for page 1 from image + Surya OCR + Docling, preserving reading order.
+Where sources agree, use that text. Where they disagree, use the most legible/complete version
+and annotate with [reconciled] if needed.>
 
 MARKDOWN:
-<clean markdown of the entire document — preserve tables as markdown tables, use ## for section headers>
+# Insurance Document Summary
+
+> Document Type: [identified document type]
+> Issuing Organization: [insurer / agency name]
+> Form / Policy Number: [form number and/or policy number]
+> Total Pages: N
+> Line of Business: [e.g., Commercial General Liability]
+> Overall Confidence: High / Medium / Low
+
 ---
 
-Checkbox Rules (IMPORTANT):
-- Checked if it contains a tick (✓), X, cross (×), filled square (■), filled circle (●), or any handwritten mark.
-- Unchecked only if the box is completely empty.
-- Represent as: true (checked) / false (unchecked).
-- Treat X marks and tick marks equally as "checked".
+## General Information
+| Field | Value | Page | Confidence |
+|-------|-------|------|------------|
+| Document Type | ... | 1 | high |
+| Policy Number | ... | 1 | high |
+| Effective Date | ... | 1 | high |
+| Expiration Date | ... | 1 | high |
 
-Additional Rules:
-- If a field label is visible but the value is empty or illegible, include the key with "".
-- Do not skip any field, checkbox, or section header.
-- For tables (coverage schedules, vehicle lists, etc.), represent each row as a nested object in an array.
-- When Docling and Surya disagree on a value, prefer what you can verify directly in the image.
-- Output valid JSON in the FIELDS section. No commentary — only the three structured sections above.
-"""
+## Named Insured & Parties
+| Field | Value | Page | Confidence |
+|-------|-------|------|------------|
+| Named Insured | ... | 1 | high |
+| Insurer / Company | ... | 1 | high |
+| Agency / Broker | ... | 1 | high |
+| Certificate Holder | ... | 1 | high |
+
+## Coverage Summary
+| Coverage | Limit | Deductible | Premium | Page | Confidence |
+|----------|-------|------------|---------|------|------------|
+| ... | ... | ... | ... | 1 | high |
+
+## Checkboxes & Elections
+| Option | Status | Page |
+|--------|--------|------|
+| <label> | Checked (tick) | 1 |
+| <label> | Unchecked | 1 |
+
+## Remarks / Special Conditions
+(Verbatim text from remarks or conditions boxes.)
+
+## Extraction Notes
+| Issue Type | Detail |
+|------------|--------|
+| Document Identified As | [document type and reasoning] |
+| Source Conflict | <field>: Surya vs Docling disagreement — image used as tiebreaker |
+
+---
+
+RULES:
+- ALWAYS begin with document identification before any field extraction.
+- Dynamically include or exclude sections based on what is actually present. Do not render empty sections.
+- Process pages sequentially; merge continuation tables across pages.
+- Repeated header fields across pages: extract once, note page range if identical, flag as conflict if values differ.
+- Blank/boilerplate-only pages: note in extraction_meta.blank_pages, skip detailed extraction.
+- Endorsement pages: extract as a named section under "endorsements" in FIELDS.
+- Checkbox CHECKED if it contains: tick (✓), X, cross (×), filled square (■), circle (●), or any handwritten mark. UNCHECKED only if completely empty. Image is primary; OCR is supporting evidence.
+- Confidence: "low" = one source only, "medium" = two sources agree or partial image confirmation, "high" = all three agree or image + one OCR agree clearly.
+- Output ONLY the three blocks (FIELDS, RAW TEXT, MARKDOWN) — no commentary outside them."""
+
+_NL_SUMMARY_PROMPT = """\
+You are a senior insurance document analyst. You have been given structured extraction data from an insurance document and the full raw document text. Write a comprehensive, detailed, professional natural language summary covering every piece of information present in the document.
+
+DATA STRUCTURE GUIDE:
+The extracted JSON uses a nested schema. Navigate it as follows:
+- document_identification: document_type, form_number, edition_date, issuing_organization, line_of_business, total_pages
+- parties: named_insured.value, insurer.value, agency.value, broker_producer.value, certificate_holder.value, additional_insureds (array), mortgagee_loss_payee.value
+- policy_identifiers: policy_number.value, certificate_number.value, endorsement_number.value, binder_number.value
+- dates: effective_date.value, expiration_date.value, issue_date.value, endorsement_effective_date.value
+- insured_address: mailing_address.value, city.value, state.value, zip_code.value, risk_location.value
+- coverages: array of objects — each has coverage_name, limit, deductible, premium, sublimit
+- financial_summary: total_premium.value, taxes_and_fees.value, minimum_earned_premium.value
+- vehicles: array — each has year, make, model, vin, usage
+- drivers: array — each has name, dob, license_number, state
+- properties: array — each has location, construction_type, occupancy, value
+- checkboxes: array — each has label, checked (true/false), mark_type
+- remarks_and_conditions: array of text blocks
+- additional_fields: any other captured fields
+
+PARAGRAPH-BY-PARAGRAPH WRITING PLAN (write each paragraph that has data):
+Paragraph 1 — Document Overview: State the document type, form number, edition date, issuing organization, and line of business. State whether it is standalone or part of a policy package and the total number of pages.
+Paragraph 2 — Parties: Name the named insured with full address (street, city, state, ZIP). Name the insurer/company. Name the producer/agency/broker with contact details if present. Name any additional insureds.
+Paragraph 3 — Policy Identification & Dates: State all policy numbers, certificate numbers, endorsement numbers, and binder numbers present. State the effective and expiration dates, issue date, and any endorsement effective dates.
+Paragraph 4 — General Liability Coverage: For each General Liability coverage entry found in the coverages array, state the exact coverage name, each-occurrence limit, general aggregate, products-completed operations aggregate, personal and advertising injury limit, damage-to-rented-premises limit, medical expense limit, and deductible. Note if it is occurrence-based or claims-made.
+Paragraph 5 — Automobile Coverage: For each auto coverage entry, state the combined single limit or BI/PD split limits and deductibles. List every scheduled vehicle with year, make, model, VIN, and usage. Note coverage triggers (any auto, owned, hired, non-owned).
+Paragraph 6 — Workers Compensation & Employers Liability: State the WC statutory limits by state, employers liability each-accident limit, disease-per-employee limit, and disease-policy limit.
+Paragraph 7 — Umbrella / Excess Liability: State each occurrence and aggregate limits, the retained limit/SIR, and which underlying policies the umbrella follows.
+Paragraph 8 — Other Coverages: Summarise any remaining coverage entries (inland marine, property, professional liability, cyber, crime, etc.) with their limits and deductibles.
+Paragraph 9 — Drivers (if present): For each driver, state name, date of birth, license number, and issuing state.
+Paragraph 10 — Properties / Locations (if present): For each property, state the address, construction type, occupancy, and insured value.
+Paragraph 11 — Financial Summary: State the total premium. State per-coverage premium breakdown if available. State taxes, fees, and minimum earned premium if present.
+Paragraph 12 — Checkboxes & Elections: Describe all checked options (e.g. "The form indicates this is a claims-made policy", "Waiver of subrogation applies"). Skip unchecked options unless the label adds context.
+Paragraph 13 — Remarks, Special Conditions & Endorsements: Quote or closely paraphrase the full text of every remarks box, description of operations, special condition, and endorsement narrative. Do not truncate.
+Paragraph 14 — Certificate Holder & Additional Insured Provisions: State the certificate holder's full name and address. State whether the certificate holder is also an additional insured. State any cancellation notice provisions (e.g. 30-day written notice). Note any waivers of subrogation.
+
+STRICT STYLE RULES:
+- Write in flowing paragraphs — no bullet points, no numbered lists, no headings, no JSON, no markdown
+- Use exact dollar figures as written on the form (e.g. "$1,000,000" or "$2,000,000 aggregate")
+- Omit any paragraph whose section is completely empty — do not write placeholder text
+- Never write "not provided", "N/A", "none", or "not applicable"
+- Do NOT copy-paste raw OCR text verbatim — synthesise into professional prose
+- Tone: factual, precise, professional — suitable for a claims adjuster, underwriter, or broker
+- Minimum length: 6 paragraphs for a full policy document; shorter only for single-page endorsements or binders
+
+EXTRACTED DATA (JSON):
+{fields_json}
+
+RAW DOCUMENT TEXT (use for any detail absent from the JSON):
+{raw_text}
+
+Write the comprehensive natural language summary now:"""
+
+
+def _generate_nl_summary_qwen(extracted_json: Dict[str, Any], raw_text: str) -> Optional[str]:
+    """Generate NL summary using the already-loaded Qwen model (text-only inference, no images)."""
+    enabled = os.getenv("ACORD_NL_SUMMARY_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return None
+    try:
+        _load_qwen()
+        import torch
+        from qwen_vl_utils import process_vision_info
+
+        fields_json = json.dumps(extracted_json, indent=2, ensure_ascii=False)[:20000]
+        raw_snippet = (raw_text or "")[:20000]
+        prompt = _NL_SUMMARY_PROMPT.format(fields_json=fields_json, raw_text=raw_snippet)
+
+        messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+        text_input = _qwen_processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        image_inputs, video_inputs = process_vision_info(messages)
+        inputs = _qwen_processor(
+            text=[text_input],
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
+        ).to(_qwen_model.device)
+
+        with torch.no_grad():
+            generated_ids = _qwen_model.generate(**inputs, max_new_tokens=2048, temperature=0.3, do_sample=True)
+
+        trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
+        output_text = _qwen_processor.batch_decode(
+            trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )[0]
+
+        summary = output_text.strip()
+        return summary if len(summary) > 100 else None
+    except Exception as exc:
+        print(f"[extractor] NL summary generation failed (non-fatal): {exc}")
+        return None
 
 
 # ── Qwen2-VL inference ────────────────────────────────────────────────────────
@@ -410,29 +803,30 @@ def _run_qwen_extraction(
     import torch
     from qwen_vl_utils import process_vision_info
 
-    # Send up to 4 pages so multi-page ACORD forms (125, 140, etc.) are fully covered
-    page_images = images[:4]
+    # Send up to 4 pages so multi-page forms (125, 140, etc.) are fully covered
+    # H100 SXM 80 GB: process up to 8 pages (vs 4 on smaller GPUs).
+    # Each page ~2K vision tokens; 8 pages still fits within Qwen2-VL's 32K context
+    # alongside the OCR text and instructions.
+    page_images = images[:8]
 
-    # Build reference context from both arms
-    context_parts: List[str] = []
+    # Build INPUT CONTEXT section injected between instructions and output format.
+    # Large windows: Qwen2-VL 7B has ~32K token context; images occupy ~2K tokens,
+    # leaving ~30K tokens (~120K chars) for text — use as much as the document needs.
+    context_parts: List[str] = [f"IMAGES: Pages 1 to {len(page_images)} (attached in order above)"]
     if surya_ocr_text.strip():
-        context_parts.append(
-            f"=== Surya OCR text (line-by-line) ===\n{surya_ocr_text[:2500]}"
-        )
-    if docling_result.get("markdown", "").strip():
-        context_parts.append(
-            f"=== Docling structured markdown (tables + layout) ===\n{docling_result['markdown'][:2500]}"
-        )
-    if docling_result.get("kv_pairs"):
-        kv_str = "\n".join(f"{k}: {v}" for k, v in list(docling_result["kv_pairs"].items())[:60])
-        context_parts.append(f"=== Docling KV pairs ===\n{kv_str}")
+        context_parts.append(f"SURYA OCR TEXT (all pages):\n{surya_ocr_text[:20000]}")
+    docling_md = docling_result.get("markdown", "").strip()
+    if docling_md:
+        context_parts.append(f"DOCLING TEXT (all pages):\n{docling_md[:12000]}")
+    elif docling_result.get("kv_pairs"):
+        kv_str = "\n".join(f"{k}: {v}" for k, v in list(docling_result["kv_pairs"].items())[:120])
+        context_parts.append(f"DOCLING KV PAIRS:\n{kv_str}")
     if docling_result.get("tables"):
-        tables_str = "\n\n".join(docling_result["tables"][:5])
-        context_parts.append(f"=== Docling extracted tables ===\n{tables_str[:1500]}")
+        tables_str = "\n\n".join(docling_result["tables"][:10])
+        context_parts.append(f"DOCLING TABLES:\n{tables_str[:4000]}")
 
-    prompt = _PROMPT_TEMPLATE
-    if context_parts:
-        prompt += "\n\n" + "\n\n".join(context_parts)
+    context_section = "---\nINPUT CONTEXT\n---\n\n" + "\n\n".join(context_parts)
+    prompt = _PROMPT_INSTRUCTIONS + "\n\n" + context_section + "\n\n" + _PROMPT_OUTPUT_FORMAT
 
     content: List[Dict[str, Any]] = [
         {"type": "image", "image": img} for img in page_images
@@ -456,17 +850,35 @@ def _run_qwen_extraction(
         return_tensors="pt",
     ).to(_qwen_model.device)
 
-    with torch.no_grad():
-        generated_ids = _qwen_model.generate(**inputs, max_new_tokens=3072)
+    # Two inference attempts — Qwen sampling is stochastic; a second draw usually
+    # succeeds when the first truncates or omits the FIELDS: JSON block.
+    # inputs is already on GPU so retrying costs only one extra generate() call.
+    failed_previews: List[str] = []
+    for attempt in range(1, 3):
+        with torch.no_grad():
+            generated_ids = _qwen_model.generate(**inputs, max_new_tokens=4096)
 
-    trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
-    output_text = _qwen_processor.batch_decode(
-        trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-    )[0]
+        trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
+        output_text = _qwen_processor.batch_decode(
+            trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )[0]
 
-    parsed, qwen_raw_text, qwen_markdown = _parse_qwen_output(output_text)
-    fields = parsed if parsed is not None else {"_raw_qwen_output": output_text}
-    return {"fields": fields, "qwen_raw_text": qwen_raw_text, "qwen_markdown": qwen_markdown}
+        parsed, qwen_raw_text, qwen_markdown = _parse_qwen_output(output_text)
+        if parsed is not None:
+            if attempt > 1:
+                print(f"[extractor] Qwen parse succeeded on attempt {attempt}.")
+            return {"fields": parsed, "qwen_raw_text": qwen_raw_text, "qwen_markdown": qwen_markdown}
+
+        preview = output_text[:500]
+        failed_previews.append(f"Attempt {attempt}:\n{preview}")
+        print(f"[extractor] Attempt {attempt}/2: Qwen JSON parse failed.\nPreview:\n{preview}")
+        if attempt < 2:
+            print("[extractor] Retrying Qwen inference with same inputs…")
+
+    raise RuntimeError(
+        "Qwen did not produce valid JSON in the FIELDS section after 2 attempts. "
+        "Check model output above.\n\n" + "\n\n".join(failed_previews)
+    )
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -493,7 +905,11 @@ def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
     # Fast path for digital PDFs: RunPod-local native extraction only.
     if pdf_type == "digital":
         fields, raw_text = _extract_digital_native(pdf_path, preextracted_text=_embedded)
-        return {
+        # Embed the complete raw text inside extracted_json so it appears in the
+        # Fields/JSON/Markdown tabs and is stored in fine-tuning samples.
+        fields["raw_text"] = raw_text
+        nl_summary = _generate_nl_summary_qwen(fields, raw_text)
+        result: Dict[str, Any] = {
             "form_type_detected": f"acord{form_type}",
             "pdf_type": "digital",
             "extracted_json": fields,
@@ -501,6 +917,9 @@ def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
             "markdown": "",
             "source": "runpod_native",
         }
+        if nl_summary:
+            result["natural_language_summary"] = nl_summary
+        return result
 
     images = _pdf_to_images(pdf_path)
     if not images:
@@ -516,17 +935,39 @@ def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
 
         for future in as_completed([future_surya, future_docling]):
             if future is future_surya:
-                surya_ocr_text = future.result()
+                try:
+                    surya_ocr_text = future.result()
+                except Exception as exc:
+                    print(f"[extractor] WARNING: Surya OCR failed (proceeding with empty text): {exc}")
+                    surya_ocr_text = ""
             else:
-                docling_result = future.result()
+                try:
+                    docling_result = future.result()
+                except Exception as exc:
+                    print(f"[extractor] WARNING: Docling raised exception: {exc}")
+                    docling_result = {"markdown": "", "tables": [], "kv_pairs": {}}
+                else:
+                    if docling_result.get("error"):
+                        print(f"[extractor] WARNING: Docling failed: {docling_result['error']}")
+                        docling_result = {"markdown": "", "tables": [], "kv_pairs": {}}
 
     # ── Step 2: Qwen2-VL with both arm outputs ────────────────────────────────
     qwen_result = _run_qwen_extraction(images, surya_ocr_text, docling_result, form_type)
+    final_fields = qwen_result["fields"]
+    # full_text: prefer Qwen's fused RAW TEXT (higher quality); fall back to complete Surya OCR
+    final_raw_text = qwen_result["qwen_raw_text"] or surya_ocr_text
+    # Always embed the complete Surya OCR text inside extracted_json so it appears in
+    # the Fields/JSON/Markdown tabs and is stored in fine-tuning samples.
+    final_fields["raw_text"] = surya_ocr_text or final_raw_text
 
-    return {
+    nl_summary = _generate_nl_summary_qwen(final_fields, final_raw_text)
+    scanned_result: Dict[str, Any] = {
         "form_type_detected": f"acord{form_type}",
         "pdf_type": pdf_type,
-        "extracted_json": qwen_result["fields"],
-        "full_text": qwen_result["qwen_raw_text"] or surya_ocr_text,
+        "extracted_json": final_fields,
+        "full_text": final_raw_text,
         "markdown": qwen_result["qwen_markdown"] or docling_result.get("markdown", ""),
     }
+    if nl_summary:
+        scanned_result["natural_language_summary"] = nl_summary
+    return scanned_result
