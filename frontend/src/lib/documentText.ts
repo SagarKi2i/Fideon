@@ -15,14 +15,22 @@ function normalizeWhitespace(input: string): string {
 
 async function extractPdfText(file: File): Promise<ExtractedDocumentText> {
   // Lazy-load to avoid increasing initial bundle size.
-  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const { GlobalWorkerOptions, getDocument } = await import("pdfjs-dist");
 
-  // Configure worker as a URL asset so bundlers don't try to parse/minify it.
-  const workerUrl = (await import("pdfjs-dist/legacy/build/pdf.worker.min.mjs?url")).default as string;
-  (pdfjs as unknown as { GlobalWorkerOptions: { workerSrc: string } }).GlobalWorkerOptions.workerSrc = workerUrl;
+  try {
+    const workerUrl = (await import("pdfjs-dist/build/pdf.worker.min.mjs?url")).default as string;
+    if (GlobalWorkerOptions) {
+      GlobalWorkerOptions.workerSrc = workerUrl;
+    }
+  } catch (e) {
+    console.warn("PDF worker initialization failed, attempting fallback", e);
+    if (GlobalWorkerOptions) {
+      GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.149/pdf.worker.min.mjs`;
+    }
+  }
 
   const bytes = new Uint8Array(await file.arrayBuffer());
-  const loadingTask = (pdfjs as unknown as { getDocument: (args: unknown) => { promise: Promise<unknown> } }).getDocument({
+  const loadingTask = getDocument({
     data: bytes,
   });
   const pdf = (await loadingTask.promise) as { numPages?: number; getPage: (n: number) => Promise<unknown> };

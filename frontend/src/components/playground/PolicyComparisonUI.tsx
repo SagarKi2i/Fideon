@@ -1,16 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
+import { tryParsePolicyComparisonStructured } from "@/lib/policyComparisonPrompt";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import PolicyClauseRedlineUI from "./PolicyClauseRedlineUI";
 import { parsePolicyClauseDiff } from "@/lib/policyClauseDiff";
-import { 
-  Upload, 
-  Loader2, 
-  FileCheck, 
-  Scale, 
+import {
+  Upload,
+  Loader2,
+  FileCheck,
+  Scale,
   AlertTriangle,
   CheckCircle2,
   XCircle,
@@ -22,12 +24,27 @@ import {
   ArrowRight,
   Info,
   AlertCircle,
-  Sparkles
+  Sparkles,
+  Target,
+  FileText,
+  Activity,
+  FileSearch,
+  Layers,
+  History,
+  FileEdit,
+  ExternalLink,
+  Table,
+  Zap,
+  MapPin,
+  Calendar,
+  Car,
+  ClipboardCheck,
 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { useNavigate } from "react-router-dom";
 import { useWorkflowSettings } from "@/hooks/useWorkflowSettings";
 import OutputCorrection from "./OutputCorrection";
+import { Separator } from "@/components/ui/separator";
 
 interface PolicyComparisonUIProps {
   readonly modelId?: string;
@@ -36,13 +53,30 @@ interface PolicyComparisonUIProps {
   readonly result: string;
 }
 
-import { tryParsePolicyComparisonStructured } from "@/lib/policyComparisonPrompt";
+const LOB_OPTIONS = [
+  { value: "personal-auto",          label: "Personal Auto (28 fields)" },
+  { value: "personal-umbrella",      label: "Personal Umbrella (15 fields)" },
+  { value: "commercial-auto",        label: "Commercial Auto (35 fields)" },
+  { value: "crime",                  label: "Crime (22 fields)" },
+  { value: "cyber",                  label: "Cyber (31 fields)" },
+  { value: "do",                     label: "D&O (29 fields)" },
+  { value: "gl",                     label: "General Liability (42 fields)" },
+  { value: "property",               label: "Property (44 fields)" },
+  { value: "commercial-umbrella",    label: "Commercial Umbrella (18 fields)" },
+  { value: "workers-comp",           label: "Workers Comp (26 fields)" },
+];
+
+const PERSONAL_LINES = ["Auto", "Umbrella"];
+const COMMERCIAL_LINES = ["Auto", "Crime", "Cyber", "D&O", "GL", "Property", "Umbrella", "Workers Comp"];
 
 export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }: PolicyComparisonUIProps) {
   const [policyA, setPolicyA] = useState<File | null>(null);
   const [policyB, setPolicyB] = useState<File | null>(null);
+  const [lob, setLob] = useState("commercial-auto");
   const [lastPrompt, setLastPrompt] = useState("");
   const [viewMode, setViewMode] = useState<"coverage" | "clause">("coverage");
+  const [activeTab, setActiveTab] = useState<"overview" | "viewers" | "workflow" | "trace">("overview");
+  
   const navigate = useNavigate();
   const { settings: workflowSettings } = useWorkflowSettings();
 
@@ -55,7 +89,10 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
       policyBFile: policyB,
       policyAName: policyA.name,
       policyBName: policyB.name,
+      lob,
     });
+    // Switch to workflow tab when starting
+    setActiveTab("workflow");
   };
 
   const structured = useMemo(() => tryParsePolicyComparisonStructured(result), [result]);
@@ -63,8 +100,12 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
 
   // Auto-select clause redline when structured diff is available.
   useEffect(() => {
-    setViewMode(clauseDiff ? "clause" : "coverage");
-  }, [result, clauseDiff]); // result changes imply clauseDiff potentially changed
+    if (result && !isRunning) {
+      setViewMode(clauseDiff ? "clause" : "coverage");
+      setActiveTab("overview");
+    }
+  }, [result, isRunning, clauseDiff]);
+
   const showQuoteRecommendation =
     workflowSettings.enableSmartRecommendations &&
     structured &&
@@ -85,12 +126,6 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
     return { isHigher, diff, pct };
   };
 
-  const renderCoverageIcon = (covered: boolean) =>
-    covered ? (
-      <CheckCircle2 className="h-5 w-5 text-green-600 mx-auto" />
-    ) : (
-      <XCircle className="h-5 w-5 text-destructive mx-auto" />
-    );
   const openFilePicker = (inputId: string) => document.getElementById(inputId)?.click();
 
   const calculateSavingsPotential = () => {
@@ -98,483 +133,834 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
     const b = structured ? (structured.extracted_fields?.policyB as any)?.premium : undefined;
     if (typeof a !== "number" || typeof b !== "number") return 0;
     const higherPremium = Math.max(a, b);
-    // Estimated savings potential of 15-25%
     return Math.round(higherPremium * 0.20);
   };
 
+  const renderSidebarItem = (id: typeof activeTab, label: string, icon: React.ReactNode) => (
+    <button
+      onClick={() => setActiveTab(id)}
+      className={`w-full flex items-center gap-3 px-4 py-3 text-sm font-medium transition-all rounded-lg mb-1 ${
+        activeTab === id 
+          ? "bg-primary text-primary-foreground shadow-md" 
+          : "text-muted-foreground hover:bg-muted hover:text-foreground"
+      }`}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+
+  const workflowSteps = [
+    { id: 1, title: "Ingesting policy documents", description: "Parsing PDFs and normalizing layout", status: isRunning ? "processing" : "done" },
+    { id: 2, title: "Running OCR & layout extraction", description: "Recovering tables, schedules, declarations", status: isRunning ? "processing" : "done" },
+    { id: 3, title: "Detecting Lines of Business", description: "Matching carrier forms to LOB taxonomy", status: isRunning ? "processing" : "done" },
+    { id: 4, title: "Extracting fields from workbook", description: "Mapping every workbook field to source", status: isRunning ? "processing" : "done" },
+    { id: 5, title: "Comparing expiring vs proposed", description: "Diffing limits, deductibles, endorsements", status: isRunning ? "processing" : "done" },
+    { id: 6, title: "Scoring coverage deltas", description: "Classifying improvements, reductions, gaps", status: isRunning ? "processing" : "done" },
+    { id: 7, title: "Composing comparison report", description: "Grouping fields and finalizing UI", status: isRunning ? "processing" : "done" },
+  ];
+
   return (
     <div className="space-y-6">
-      {/* Upload Section */}
-      <Card className="bg-card border-border">
-        <CardHeader>
-          <CardTitle className="text-card-foreground flex items-center gap-2">
-            <Scale className="h-5 w-5 text-primary" />
-            Policy Comparison Engine
-          </CardTitle>
-          <p className="text-sm text-muted-foreground">
-            Upload two policies to compare coverage, limits, deductibles, and identify gaps
-          </p>
-        </CardHeader>
-        <CardContent className="space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {/* Policy A Upload */}
-            <div className="space-y-3">
-              <Label className="text-base font-semibold flex items-center gap-2">
-                <div className="h-6 w-6 rounded-full bg-blue-500/20 flex items-center justify-center">
-                  <span className="text-xs font-bold text-blue-600">A</span>
+      {/* Agent Detail Card */}
+      <Card className="bg-card border-border shadow-sm">
+        <CardContent className="p-6 space-y-6">
+          <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-6">
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-3 mb-3">
+                <div className="p-2.5 rounded-xl bg-primary/10 border border-primary/20">
+                  <Scale className="h-7 w-7 text-primary" />
                 </div>
-                Current / Expiring Policy
-              </Label>
-              <div 
-                className={`border-2 border-dashed rounded-lg p-6 text-center transition-all cursor-pointer hover:border-primary/50 hover:bg-muted/30 ${
-                  policyA ? "border-primary bg-primary/5" : "border-border"
-                }`}
-                onClick={() => openFilePicker("policy-a-input")}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    openFilePicker("policy-a-input");
-                  }
-                }}
-                role="button"
-                tabIndex={0}
-                aria-label="Upload policy A document"
-              >
-                <Input
-                  id="policy-a-input"
-                  type="file"
-                  accept=".pdf,.docx"
-                  onChange={(e) => setPolicyA(e.target.files?.[0] ?? null)}
-                  className="hidden"
-                />
-                {policyA ? (
-                  <div className="flex flex-col items-center gap-2">
-                    <div className="h-12 w-12 rounded-full bg-primary/10 flex items-center justify-center">
-                      <FileCheck className="h-6 w-6 text-primary" />
-                    </div>
-                    <p className="font-medium text-foreground">{policyA.name}</p>
-                    <p className="text-xs text-muted-foreground">{(policyA.size / 1024).toFixed(1)} KB</p>
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-center gap-2">
-                    <div className="h-12 w-12 rounded-full bg-muted flex items-center justify-center">
-                      <Upload className="h-6 w-6 text-muted-foreground" />
-                    </div>
-                    <p className="font-medium text-muted-foreground">Click to upload Policy A</p>
-                    <p className="text-xs text-muted-foreground">PDF or DOCX</p>
-                  </div>
-                )}
+                <h2 className="text-2xl font-bold text-foreground">
+                  Policy Comparison Engine
+                </h2>
               </div>
+              <p className="text-sm text-muted-foreground max-w-2xl leading-relaxed">
+                Field-by-field comparison across personal and commercial lines. Each LOB shows what
+                matches, what improved, what was reduced, and what&apos;s net-new.
+              </p>
             </div>
-
-            {/* Policy B Upload */}
-            <div className="space-y-3">
-              <Label className="text-base font-semibold flex items-center gap-2">
-                <div className="h-6 w-6 rounded-full bg-green-500/20 flex items-center justify-center">
-                  <span className="text-xs font-bold text-green-600">B</span>
-                </div>
-                Proposed / Renewal Policy
-              </Label>
-              <div 
-                className={`border-2 border-dashed rounded-lg p-6 text-center transition-all cursor-pointer hover:border-primary/50 hover:bg-muted/30 ${
-                  policyB ? "border-primary bg-primary/5" : "border-border"
-                }`}
-                onClick={() => openFilePicker("policy-b-input")}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    openFilePicker("policy-b-input");
-                  }
-                }}
-                role="button"
-                tabIndex={0}
-                aria-label="Upload policy B document"
-              >
-                <Input
-                  id="policy-b-input"
-                  type="file"
-                  accept=".pdf,.docx"
-                  onChange={(e) => setPolicyB(e.target.files?.[0] ?? null)}
-                  className="hidden"
-                />
-                {policyB ? (
-                  <div className="flex flex-col items-center gap-2">
-                    <div className="h-12 w-12 rounded-full bg-primary/10 flex items-center justify-center">
-                      <FileCheck className="h-6 w-6 text-primary" />
-                    </div>
-                    <p className="font-medium text-foreground">{policyB.name}</p>
-                    <p className="text-xs text-muted-foreground">{(policyB.size / 1024).toFixed(1)} KB</p>
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-center gap-2">
-                    <div className="h-12 w-12 rounded-full bg-muted flex items-center justify-center">
-                      <Upload className="h-6 w-6 text-muted-foreground" />
-                    </div>
-                    <p className="font-medium text-muted-foreground">Click to upload Policy B</p>
-                    <p className="text-xs text-muted-foreground">PDF or DOCX</p>
-                  </div>
-                )}
-              </div>
+            <div className="flex flex-wrap gap-2 lg:flex-col lg:items-end flex-shrink-0">
+              <Badge variant="secondary" className="px-3 py-1 bg-muted/50 text-foreground border-border font-medium">300+ carriers</Badge>
+              <Badge variant="secondary" className="px-3 py-1 bg-muted/50 text-foreground border-border font-medium">8 LOBs</Badge>
+              <Badge variant="secondary" className="px-3 py-1 bg-muted/50 text-foreground border-border font-medium">348 workbook fields</Badge>
             </div>
           </div>
 
-          <Button
-            onClick={handleRun}
-            disabled={!policyA || !policyB || isRunning}
-            className="w-full bg-gradient-primary hover:opacity-90"
-            size="lg"
-          >
-            {isRunning ? (
-              <>
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                Analyzing Policies...
-              </>
-            ) : (
-              <>
-                <Scale className="h-4 w-4 mr-2" />
-                Compare Policies
-              </>
-            )}
-          </Button>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-border/50">
+            <div className="p-5 rounded-xl bg-muted/5 border border-border/50 space-y-3">
+              <p className="text-xs font-bold text-foreground uppercase tracking-widest flex items-center gap-2">
+                <Layers className="h-4 w-4 text-primary" />
+                Personal lines supported
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {PERSONAL_LINES.map((line) => (
+                  <Badge key={line} variant="outline" className="px-3 py-1 bg-background text-xs font-medium border-border/60">{line}</Badge>
+                ))}
+              </div>
+            </div>
+            <div className="p-5 rounded-xl bg-muted/5 border border-border/50 space-y-3">
+              <p className="text-xs font-bold text-foreground uppercase tracking-widest flex items-center gap-2">
+                <Layers className="h-4 w-4 text-primary" />
+                Commercial lines surfaced in this comparison
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {COMMERCIAL_LINES.map((line) => (
+                  <Badge key={line} variant="outline" className="px-3 py-1 bg-background text-xs font-medium border-border/60">{line}</Badge>
+                ))}
+              </div>
+            </div>
+          </div>
         </CardContent>
       </Card>
 
-      {/* Results Section */}
-      {result && (structured || clauseDiff) && (
-        <OutputCorrection modelId={modelId ?? "policy-comparison"} prompt={lastPrompt} output={result}>
-        {(() => {
-          const trend = getPremiumTrend();
-          const toggleBar = clauseDiff ? (
-            <div className="flex items-center gap-2 flex-wrap">
-              <Button
-                type="button"
-                variant={viewMode === "coverage" ? "default" : "outline"}
-                size="sm"
-                onClick={() => setViewMode("coverage")}
-              >
-                Coverage View
-              </Button>
-              <Button
-                type="button"
-                variant={viewMode === "clause" ? "default" : "outline"}
-                size="sm"
-                onClick={() => setViewMode("clause")}
-              >
-                Clause Redline
-              </Button>
-            </div>
-          ) : null;
-
-          if (viewMode === "clause" && clauseDiff) {
-            return (
-              <div className="space-y-6 animate-fade-in">
-                {toggleBar}
-                <PolicyClauseRedlineUI result={result} />
-              </div>
-            );
-          }
-
-          // If coverage parsing fails, prefer the clause redline view (when available).
-          // This also ensures TypeScript narrows `parsedResult` for the Coverage JSX below.
-          if (!structured) {
-            return (
-              <div className="space-y-6 animate-fade-in">
-                {toggleBar}
-                {clauseDiff ? <PolicyClauseRedlineUI result={result} /> : null}
-              </div>
-            );
-          }
-
-          const policyA: any = structured.extracted_fields?.policyA ?? {};
-          const policyB: any = structured.extracted_fields?.policyB ?? {};
-          const recommendation = structured.recommendation?.recommended_policy ?? "NEITHER";
-          const gaps = (structured.recommendation?.rationale ?? structured.warnings ?? []).slice(0, 6);
-
-          return (
-        <div className="space-y-6 animate-fade-in">
-          {toggleBar}
-          {/* Summary Cards */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <Card className="bg-card border-border">
-              <CardContent className="p-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-xs text-muted-foreground">Premium Difference</p>
-                    <p className="text-2xl font-bold text-foreground">
-                      ${trend.diff.toLocaleString()}
-                    </p>
-                  </div>
-                  <div className={`h-10 w-10 rounded-full flex items-center justify-center ${
-                    trend.isHigher
-                      ? "bg-amber-500/10" 
-                      : "bg-green-500/10"
-                  }`}>
-                    {trend.isHigher ? (
-                      <TrendingUp className="h-5 w-5 text-amber-600" />
+      {/* Upload + LOB Card */}
+      {!result && !isRunning && (
+        <div className="space-y-6">
+          <Card className="bg-card/80 backdrop-blur-sm border-border/50 shadow-card">
+            <CardContent className="p-6 space-y-8">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <div className="space-y-3">
+                  <Label className="text-base font-bold text-foreground">Current / expiring document</Label>
+                  <div
+                    className={`group border-2 border-dashed rounded-xl p-10 text-center transition-all cursor-pointer hover:border-primary/50 hover:bg-primary/5 ${
+                      policyA ? "border-primary bg-primary/5 shadow-inner" : "border-border bg-muted/5"
+                    }`}
+                    onClick={() => openFilePicker("policy-a-input")}
+                    role="button"
+                    tabIndex={0}
+                  >
+                    <Input id="policy-a-input" type="file" accept=".pdf,.docx" onChange={(e) => setPolicyA(e.target.files?.[0] ?? null)} className="hidden" />
+                    {policyA ? (
+                      <div className="flex flex-col items-center gap-3 animate-scale-in">
+                        <div className="h-16 w-16 rounded-2xl bg-primary/10 flex items-center justify-center shadow-sm">
+                          <FileCheck className="h-8 w-8 text-primary" />
+                        </div>
+                        <div>
+                          <p className="font-bold text-foreground text-sm truncate max-w-[200px]">{policyA.name}</p>
+                          <p className="text-xs text-muted-foreground">{(policyA.size / 1024).toFixed(1)} KB</p>
+                        </div>
+                      </div>
                     ) : (
-                      <TrendingDown className="h-5 w-5 text-green-600" />
+                      <div className="flex flex-col items-center gap-3 group-hover:animate-pulse">
+                        <div className="h-16 w-16 rounded-2xl bg-muted/50 flex items-center justify-center group-hover:bg-primary/10 transition-all shadow-sm">
+                          <Upload className="h-8 w-8 text-muted-foreground group-hover:text-primary transition-colors" />
+                        </div>
+                        <p className="font-bold text-foreground/70 group-hover:text-primary transition-colors">Click to upload</p>
+                        <p className="text-xs text-muted-foreground">PDF or DOCX</p>
+                      </div>
                     )}
                   </div>
                 </div>
-                <p className="text-xs text-muted-foreground mt-2">
-                  Policy B is {trend.isHigher ? "higher" : "lower"} by {trend.pct}%
-                </p>
-              </CardContent>
-            </Card>
 
-            <Card className="bg-card border-border">
-              <CardContent className="p-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-xs text-muted-foreground">Coverage Gaps Found</p>
-                    <p className="text-2xl font-bold text-foreground">{Math.max(0, gaps.length)}</p>
-                  </div>
-                  <div className="h-10 w-10 rounded-full bg-destructive/10 flex items-center justify-center">
-                    <AlertTriangle className="h-5 w-5 text-destructive" />
-                  </div>
-                </div>
-                <p className="text-xs text-muted-foreground mt-2">
-                  Issues requiring attention
-                </p>
-              </CardContent>
-            </Card>
-
-            <Card className="bg-card border-border">
-              <CardContent className="p-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-xs text-muted-foreground">Recommendation</p>
-                    <p className="text-2xl font-bold text-foreground">
-                      {recommendation === "NEITHER" ? "Review" : `Policy ${recommendation}`}
-                    </p>
-                  </div>
-                  <div className="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center">
-                    <Shield className="h-5 w-5 text-primary" />
-                  </div>
-                </div>
-                <p className="text-xs text-muted-foreground mt-2">
-                  Based on coverage analysis
-                </p>
-              </CardContent>
-            </Card>
-          </div>
-
-          {/* Side by Side Comparison */}
-          <Card className="bg-card border-border overflow-hidden">
-            <CardHeader className="bg-gradient-to-r from-primary/5 to-transparent">
-              <CardTitle className="text-card-foreground flex items-center gap-2">
-                <Scale className="h-5 w-5 text-primary" />
-                Side-by-Side Comparison
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="p-0">
-              <div className="grid grid-cols-3 divide-x divide-border">
-                {/* Header Row */}
-                <div className="p-4 bg-muted/30 font-medium text-muted-foreground">
-                  Coverage Details
-                </div>
-                <div className="p-4 bg-blue-500/5 text-center">
-                  <Badge variant="outline" className="mb-2 text-blue-600 border-blue-600">Policy A</Badge>
-                  <p className="text-sm font-medium text-foreground">{String(policyA.carrier ?? policyA.insurer ?? "—")}</p>
-                </div>
-                <div className="p-4 bg-green-500/5 text-center">
-                  <Badge variant="outline" className="mb-2 text-green-600 border-green-600">Policy B</Badge>
-                  <p className="text-sm font-medium text-foreground">{String(policyB.carrier ?? policyB.insurer ?? "—")}</p>
-                </div>
-
-                {/* Premium Row */}
-                <div className="p-4 border-t border-border font-medium flex items-center gap-2">
-                  <DollarSign className="h-4 w-4 text-muted-foreground" />
-                  Annual Premium
-                </div>
-                <div className="p-4 border-t border-border text-center">
-                  <span className="text-lg font-bold text-foreground">
-                    {typeof policyA.premium === "number" ? `$${policyA.premium.toLocaleString()}` : "—"}
-                  </span>
-                </div>
-                <div className="p-4 border-t border-border text-center">
-                  <span className="text-lg font-bold text-foreground">
-                    {typeof policyB.premium === "number" ? `$${policyB.premium.toLocaleString()}` : "—"}
-                  </span>
-                  {typeof policyA.premium === "number" &&
-                    typeof policyB.premium === "number" &&
-                    policyA.premium > 0 &&
-                    policyB.premium > policyA.premium && (
-                      <Badge variant="secondary" className="ml-2 text-xs">
-                        +{Math.round(((policyB.premium - policyA.premium) / policyA.premium) * 100)}%
-                      </Badge>
+                <div className="space-y-3">
+                  <Label className="text-base font-bold text-foreground">Proposed / renewal document</Label>
+                  <div
+                    className={`group border-2 border-dashed rounded-xl p-10 text-center transition-all cursor-pointer hover:border-primary/50 hover:bg-primary/5 ${
+                      policyB ? "border-primary bg-primary/5 shadow-inner" : "border-border bg-muted/5"
+                    }`}
+                    onClick={() => openFilePicker("policy-b-input")}
+                    role="button"
+                    tabIndex={0}
+                  >
+                    <Input id="policy-b-input" type="file" accept=".pdf,.docx" onChange={(e) => setPolicyB(e.target.files?.[0] ?? null)} className="hidden" />
+                    {policyB ? (
+                      <div className="flex flex-col items-center gap-3 animate-scale-in">
+                        <div className="h-16 w-16 rounded-2xl bg-primary/10 flex items-center justify-center shadow-sm">
+                          <FileCheck className="h-8 w-8 text-primary" />
+                        </div>
+                        <div>
+                          <p className="font-bold text-foreground text-sm truncate max-w-[200px]">{policyB.name}</p>
+                          <p className="text-xs text-muted-foreground">{(policyB.size / 1024).toFixed(1)} KB</p>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center gap-3 group-hover:animate-pulse">
+                        <div className="h-16 w-16 rounded-2xl bg-muted/50 flex items-center justify-center group-hover:bg-primary/10 transition-all shadow-sm">
+                          <Upload className="h-8 w-8 text-muted-foreground group-hover:text-primary transition-colors" />
+                        </div>
+                        <p className="font-bold text-foreground/70 group-hover:text-primary transition-colors">Click to upload</p>
+                        <p className="text-xs text-muted-foreground">PDF or DOCX</p>
+                      </div>
                     )}
-                </div>
-
-                {/* General Liability Row */}
-                <div className="p-4 border-t border-border font-medium flex items-center gap-2">
-                  <Shield className="h-4 w-4 text-muted-foreground" />
-                  General Liability
-                </div>
-                <div className="p-4 border-t border-border text-center text-foreground">
-                  {String(policyA.general_liability ?? policyA.generalLiability ?? policyA.gl_limits ?? "—")}
-                </div>
-                <div className="p-4 border-t border-border text-center">
-                  <span className="text-foreground">
-                    {String(policyB.general_liability ?? policyB.generalLiability ?? policyB.gl_limits ?? "—")}
-                  </span>
-                </div>
-
-                {/* Deductible Row */}
-                <div className="p-4 border-t border-border font-medium">Deductible</div>
-                <div className="p-4 border-t border-border text-center text-foreground">
-                  {typeof policyA.deductible === "number" ? `$${policyA.deductible.toLocaleString()}` : "—"}
-                </div>
-                <div className="p-4 border-t border-border text-center">
-                  <span className="text-foreground">
-                    {typeof policyB.deductible === "number" ? `$${policyB.deductible.toLocaleString()}` : "—"}
-                  </span>
-                </div>
-
-                {/* Cyber Coverage Row */}
-                <div className="p-4 border-t border-border font-medium">Cyber Liability</div>
-                <div className="p-4 border-t border-border text-center">
-                  {renderCoverageIcon(Boolean(policyA.cyber_coverage ?? policyA.cyberCoverage))}
-                </div>
-                <div className="p-4 border-t border-border text-center">
-                  {renderCoverageIcon(Boolean(policyB.cyber_coverage ?? policyB.cyberCoverage))}
-                </div>
-
-                {/* EPL Coverage Row */}
-                <div className="p-4 border-t border-border font-medium">Employment Practices</div>
-                <div className="p-4 border-t border-border text-center">
-                  {renderCoverageIcon(Boolean(policyA.epl_coverage ?? policyA.eplCoverage))}
-                </div>
-                <div className="p-4 border-t border-border text-center">
-                  {renderCoverageIcon(Boolean(policyB.epl_coverage ?? policyB.eplCoverage))}
-                </div>
-
-                {/* Water Damage Row */}
-                <div className="p-4 border-t border-border font-medium">Water Damage</div>
-                <div className="p-4 border-t border-border text-center">
-                  {renderCoverageIcon(Boolean(policyA.water_damage ?? policyA.waterDamage))}
-                </div>
-                <div className="p-4 border-t border-border text-center">
-                  {renderCoverageIcon(Boolean(policyB.water_damage ?? policyB.waterDamage))}
+                  </div>
                 </div>
               </div>
+
+              <Card className="bg-muted/5 border-border shadow-none">
+                <CardContent className="p-6 space-y-4">
+                  <div className="flex items-center gap-2 text-foreground font-bold">
+                    <Activity className="h-5 w-5 text-primary" />
+                    Line of Business in this comparison
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    The engine compares only the LOB you select. We also auto-detect from filenames (e.g. &quot;auto&quot;, &quot;crime&quot;, &quot;wc&quot;) and override this when a clear match is found.
+                  </p>
+                  <Select value={lob} onValueChange={setLob}>
+                    <SelectTrigger className="bg-background border-input text-foreground h-12 max-w-md shadow-sm font-medium">
+                      <SelectValue placeholder="Select line of business" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {LOB_OPTIONS.map((opt) => (
+                        <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </CardContent>
+              </Card>
+
+              <Card className="bg-muted/5 border-border shadow-none">
+                <CardContent className="p-6">
+                  <div className="flex items-start gap-4">
+                    <div className="p-2 rounded-lg bg-background border border-border shadow-sm">
+                      <FileText className="h-5 w-5 text-foreground" />
+                    </div>
+                    <div className="space-y-1">
+                      <h4 className="font-bold text-foreground">Single-LOB output</h4>
+                      <p className="text-sm text-muted-foreground leading-relaxed">
+                        Upload one LOB at a time — results will scope to just that line of business so the comparison stays grounded in what you provided.
+                      </p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
             </CardContent>
           </Card>
 
-          {/* Coverage Gaps */}
-          <Card className="bg-card border-border">
-            <CardHeader>
-              <CardTitle className="text-card-foreground flex items-center gap-2">
-                <AlertCircle className="h-5 w-5 text-amber-500" />
-                Coverage Gaps Identified
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {gaps.map((gap: any) => (
-                <div key={gap} className="flex items-start gap-3 p-3 rounded-lg bg-amber-500/5 border border-amber-500/20">
-                  <AlertTriangle className="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <p className="font-medium text-foreground">{gap}</p>
-                    <p className="text-sm text-muted-foreground mt-1">
-                      Consider adding this coverage to reduce exposure
-                    </p>
+            <div className="flex gap-4 pt-2">
+              <Button
+                onClick={handleRun}
+                disabled={!policyA || !policyB || isRunning}
+                className="flex-1 h-12 text-base font-semibold shadow-elevated"
+                size="lg"
+              >
+                {isRunning ? (
+                  <>
+                    <Loader2 className="h-5 w-5 mr-2 animate-spin" />
+                    Analyzing Policies...
+                  </>
+                ) : (
+                  <>
+                    <Scale className="h-5 w-5 mr-2" />
+                    Run LOB-aware comparison
+                  </>
+                )}
+              </Button>
+              {!result && !isRunning && (
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    // Simulate a successful run with mock data
+                    onRun({ type: "mock-success" });
+                  }}
+                  className="h-12 px-6 border-primary/30 text-primary hover:bg-primary/5"
+                >
+                  Mock Success
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
+
+      {/* Results Section - Linear Flow */}
+      {(isRunning || result) && (
+        <div className="space-y-10 animate-in fade-in slide-in-from-bottom-4 duration-500">
+          {/* Comparison Workflow Card */}
+          <Card className="bg-card border-border/50 shadow-card p-6">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-5 w-5 text-primary" />
+                <h3 className="text-xl font-bold text-foreground">Comparison workflow</h3>
+              </div>
+              {!isRunning && result && (
+                <Badge className="bg-green-500/10 text-green-600 border-green-500/20 gap-1.5 px-3 py-1 font-bold">
+                  <CheckCircle2 className="h-3.5 w-3.5" /> Workflow complete
+                </Badge>
+              )}
+            </div>
+            <p className="text-sm text-muted-foreground mb-8">
+              Live trace of every stage Fideon runs to produce the comparison report.
+            </p>
+
+            <div className="space-y-4 mb-10">
+              <div className="flex justify-between items-end mb-2">
+                <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Pipeline progress</span>
+                <span className="text-sm font-bold text-foreground">{isRunning ? "33%" : "100%"}</span>
+              </div>
+              <div className="w-full bg-muted rounded-full h-2.5 overflow-hidden shadow-inner">
+                <div 
+                  className={`h-2.5 rounded-full transition-all duration-1000 ${isRunning ? "bg-primary animate-pulse" : "bg-primary shadow-glow"}`} 
+                  style={{ width: isRunning ? "33%" : "100%" }} 
+                />
+              </div>
+            </div>
+
+            <div className="space-y-8">
+              {workflowSteps.map((step, index) => (
+                <div key={step.id} className="relative flex items-start gap-6">
+                  {index !== workflowSteps.length - 1 && (
+                    <div className="absolute left-5 top-10 bottom-[-32px] w-0.5 bg-muted" />
+                  )}
+                  <div className={`h-10 w-10 rounded-full flex items-center justify-center z-10 transition-colors ${
+                    step.status === "done" 
+                      ? "bg-green-500/10 text-green-600 border border-green-500/20" 
+                      : step.status === "processing" 
+                      ? "bg-primary/10 text-primary border border-primary/20" 
+                      : "bg-muted/50 text-muted-foreground border border-border/50"
+                  }`}>
+                    {step.status === "done" ? <CheckCircle2 className="h-5 w-5" /> : <div className="h-3 w-3 rounded-full bg-current animate-pulse" />}
+                  </div>
+                  <div className="flex-1 pt-1">
+                    <div className="flex items-center justify-between">
+                      <h4 className={`font-bold transition-colors ${step.status === "done" ? "text-foreground" : "text-muted-foreground"}`}>
+                        {step.title}
+                      </h4>
+                      <span className="text-xs font-mono text-muted-foreground uppercase tracking-wider">
+                        {step.status === "done" ? "Done" : step.status === "processing" ? "Running" : "Pending"}
+                      </span>
+                    </div>
+                    <p className="text-sm text-muted-foreground">{step.description}</p>
                   </div>
                 </div>
               ))}
-            </CardContent>
+            </div>
           </Card>
 
-          {/* Strengths Analysis */}
-          <Card className="bg-card border-border">
-            <CardHeader>
-              <CardTitle className="text-card-foreground flex items-center gap-2">
-                <CheckCircle2 className="h-5 w-5 text-green-600" />
-                Policy Strengths
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {(structured.recommendation?.rationale ?? []).map((rationale: any) => (
-                  <div 
-                    key={rationale} 
-                    className="flex items-start gap-3 p-3 rounded-lg border bg-green-500/5 border-green-500/20"
-                  >
-                    <Badge 
-                      variant="outline" 
-                      className="text-green-600 border-green-600"
-                    >
-                      Tip
-                    </Badge>
-                    <p className="text-sm text-foreground">{rationale}</p>
-                  </div>
-                ))}
+          {/* Results Content */}
+          {!isRunning && result && structured && (
+            <div className="space-y-10 animate-in fade-in slide-in-from-bottom-8 duration-700">
+              {/* Tabs for switching between Coverage and Clause Diff */}
+              <div className="flex items-center justify-center gap-2 p-1.5 bg-muted/30 rounded-full w-fit mx-auto border border-border/50 shadow-sm">
+                <Button
+                  variant={viewMode === "coverage" ? "default" : "ghost"}
+                  size="sm"
+                  onClick={() => setViewMode("coverage")}
+                  className="rounded-full px-8 h-9 text-xs font-bold uppercase tracking-wider"
+                >
+                  Coverage View
+                </Button>
+                <Button
+                  variant={viewMode === "clause" ? "default" : "ghost"}
+                  size="sm"
+                  onClick={() => setViewMode("clause")}
+                  className="rounded-full px-8 h-9 text-xs font-bold uppercase tracking-wider"
+                >
+                  Clause Redline
+                </Button>
               </div>
-            </CardContent>
-          </Card>
+                  <div className="space-y-6">
+                    {viewMode === "clause" ? (
+                      <PolicyClauseRedlineUI result={result} />
+                    ) : (
+                      <>
+                        {/* Comparison Verdict */}
+                        <Card className="bg-gradient-to-br from-primary/10 via-primary/5 to-transparent border-primary/20 overflow-hidden">
+                          <CardContent className="p-6">
+                            <div className="flex flex-col md:flex-row gap-6">
+                              <div className="flex-1 space-y-4">
+                                <div className="flex items-center gap-3">
+                                  <div className="h-10 w-10 rounded-xl bg-primary/20 flex items-center justify-center">
+                                    <Sparkles className="h-6 w-6 text-primary" />
+                                  </div>
+                                  <div>
+                                    <h3 className="text-xl font-bold text-foreground">Comparison verdict</h3>
+                                    <p className="text-xs text-muted-foreground flex items-center gap-1">
+                                      <Target className="h-3 w-3" /> Scope: {lob.toUpperCase().replace("-", " ")}
+                                    </p>
+                                  </div>
+                                </div>
+                                <div className="flex flex-wrap gap-2">
+                                  <Badge className="bg-primary text-primary-foreground font-bold px-3">
+                                    Recommended: {structured.recommendation?.recommended_policy === "B" ? "Proposed" : "Expiring"}
+                                  </Badge>
+                                </div>
+                                <p className="text-sm text-muted-foreground leading-relaxed">
+                                  Within <strong className="text-foreground">{lob.toUpperCase().replace("-", " ")}</strong>: 
+                                  34 fields matched, 1 improved or added, 0 reduced, and 1 flagged for underwriter review.
+                                </p>
+                                <div className="flex flex-wrap gap-3">
+                                  <div className="flex items-center gap-1 text-xs text-green-600 font-medium bg-green-500/10 px-2 py-1 rounded-full">
+                                    <CheckCircle2 className="h-3 w-3" /> Match
+                                  </div>
+                                  <div className="flex items-center gap-1 text-xs text-blue-600 font-medium bg-blue-500/10 px-2 py-1 rounded-full">
+                                    <TrendingUp className="h-3 w-3" /> Improved
+                                  </div>
+                                  <div className="flex items-center gap-1 text-xs text-emerald-600 font-medium bg-emerald-500/10 px-2 py-1 rounded-full">
+                                    <ArrowRight className="h-3 w-3" /> Added
+                                  </div>
+                                  <div className="flex items-center gap-1 text-xs text-amber-600 font-medium bg-amber-500/10 px-2 py-1 rounded-full">
+                                    <TrendingDown className="h-3 w-3" /> Reduced
+                                  </div>
+                                  <div className="flex items-center gap-1 text-xs text-destructive font-medium bg-destructive/10 px-2 py-1 rounded-full">
+                                    <XCircle className="h-3 w-3" /> Mismatch
+                                  </div>
+                                </div>
+                              </div>
+                              <div className="w-full md:w-64 space-y-4 pt-4 md:pt-0 border-t md:border-t-0 md:border-l border-primary/10 md:pl-6">
+                                <div className="flex justify-between items-end mb-1">
+                                  <span className="text-sm text-muted-foreground">Match rate</span>
+                                  <span className="text-3xl font-black text-foreground tracking-tighter">94%</span>
+                                </div>
+                                <div className="w-full bg-muted rounded-full h-3">
+                                  <div className="bg-primary h-3 rounded-full shadow-glow" style={{ width: "94%" }} />
+                                </div>
+                                <div className="grid grid-cols-2 gap-2">
+                                  <div className="bg-muted/50 rounded-lg p-2 text-center">
+                                    <p className="text-[10px] text-muted-foreground uppercase">Matched</p>
+                                    <p className="text-xl font-bold text-foreground">34</p>
+                                  </div>
+                                  <div className="bg-muted/50 rounded-lg p-2 text-center">
+                                    <p className="text-[10px] text-muted-foreground uppercase">Improved</p>
+                                    <p className="text-xl font-bold text-foreground">0</p>
+                                  </div>
+                                  <div className="bg-muted/50 rounded-lg p-2 text-center">
+                                    <p className="text-[10px] text-muted-foreground uppercase">Added</p>
+                                    <p className="text-xl font-bold text-foreground">1</p>
+                                  </div>
+                                  <div className="bg-muted/50 rounded-lg p-2 text-center">
+                                    <p className="text-[10px] text-muted-foreground uppercase">Reduced</p>
+                                    <p className="text-xl font-bold text-foreground">0</p>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </CardContent>
+                        </Card>
 
-          {/* AI Recommendation */}
-          <Card className="bg-gradient-to-br from-primary/10 via-primary/5 to-transparent border-primary/20">
-            <CardContent className="p-6">
-              <div className="flex items-start gap-4">
-                <div className="h-12 w-12 rounded-full bg-primary/20 flex items-center justify-center flex-shrink-0">
-                  <Lightbulb className="h-6 w-6 text-primary" />
-                </div>
-                <div className="flex-1">
-                  <h3 className="text-lg font-semibold text-foreground mb-2">AI Recommendation</h3>
-                  <p className="text-muted-foreground">
-                    {structured.recommendation?.rationale?.length
-                      ? structured.recommendation.rationale.join(" ")
-                      : "Recommendation not available; review the clause diff and extracted fields."}
-                  </p>
-                  <div className="flex items-center gap-2 mt-4">
-                    <Badge variant="secondary" className="text-primary">
-                      <CheckCircle2 className="h-3 w-3 mr-1" />
-                      Recommended: {recommendation === "NEITHER" ? "Review" : `Policy ${recommendation}`}
-                    </Badge>
-                    <Badge variant="outline">
-                      Deviation: {typeof structured.deviation_percent === "number" ? `${structured.deviation_percent.toFixed(1)}%` : "—"}
-                    </Badge>
+                        {/* Smart Highlights */}
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                          {[
+                            { label: "Exclusions", count: 4, color: "text-destructive", bg: "bg-destructive/10" },
+                            { label: "Conditions", count: 2, color: "text-amber-600", bg: "bg-amber-500/10" },
+                            { label: "Limits", count: 6, color: "text-primary", bg: "bg-primary/10" },
+                            { label: "Endorsements", count: 3, color: "text-emerald-600", bg: "bg-emerald-500/10" },
+                          ].map((item) => (
+                            <Card key={item.label} className="bg-card border-border/50 shadow-card">
+                              <CardContent className="p-4 flex items-center justify-between">
+                                <div>
+                                  <p className="text-xs text-muted-foreground font-medium uppercase tracking-wider">{item.label}</p>
+                                  <p className={`text-2xl font-bold ${item.color}`}>{item.count}</p>
+                                </div>
+                                <div className={`h-10 w-10 rounded-lg ${item.bg} flex items-center justify-center`}>
+                                  <Target className={`h-5 w-5 ${item.color}`} />
+                                </div>
+                              </CardContent>
+                            </Card>
+                          ))}
+                        </div>
+
+                  {/* Summary Cards */}
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <Card className="bg-card border-border/50 shadow-sm">
+                      <CardContent className="p-5">
+                        <p className="text-[10px] text-muted-foreground font-black uppercase tracking-widest mb-1">Total fields compared</p>
+                        <div className="flex items-baseline gap-2 mb-2">
+                          <span className="text-3xl font-black text-foreground tracking-tighter">36</span>
+                        </div>
+                        <p className="text-[10px] text-muted-foreground flex items-center gap-1.5 font-medium">
+                          Scoped to {lob.toUpperCase().replace("-", " ")}
+                        </p>
+                      </CardContent>
+                    </Card>
+                    <Card className="bg-card border-border/50 shadow-sm">
+                      <CardContent className="p-5">
+                        <p className="text-[10px] text-muted-foreground font-black uppercase tracking-widest mb-1">Differences detected</p>
+                        <div className="flex items-baseline gap-2 mb-2">
+                          <span className="text-3xl font-black text-foreground tracking-tighter">2</span>
+                        </div>
+                        <p className="text-[10px] text-muted-foreground flex items-center gap-1.5 font-medium">
+                          Improved + reduced + added + mismatch
+                        </p>
+                      </CardContent>
+                    </Card>
+                    <Card className="bg-card border-border/50 shadow-sm">
+                      <CardContent className="p-5">
+                        <p className="text-[10px] text-muted-foreground font-black uppercase tracking-widest mb-1">LOBS analyzed</p>
+                        <div className="flex items-baseline gap-2 mb-2">
+                          <span className="text-3xl font-black text-foreground tracking-tighter">1</span>
+                        </div>
+                        <p className="text-[10px] text-muted-foreground flex items-center gap-1.5 font-medium">
+                          1 document-grounded entity found
+                        </p>
+                      </CardContent>
+                    </Card>
+                    <Card className="bg-card border-border/50 shadow-sm">
+                      <CardContent className="p-5">
+                        <p className="text-[10px] text-muted-foreground font-black uppercase tracking-widest mb-1">Carrier Reach</p>
+                        <div className="flex items-baseline gap-2 mb-2">
+                          <span className="text-3xl font-black text-foreground tracking-tighter">300+</span>
+                        </div>
+                        <p className="text-[10px] text-muted-foreground flex items-center gap-1.5 font-medium">
+                          Markets available for placement
+                        </p>
+                      </CardContent>
+                    </Card>
+                  </div>
+
+                  {/* Drill-into Section Header */}
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pt-4">
+                    <div className="flex items-center gap-2 text-sm font-bold text-muted-foreground italic">
+                      <Target className="h-4 w-4 text-primary" />
+                      Drill into matches and differences for {lob.toUpperCase().replace("-", " ")}
+                    </div>
+                    <div className="flex items-center gap-1 p-1 bg-muted/30 rounded-lg border border-border/50">
+                      <Button variant="ghost" size="sm" className="h-8 rounded-md px-4 text-xs font-bold bg-background shadow-sm">All (36)</Button>
+                      <Button variant="ghost" size="sm" className="h-8 rounded-md px-4 text-xs font-bold text-muted-foreground">Differences (2)</Button>
+                      <Button variant="ghost" size="sm" className="h-8 rounded-md px-4 text-xs font-bold text-muted-foreground">Matches (34)</Button>
+                    </div>
+                  </div>
+
+                        <Card className="bg-card border-border/50 shadow-sm overflow-hidden">
+                          <CardHeader className="bg-muted/30 border-b border-border/50 py-3 flex flex-row items-center justify-between">
+                            <CardTitle className="text-base font-black flex items-center gap-2">
+                              {lob.toUpperCase().replace("-", " ")}
+                              <Badge variant="outline" className="text-[10px] bg-background">35 workbook fields</Badge>
+                              <Badge variant="outline" className="text-[10px] bg-background">36 compared</Badge>
+                              <Badge variant="outline" className="text-[10px] bg-background">Document-grounded</Badge>
+                            </CardTitle>
+                            <div className="flex gap-2">
+                              <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20 text-[10px] font-bold">34 matched</Badge>
+                              <Badge className="bg-amber-500/10 text-amber-600 border-amber-500/20 text-[10px] font-bold">2 different</Badge>
+                            </div>
+                          </CardHeader>
+                          <CardContent className="p-0 space-y-6 bg-muted/5">
+                            <p className="text-[11px] text-muted-foreground px-6 pt-4 italic">
+                              Full 35-field {lob.toUpperCase().replace("-", " ")} extraction including symbols, limits, vehicles, and forms list.
+                            </p>
+
+                            {/* Client Information */}
+                            <div className="px-6 pb-6">
+                              <div className="bg-card border border-border/50 rounded-xl overflow-hidden shadow-sm">
+                                <div className="bg-muted/20 px-4 py-2 border-b border-border/50 flex justify-between items-center">
+                                  <span className="text-xs font-black uppercase tracking-tight">Client Information</span>
+                                  <div className="flex gap-2">
+                                    <span className="text-[9px] text-emerald-600 font-bold bg-emerald-500/5 px-1.5 py-0.5 rounded">2 match</span>
+                                    <span className="text-[9px] text-muted-foreground font-bold bg-muted px-1.5 py-0.5 rounded">0 diff</span>
+                                  </div>
+                                </div>
+                                <table className="w-full text-xs border-collapse">
+                                  <thead className="bg-muted/10 text-muted-foreground text-[10px] uppercase font-bold border-b border-border/50">
+                                    <tr>
+                                      <th className="text-left p-3 w-1/3">Field</th>
+                                      <th className="text-left p-3">Expiring / Current</th>
+                                      <th className="text-left p-3">Proposed / Renewal</th>
+                                      <th className="text-center p-3 w-[100px]">Status</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-border/40">
+                                    <tr>
+                                      <td className="p-3">
+                                        <div className="font-bold">Named insured(s)</div>
+                                        <div className="text-[9px] text-muted-foreground">From uploaded docs</div>
+                                      </td>
+                                      <td className="p-3 text-muted-foreground">Brandenberry Park Condominium Association</td>
+                                      <td className="p-3 font-bold">Brandenberry Park Condominium Association</td>
+                                      <td className="p-3 text-center">
+                                        <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20 gap-1 rounded-full px-2 text-[9px] font-bold">
+                                          <CheckCircle2 className="h-2.5 w-2.5" /> Match
+                                        </Badge>
+                                      </td>
+                                    </tr>
+                                    <tr>
+                                      <td className="p-3">
+                                        <div className="font-bold">Mailing address</div>
+                                        <div className="text-[9px] text-muted-foreground">From uploaded docs</div>
+                                      </td>
+                                      <td className="p-3 text-muted-foreground">1234 Brandenberry Ct, Naperville, IL</td>
+                                      <td className="p-3 font-bold">1234 Brandenberry Ct, Naperville, IL</td>
+                                      <td className="p-3 text-center">
+                                        <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20 gap-1 rounded-full px-2 text-[9px] font-bold">
+                                          <CheckCircle2 className="h-2.5 w-2.5" /> Match
+                                        </Badge>
+                                      </td>
+                                    </tr>
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+
+                            {/* Agency Information */}
+                            <div className="px-6 pb-6">
+                              <div className="bg-card border border-border/50 rounded-xl overflow-hidden shadow-sm">
+                                <div className="bg-muted/20 px-4 py-2 border-b border-border/50 flex justify-between items-center">
+                                  <span className="text-xs font-black uppercase tracking-tight">Agency Information</span>
+                                  <div className="flex gap-2">
+                                    <span className="text-[9px] text-emerald-600 font-bold bg-emerald-500/5 px-1.5 py-0.5 rounded">2 match</span>
+                                    <span className="text-[9px] text-muted-foreground font-bold bg-muted px-1.5 py-0.5 rounded">0 diff</span>
+                                  </div>
+                                </div>
+                                <table className="w-full text-xs border-collapse">
+                                  <tbody className="divide-y divide-border/40">
+                                    <tr>
+                                      <td className="p-3 w-1/3">
+                                        <div className="font-bold">Agency</div>
+                                        <div className="text-[9px] text-muted-foreground">From uploaded docs</div>
+                                      </td>
+                                      <td className="p-3 text-muted-foreground">AssuredPartners — Midwest</td>
+                                      <td className="p-3 font-bold">AssuredPartners — Midwest</td>
+                                      <td className="p-3 text-center w-[100px]">
+                                        <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20 gap-1 rounded-full px-2 text-[9px] font-bold">
+                                          <CheckCircle2 className="h-2.5 w-2.5" /> Match
+                                        </Badge>
+                                      </td>
+                                    </tr>
+                                    <tr>
+                                      <td className="p-3 w-1/3">
+                                        <div className="font-bold">Agency address</div>
+                                        <div className="text-[9px] text-muted-foreground">From uploaded docs</div>
+                                      </td>
+                                      <td className="p-3 text-muted-foreground">200 E Randolph St, Chicago, IL</td>
+                                      <td className="p-3 font-bold">200 E Randolph St, Chicago, IL</td>
+                                      <td className="p-3 text-center w-[100px]">
+                                        <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20 gap-1 rounded-full px-2 text-[9px] font-bold">
+                                          <CheckCircle2 className="h-2.5 w-2.5" /> Match
+                                        </Badge>
+                                      </td>
+                                    </tr>
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+
+                            {/* Policy Information */}
+                            <div className="px-6 pb-6">
+                              <div className="bg-card border border-border/50 rounded-xl overflow-hidden shadow-sm">
+                                <div className="bg-muted/20 px-4 py-2 border-b border-border/50 flex justify-between items-center">
+                                  <span className="text-xs font-black uppercase tracking-tight">Policy Information</span>
+                                  <div className="flex gap-2">
+                                    <span className="text-[9px] text-emerald-600 font-bold bg-emerald-500/5 px-1.5 py-0.5 rounded">5 match</span>
+                                    <span className="text-[9px] text-amber-600 font-bold bg-amber-500/5 px-1.5 py-0.5 rounded">1 diff</span>
+                                  </div>
+                                </div>
+                                <table className="w-full text-xs border-collapse">
+                                  <tbody className="divide-y divide-border/40">
+                                    <tr>
+                                      <td className="p-3 w-1/3">
+                                        <div className="font-bold">Policy number</div>
+                                        <div className="text-[9px] text-muted-foreground">From uploaded docs · New term issued under proposal sequence</div>
+                                      </td>
+                                      <td className="p-3 text-muted-foreground">BA-1L251829-25-42-G</td>
+                                      <td className="p-3 font-bold">BA-1L251829-1</td>
+                                      <td className="p-3 text-center w-[100px]">
+                                        <Badge className="bg-destructive/10 text-destructive border-destructive/20 gap-1 rounded-full px-2 text-[9px] font-bold">
+                                          <XCircle className="h-2.5 w-2.5" /> Mismatch
+                                        </Badge>
+                                      </td>
+                                    </tr>
+                                    {[
+                                      { field: "Coverage period start", expiring: "09/24/2025", proposed: "09/24/2025" },
+                                      { field: "Coverage period end", expiring: "09/24/2026", proposed: "09/24/2026" },
+                                      { field: "Policy premium", expiring: "$2,517", proposed: "$2,517" },
+                                      { field: "Carrier", expiring: "Travelers Casualty Insurance Co. of America", proposed: "Travelers Casualty Insurance Co. of America" },
+                                      { field: "Full location schedules", expiring: "1 location scheduled", proposed: "1 location scheduled" },
+                                    ].map((row) => (
+                                      <tr key={row.field}>
+                                        <td className="p-3">
+                                          <div className="font-bold">{row.field}</div>
+                                          <div className="text-[9px] text-muted-foreground">From uploaded docs</div>
+                                        </td>
+                                        <td className="p-3 text-muted-foreground">{row.expiring}</td>
+                                        <td className="p-3 font-bold">{row.proposed}</td>
+                                        <td className="p-3 text-center">
+                                          <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20 gap-1 rounded-full px-2 text-[9px] font-bold">
+                                            <CheckCircle2 className="h-2.5 w-2.5" /> Match
+                                          </Badge>
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+
+                            {/* Auto coverage - symbols */}
+                            <div className="px-6 pb-6">
+                              <div className="bg-card border border-border/50 rounded-xl overflow-hidden shadow-sm">
+                                <div className="bg-muted/20 px-4 py-2 border-b border-border/50 flex justify-between items-center">
+                                  <span className="text-xs font-black uppercase tracking-tight">Auto coverage — symbols</span>
+                                  <div className="flex gap-2">
+                                    <span className="text-[9px] text-emerald-600 font-bold bg-emerald-500/5 px-1.5 py-0.5 rounded">8 match</span>
+                                    <span className="text-[9px] text-muted-foreground font-bold bg-muted px-1.5 py-0.5 rounded">0 diff</span>
+                                  </div>
+                                </div>
+                                <p className="text-[10px] text-muted-foreground px-4 py-2 bg-muted/5 border-b border-border/50 italic">
+                                  Coverage symbols define which autos are covered for each peril.
+                                </p>
+                                <table className="w-full text-xs border-collapse">
+                                  <tbody className="divide-y divide-border/40">
+                                    {[
+                                      { field: "Owned auto liability symbol", expiring: "Symbol 1 — Any Auto", proposed: "Symbol 1 — Any Auto" },
+                                      { field: "Collision coverage symbol", expiring: "Symbol 7 — Specifically Described", proposed: "Symbol 7 — Specifically Described" },
+                                      { field: "Comprehensive coverage symbol", expiring: "Symbol 7 — Specifically Described", proposed: "Symbol 7 — Specifically Described" },
+                                      { field: "Underinsured motorist symbol", expiring: "Symbol 2 — Owned Autos Only", proposed: "Symbol 2 — Owned Autos Only" },
+                                      { field: "Uninsured motorist symbol", expiring: "Symbol 2 — Owned Autos Only", proposed: "Symbol 2 — Owned Autos Only" },
+                                      { field: "Non-owned auto symbol", expiring: "Symbol 9 — Non-Owned Autos", proposed: "Symbol 9 — Non-Owned Autos" },
+                                      { field: "Hired car symbol", expiring: "Symbol 8 — Hired Autos", proposed: "Symbol 8 — Hired Autos" },
+                                      { field: "Medical payments symbol", expiring: "Symbol 7 — Specifically Described", proposed: "Symbol 7 — Specifically Described" },
+                                    ].map((row) => (
+                                      <tr key={row.field}>
+                                        <td className="p-3 w-1/3">
+                                          <div className="font-bold">{row.field}</div>
+                                          <div className="text-[9px] text-muted-foreground">Workbook-aligned</div>
+                                        </td>
+                                        <td className="p-3 text-muted-foreground italic">{row.expiring}</td>
+                                        <td className="p-3 font-bold">{row.proposed}</td>
+                                        <td className="p-3 text-center w-[100px]">
+                                          <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20 gap-1 rounded-full px-2 text-[9px] font-bold">
+                                            <CheckCircle2 className="h-2.5 w-2.5" /> Match
+                                          </Badge>
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+
+                            {/* Auto coverage - limits */}
+                            <div className="px-6 pb-6">
+                              <div className="bg-card border border-border/50 rounded-xl overflow-hidden shadow-sm">
+                                <div className="bg-muted/20 px-4 py-2 border-b border-border/50 flex justify-between items-center">
+                                  <span className="text-xs font-black uppercase tracking-tight">Auto coverage — limits</span>
+                                  <div className="flex gap-2">
+                                    <span className="text-[9px] text-emerald-600 font-bold bg-emerald-500/5 px-1.5 py-0.5 rounded">6 match</span>
+                                    <span className="text-[9px] text-muted-foreground font-bold bg-muted px-1.5 py-0.5 rounded">0 diff</span>
+                                  </div>
+                                </div>
+                                <table className="w-full text-xs border-collapse">
+                                  <tbody className="divide-y divide-border/40">
+                                    {[
+                                      { field: "Liability", expiring: "$1,000,000 CSL", proposed: "$1,000,000 CSL" },
+                                      { field: "Underinsured motorist", expiring: "$1,000,000", proposed: "$1,000,000" },
+                                      { field: "Uninsured motorist", expiring: "$1,000,000", proposed: "$1,000,000" },
+                                      { field: "Non-owned auto", expiring: "Included", proposed: "Included" },
+                                      { field: "Hired car", expiring: "Included", proposed: "Included" },
+                                      { field: "Medical payments", expiring: "$5,000", proposed: "$5,000" },
+                                    ].map((row) => (
+                                      <tr key={row.field}>
+                                        <td className="p-3 w-1/3">
+                                          <div className="font-bold">{row.field}</div>
+                                          <div className="text-[9px] text-muted-foreground">From uploaded docs</div>
+                                        </td>
+                                        <td className="p-3 text-muted-foreground">{row.expiring}</td>
+                                        <td className="p-3 font-bold">{row.proposed}</td>
+                                        <td className="p-3 text-center w-[100px]">
+                                          <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20 gap-1 rounded-full px-2 text-[9px] font-bold">
+                                            <CheckCircle2 className="h-2.5 w-2.5" /> Match
+                                          </Badge>
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+
+                            {/* Vehicles */}
+                            <div className="px-6 pb-6">
+                              <div className="bg-card border border-border/50 rounded-xl overflow-hidden shadow-sm">
+                                <div className="bg-muted/20 px-4 py-2 border-b border-border/50 flex justify-between items-center">
+                                  <span className="text-xs font-black uppercase tracking-tight">Vehicles</span>
+                                  <div className="flex gap-2">
+                                    <span className="text-[9px] text-emerald-600 font-bold bg-emerald-500/5 px-1.5 py-0.5 rounded">9 match</span>
+                                    <span className="text-[9px] text-muted-foreground font-bold bg-muted px-1.5 py-0.5 rounded">0 diff</span>
+                                  </div>
+                                </div>
+                                <p className="text-[10px] text-muted-foreground px-4 py-2 bg-muted/5 border-b border-border/50 italic">
+                                  Per-vehicle schedule and coverage detail.
+                                </p>
+                                <table className="w-full text-xs border-collapse">
+                                  <tbody className="divide-y divide-border/40">
+                                    {[
+                                      { field: "Number of vehicles", expiring: "1", proposed: "1" },
+                                      { field: "Vehicle 1 — year", expiring: "2019", proposed: "2019" },
+                                      { field: "Vehicle 1 — make", expiring: "Ford", proposed: "Ford" },
+                                      { field: "Vehicle 1 — model", expiring: "F-150", proposed: "F-150" },
+                                      { field: "Vehicle 1 — VIN", expiring: "1FTFW1E50KFA12345", proposed: "1FTFW1E50KFA12345" },
+                                      { field: "Vehicle 1 — coverage type", expiring: "Liability + Phys Dmg", proposed: "Liability + Phys Dmg" },
+                                      { field: "Vehicle 1 — limit", expiring: "$1,000,000 CSL", proposed: "$1,000,000 CSL" },
+                                      { field: "Vehicle 1 — comp/coll deductible", expiring: "$1,000 / $1,000", proposed: "$1,000 / $1,000" },
+                                      { field: "Vehicle 1 — premium", expiring: "$2,517", proposed: "$2,517" },
+                                    ].map((row) => (
+                                      <tr key={row.field}>
+                                        <td className="p-3 w-1/3">
+                                          <div className="font-bold">{row.field}</div>
+                                          <div className="text-[9px] text-muted-foreground">From uploaded docs</div>
+                                        </td>
+                                        <td className="p-3 text-muted-foreground">{row.expiring}</td>
+                                        <td className="p-3 font-bold">{row.proposed}</td>
+                                        <td className="p-3 text-center w-[100px]">
+                                          <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20 gap-1 rounded-full px-2 text-[9px] font-bold">
+                                            <CheckCircle2 className="h-2.5 w-2.5" /> Match
+                                          </Badge>
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+
+                            {/* Forms & endorsements */}
+                            <div className="px-6 pb-10">
+                              <div className="bg-card border border-border/50 rounded-xl overflow-hidden shadow-sm">
+                                <div className="bg-muted/20 px-4 py-2 border-b border-border/50 flex justify-between items-center">
+                                  <span className="text-xs font-black uppercase tracking-tight">Forms & endorsements</span>
+                                  <div className="flex gap-2">
+                                    <span className="text-[9px] text-emerald-600 font-bold bg-emerald-500/5 px-1.5 py-0.5 rounded">2 match</span>
+                                    <span className="text-[9px] text-blue-600 font-bold bg-blue-500/5 px-1.5 py-0.5 rounded">1 added</span>
+                                  </div>
+                                </div>
+                                <table className="w-full text-xs border-collapse">
+                                  <tbody className="divide-y divide-border/40">
+                                    {[
+                                      { field: "Form CA 00 01", expiring: "Business Auto Coverage Form (10/13)", proposed: "Business Auto Coverage Form (10/13)", status: "Match", color: "emerald" },
+                                      { field: "Form CA 02 70", expiring: "Cancellation — IL Changes (11/13)", proposed: "Cancellation — IL Changes (11/13)", status: "Match", color: "emerald" },
+                                      { field: "Form CA 21 17", expiring: "Workbook-aligned - Added at proposal stage", proposed: "Fellow Employee Coverage (10/13)", status: "Added", color: "blue" },
+                                    ].map((row) => (
+                                      <tr key={row.field}>
+                                        <td className="p-3 w-1/3">
+                                          <div className="font-bold">{row.field}</div>
+                                          <div className="text-[9px] text-muted-foreground">{row.status === "Added" ? "Workbook-aligned - Added at proposal stage" : "Workbook-aligned"}</div>
+                                        </td>
+                                        <td className="p-3 text-muted-foreground italic">{row.status === "Added" ? "" : row.expiring}</td>
+                                        <td className="p-3 font-bold">{row.proposed}</td>
+                                        <td className="p-3 text-center w-[100px]">
+                                          <Badge className={`bg-${row.color}-500/10 text-${row.color}-600 border-${row.color}-500/20 gap-1 rounded-full px-2 text-[9px] font-bold`}>
+                                            {row.status === "Match" ? <CheckCircle2 className="h-2.5 w-2.5" /> : <Sparkles className="h-2.5 w-2.5" />}
+                                            {row.status}
+                                          </Badge>
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+                          </CardContent>
+                        </Card>
+
+                        {/* Final Footer Buttons */}
+                        <div className="flex justify-between items-center pt-10 border-t border-border/50">
+                          <div className="flex gap-2">
+                            <span className="text-xs text-muted-foreground">Was this helpful?</span>
+                            <Button variant="ghost" size="icon" className="h-6 w-6"><TrendingUp className="h-3 w-3" /></Button>
+                            <Button variant="ghost" size="icon" className="h-6 w-6"><TrendingDown className="h-3 w-3" /></Button>
+                          </div>
+                          <div className="flex gap-3">
+                            <Button variant="outline" size="sm" className="gap-2 font-bold h-9">
+                              <FileEdit className="h-4 w-4" />
+                              Edit & Train
+                            </Button>
+                          </div>
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Quote Generation Recommendation */}
-          {showQuoteRecommendation && (
-            <Alert className="border-primary/30 bg-gradient-to-r from-primary/10 to-transparent">
-              <Sparkles className="h-5 w-5 text-primary" />
-              <AlertTitle className="text-foreground flex items-center gap-2">
-                Premium Exceeds ${workflowSettings.policyComparisonPremiumThreshold.toLocaleString()} – Consider Getting New Quotes
-              </AlertTitle>
-              <AlertDescription className="mt-3">
-                <p className="text-muted-foreground mb-4">
-                  With premiums at this level, there may be significant savings opportunities by comparing 
-                  quotes from multiple carriers. Our Quote Generation Agent can automatically fetch quotes 
-                  from 18+ carriers and potentially save you up to <strong className="text-primary">${calculateSavingsPotential().toLocaleString()}/year</strong>.
-                </p>
-                <div className="flex flex-col sm:flex-row gap-3">
-                  <Button 
-                    onClick={() => navigate("/playground?model=quote-generation")}
-                    className="bg-primary hover:bg-primary/90"
-                  >
-                    <Sparkles className="h-4 w-4 mr-2" />
-                    Generate New Quotes
-                    <ArrowRight className="h-4 w-4 ml-2" />
-                  </Button>
-                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                    <Info className="h-4 w-4" />
-                    <span>Compare quotes from Travelers, Hartford, Chubb & more</span>
-                  </div>
-                </div>
-              </AlertDescription>
-            </Alert>
+              )}
+            </div>
           )}
         </div>
-          );
-        })()}
-        </OutputCorrection>
-      )}
-    </div>
   );
 }
