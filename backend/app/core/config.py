@@ -224,6 +224,13 @@ LLM_SEMANTIC_CACHE_ENABLED = os.getenv("LLM_SEMANTIC_CACHE_ENABLED", "false")
 # Keep this value stable across deploys so existing key hashes remain valid.
 PERSONAL_API_KEY_PEPPER = os.getenv("PERSONAL_API_KEY_PEPPER", "")
 
+# Resend email service
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
+RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "it.support@fideon.ai").strip()
+# Canonical frontend URL used in server-generated emails (password set, invite approval).
+# Set per environment: dev = fideon-dev-frontend.azurewebsites.net, staging = fideon-staging-...
+FRONTEND_URL = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
+
 # Carrier credentials
 # Used to Fernet-encrypt carrier portal passwords before storing in DB.
 # Must be a stable, high-entropy secret — rotate with care (existing rows become unreadable).

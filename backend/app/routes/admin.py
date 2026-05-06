@@ -4,12 +4,12 @@ import json
 import secrets
 import string
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlencode, urlparse, urlunparse, parse_qs
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 
-from app.core.config import SUPABASE_URL
+from app.core.config import FRONTEND_URL, RESEND_API_KEY, RESEND_FROM_EMAIL, SUPABASE_URL
 from app.core.config import DEVICE_OFFLINE_AFTER_SECONDS
 from app.core.supabase import (
     admin_list_users,
@@ -156,13 +156,90 @@ async def _create_auth_user(
     return {}
 
 
+def _build_set_password_link(action_link: str, redirect_to: str) -> str:
+    """Rewrite the Supabase action_link so it:
+    1. Points to the direct Supabase URL (bypasses APIM which has no /auth/v1/verify).
+    2. Uses our frontend URL as redirect_to (overrides Supabase SITE_URL config).
+    """
+    if not action_link or not SUPABASE_URL:
+        return action_link
+    parsed_link = urlparse(action_link)
+    parsed_supabase = urlparse(SUPABASE_URL)
+    rewritten = parsed_link._replace(
+        scheme=parsed_supabase.scheme,
+        netloc=parsed_supabase.netloc,
+    )
+    if redirect_to:
+        params = parse_qs(rewritten.query, keep_blank_values=True)
+        params["redirect_to"] = [redirect_to]
+        rewritten = rewritten._replace(query=urlencode({k: v[0] for k, v in params.items()}))
+    return urlunparse(rewritten)
+
+
 async def _send_password_reset(email: str) -> None:
-    """Send a password-reset email so the newly created user can set their own password."""
+    """Send a password-set email to a newly approved user via Resend.
+
+    Generates a Supabase recovery link (Admin API), rewrites it to bypass
+    APIM, then delivers it through Resend so the user can set their password.
+    """
+    redirect_to = f"{FRONTEND_URL}/reset-password" if FRONTEND_URL else ""
+
     async with httpx.AsyncClient(timeout=30) as client:
-        await client.post(
-            f"{SUPABASE_URL}/auth/v1/recover",
+        gen_resp = await client.post(
+            f"{SUPABASE_URL}/auth/v1/admin/generate_link",
             headers=service_headers(),
-            content=json.dumps({"email": email}),
+            content=json.dumps({
+                "type": "recovery",
+                "email": email,
+                **({"redirect_to": redirect_to} if redirect_to else {}),
+            }),
+        )
+
+    if gen_resp.status_code >= 400:
+        return
+
+    action_link = _build_set_password_link(
+        gen_resp.json().get("action_link", ""),
+        redirect_to,
+    )
+    if not action_link or not RESEND_API_KEY:
+        return
+
+    html = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px;">
+        <h2 style="color: #1a1a2e;">Welcome to Fideon OS</h2>
+        <p>Your account has been approved. Click the button below to set your password and get started.</p>
+        <p style="margin: 32px 0;">
+            <a href="{action_link}"
+               style="background-color: #4F46E5; color: white; padding: 12px 28px;
+                      text-decoration: none; border-radius: 6px; display: inline-block; font-weight: bold;">
+                Set Your Password
+            </a>
+        </p>
+        <p style="color: #555; font-size: 14px;">
+            This link expires in 1 hour. If you were not expecting this email, you can safely ignore it.
+        </p>
+        <hr style="border: none; border-top: 1px solid #eee; margin: 24px 0;" />
+        <p style="color: #999; font-size: 12px;">
+            If the button does not work, copy and paste this URL into your browser:<br />
+            <span style="color: #4F46E5;">{action_link}</span>
+        </p>
+    </div>
+    """
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        await client.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            content=json.dumps({
+                "from": RESEND_FROM_EMAIL,
+                "to": [email],
+                "subject": "Your Fideon OS account is approved — set your password",
+                "html": html,
+            }),
         )
 
 

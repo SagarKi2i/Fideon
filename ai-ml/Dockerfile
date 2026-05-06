@@ -1,4 +1,4 @@
-FROM runpod/pytorch:2.5.1-py3.12-cuda12.1.1-devel-ubuntu22.04
+FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 
 WORKDIR /app
 
@@ -27,4 +27,4 @@ EXPOSE 8000 8080 8188 8888
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["/app/startup.sh"]
+CMD ["/bin/bash", "-c", "/app/startup.sh & /start.sh"]
