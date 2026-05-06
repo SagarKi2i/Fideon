@@ -5,8 +5,8 @@ Requires llama.cpp tools in PATH:
   llama-convert-hf-to-gguf   (HF safetensors → GGUF FP16)
   llama-quantize              (FP16 GGUF → Q5_K_M / Q4_K_M)
 
-Install once on the pod (binaries go to /workspace/bin — survives restarts):
-  bash /workspace/ai-ml/setup.sh
+Install once on the pod:
+  bash /workspace/Quantization/setup.sh
 
 If the binaries are not found, quantization is skipped non-fatally and an
 empty dict is returned — the pipeline continues and only the HF model is
@@ -15,7 +15,6 @@ uploaded to SeaweedFS.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -24,26 +23,12 @@ from typing import Dict, List
 
 QUANT_LEVELS: List[str] = ["Q5_K_M", "Q4_K_M"]
 
-# /workspace/bin persists across pod restarts (system volume resets on restart).
-# Prepend it to PATH so shutil.which() and subprocess find the binaries even if
-# the startup script didn't export it (e.g. when launched via SSH directly).
-_WORKSPACE_BIN = "/workspace/bin"
-if _WORKSPACE_BIN not in os.environ.get("PATH", ""):
-    os.environ["PATH"] = f"{_WORKSPACE_BIN}:{os.environ.get('PATH', '')}"
-
 
 def tools_available() -> bool:
-    found = (
+    return (
         shutil.which("llama-convert-hf-to-gguf") is not None
         and shutil.which("llama-quantize") is not None
     )
-    if not found:
-        print(
-            "[quantizer] llama-convert-hf-to-gguf or llama-quantize not found in PATH.\n"
-            f"[quantizer] PATH={os.environ.get('PATH', '')}\n"
-            "[quantizer] To install: bash /workspace/ai-ml/setup.sh --skip-pip"
-        )
-    return found
 
 
 def run_quantization(
@@ -67,6 +52,8 @@ def run_quantization(
     Returns {} if llama.cpp tools are not installed.
     """
     if not tools_available():
+        print("[quantizer] llama-convert-hf-to-gguf or llama-quantize not found — skipping.")
+        print("[quantizer] To enable: bash /workspace/ai-ml/setup.sh --skip-pip")
         return {}
 
     # Free GPU VRAM left over from the merge step before running llama-quantize
