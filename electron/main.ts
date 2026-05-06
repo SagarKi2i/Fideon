@@ -21,6 +21,7 @@ import { createHandler } from "next-electron-rsc";
 import {
   ensureDeviceAuthAndStartHeartbeat,
   ensureDeviceAuthAsync,
+  startHeartbeatLoop,
   getStoredDeviceIdAsync,
   getStoredDeviceJwtAsync,
   getMachineId,
@@ -545,21 +546,21 @@ ipcMain.handle("device:ensureAuth", async () => {
     // disconnects the renderer right after a successful reconnect.
     try { deviceHeartbeatStopper?.(); } catch { }
     deviceHeartbeatStopper = null;
-    try {
-      const runner = await ensureDeviceAuthAndStartHeartbeat({
-        log,
-        heartbeatSeconds: 60,
-        onDeactivated: () => {
-          log(`[device] device deactivated by admin — notifying renderer`);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send("device:deactivated");
-          }
-        },
-      });
-      deviceHeartbeatStopper = runner.stop;
-    } catch (err) {
-      log(`[device] ensureDeviceAuthAndStartHeartbeat failed: ${formatUnknownError(err)}`);
-    }
+    // Use startHeartbeatLoop directly with the already-validated JWT from ensureDeviceAuthAsync.
+    // Calling ensureDeviceAuthAndStartHeartbeat here would invoke ensureDeviceAuthAsync a
+    // second time, potentially re-registering and producing a different JWT than what we
+    // return to the renderer — causing the heartbeat loop and renderer to be out of sync.
+    const runner = startHeartbeatLoop(auth.device_jwt, {
+      log,
+      heartbeatSeconds: 60,
+      onDeactivated: () => {
+        log(`[device] device deactivated by admin — notifying renderer`);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("device:deactivated");
+        }
+      },
+    });
+    deviceHeartbeatStopper = runner.stop;
     return { success: true, device_id: auth.device_id, device_jwt: auth.device_jwt };
   } catch (err) {
     log(`[ipc] device:ensureAuth failed: ${formatUnknownError(err)}`);

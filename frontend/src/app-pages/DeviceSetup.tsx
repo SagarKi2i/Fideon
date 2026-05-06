@@ -301,6 +301,13 @@ export default function DeviceSetup() {
 
       if (res?.success && res.device_jwt) {
         const jwt = res.device_jwt;
+
+        // Verify the new JWT is actually accepted by the backend before marking connected.
+        // This catches disabled-device scenarios even if registration unexpectedly returned
+        // a JWT (race condition between admin disable and re-register, or stale backend).
+        const isValid = await verifyCloudSession(jwt, { silent: false });
+        if (!isValid) return;
+
         setDeviceJwt(jwt);
         setStoredDeviceJwt(jwt);
         setIsConnected(true);
