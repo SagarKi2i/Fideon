@@ -88,16 +88,24 @@ export async function ensureDeviceAuthAsync(opts?: { log?: (msg: string) => void
     try {
       // Prefer heartbeat: validates JWT without adapter_registry domain setup.
       // 401/403 = invalid/expired/revoked JWT → re-register; otherwise token is accepted.
-      const res = await fetch(`${apiBaseUrl()}/api/v1/devices/heartbeat`, {
-        method: "PUT",
-        headers: { Authorization: `Bearer ${existingJwt}` },
-      });
+      const validateCtrl = new AbortController();
+      const validateTimeout = setTimeout(() => validateCtrl.abort(), 30000);
+      let res: Response;
+      try {
+        res = await fetch(`${apiBaseUrl()}/api/v1/devices/heartbeat`, {
+          method: "PUT",
+          headers: { Authorization: `Bearer ${existingJwt}` },
+          signal: validateCtrl.signal,
+        });
+      } finally {
+        clearTimeout(validateTimeout);
+      }
       if (res.status !== 401 && res.status !== 403) {
         return { device_id: existingId, device_jwt: existingJwt };
       }
       opts?.log?.(`[device] stored JWT rejected by backend (${res.status}) — re-registering`);
     } catch {
-      // Network error — use stored JWT so brief outages do not force re-register.
+      // Network error or timeout — use stored JWT so brief outages do not force re-register.
       return { device_id: existingId, device_jwt: existingJwt };
     }
   }
@@ -113,7 +121,7 @@ export async function ensureDeviceAuthAsync(opts?: { log?: (msg: string) => void
 async function registerDevice(): Promise<{ device_id: string; device_token: string }> {
   const hw = getMachineId();
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 20000);
+  const timeoutId = setTimeout(() => controller.abort(), 60000);
   try {
     const res = await fetch(`${apiBaseUrl()}/api/v1/devices/register`, {
       method: "POST",
@@ -139,6 +147,9 @@ async function registerDevice(): Promise<{ device_id: string; device_token: stri
     return payload as { device_id: string; device_token: string };
   } catch (err: any) {
     clearTimeout(timeoutId);
+    if (err?.name === "AbortError") {
+      throw new Error(`Device registration timed out — backend unreachable at ${apiBaseUrl()}. Check your network or API URL.`);
+    }
     throw err;
   }
 }
@@ -154,7 +165,7 @@ class DeviceAuthError extends Error {
 
 async function heartbeat(deviceJwt: string): Promise<void> {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  const timeoutId = setTimeout(() => controller.abort(), 60000);
   try {
     const res = await fetch(`${apiBaseUrl()}/api/v1/devices/heartbeat`, {
       method: "PUT",
@@ -195,6 +206,9 @@ export async function ensureDeviceAuthAndStartHeartbeat(opts: {
         opts.log(`[device] heartbeat ok`);
       } catch (e) {
         if (e instanceof DeviceAuthError) {
+          // Guard: if stop() was called between when this tick started and now,
+          // don't treat the 401 as admin-deactivation — the loop was intentionally stopped.
+          if (stopped) return;
           opts.log(`[device] heartbeat auth error (${e.status}) — device deactivated by admin`);
           stopped = true;
           if (timer) clearInterval(timer);

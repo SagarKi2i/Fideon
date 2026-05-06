@@ -1,11 +1,15 @@
 // Electron main process entrypoint.
 // Creates the BrowserWindow and wires IPC handlers that call into
 // the local Ollama backend helpers.
-import "dotenv/config";
+
+// Load .env relative to __dirname so it works inside app.asar in packaged builds.
+// `import "dotenv/config"` reads from process.cwd() which is the exe dir — not the asar.
+import dotenv from "dotenv";
+import path from "path";
+dotenv.config({ path: path.join(__dirname, "..", ".env") });
 
 import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, protocol, session } from "electron";
 import fs from "node:fs";
-import path from "path";
 import {
   runOllamaCheckStatus,
   runListModels,
@@ -536,7 +540,11 @@ ipcMain.handle("device:ensureAuth", async () => {
     log(`[ipc] device:ensureAuth called`);
     const auth = await ensureDeviceAuthAsync({ log });
     log(`[ipc] device:ensureAuth success device_id=${String(auth.device_id || "")}`);
-    // Ensure heartbeat loop is running after an explicit reconnect.
+    // Stop the old heartbeat loop BEFORE starting a new one. Without this, the old
+    // loop keeps running with the stale JWT, gets 401, fires onDeactivated, and
+    // disconnects the renderer right after a successful reconnect.
+    try { deviceHeartbeatStopper?.(); } catch { }
+    deviceHeartbeatStopper = null;
     try {
       const runner = await ensureDeviceAuthAndStartHeartbeat({
         log,
