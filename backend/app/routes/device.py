@@ -873,15 +873,51 @@ async def get_device_admin(device_id: str = Path(...), authorization: Optional[s
         "device_usage_logs",
         f"select=*&device_id=eq.{quote(device_id, safe='')}&order=logged_at.desc&limit=50",
     )
-    available_models = await postgrest_get(
-        "activated_models",
-        "select=id,model_id,model_name,domain&limit=200",
-    )
+
+    # Fetch the linked user's activated models (Active Pods).
+    # Used both for the "Allocate Models" dropdown AND to surface user activations
+    # that haven't yet been explicitly device-allocated (so admin sees the full picture).
+    registered_by = device.get("registered_by")
+    user_activated: list = []
+    if registered_by:
+        try:
+            user_activated = await postgrest_get(
+                "activated_models",
+                f"select=id,model_id,model_name,domain,activated_at&user_id=eq.{quote(str(registered_by), safe='')}&limit=200",
+            ) or []
+        except Exception:
+            user_activated = []
+
+    # Merge: add user-activated models not already in device_models so admin can see
+    # which models the linked user has active even before explicit device allocation.
+    device_model_ids = {m.get("model_id") for m in (models or []) if m.get("model_id")}
+    merged_models = list(models or [])
+    for um in user_activated:
+        if um.get("model_id") not in device_model_ids:
+            merged_models.append({
+                "id": um.get("id"),
+                "device_id": device_id,
+                "model_id": um.get("model_id"),
+                "model_name": um.get("model_name"),
+                "domain": um.get("domain"),
+                "ollama_model_name": None,
+                "is_downloaded": False,
+                "allocated_at": um.get("activated_at"),
+                "last_synced_at": None,
+                "source": "user_activated",
+            })
+
+    # Available models for allocation: scope to the linked user's activations.
+    # Falls back to empty list when no user is linked (admin can still type a model id).
+    available_models = [
+        {"id": m.get("id"), "model_id": m.get("model_id"), "model_name": m.get("model_name"), "domain": m.get("domain")}
+        for m in user_activated
+    ]
 
     return {
         "success": True,
         "device": device,
-        "device_models": models,
+        "device_models": merged_models,
         "sync_logs": sync_logs,
         "usage_logs": usage_logs,
         "available_models": available_models,

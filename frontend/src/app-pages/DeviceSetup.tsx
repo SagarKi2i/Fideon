@@ -296,7 +296,12 @@ export default function DeviceSetup() {
         return;
       }
 
-      toast({ title: "Connecting…", description: "Registering device with fresh credentials." });
+      toast({ title: "Connecting…", description: "Registering device with fresh credentials. This may take a few seconds." });
+      
+      // Wait briefly before attempting ensureAuth to allow any backend state changes
+      // (like an admin re-enabling the device) to propagate.
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
       const res = await window.electron.device.ensureAuth();
 
       if (res?.success && res.device_jwt) {
