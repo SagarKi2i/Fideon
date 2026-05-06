@@ -1,0 +1,8 @@
+# Optional OCR dependencies (Paddle).
+#
+# These frequently fail on slim images / some Python versions due to missing
+# system libs or missing wheels. Keep them separate so Docker builds can
+# succeed without OCR, and enable explicitly when needed.
+paddleocr
+paddlepaddle
+
