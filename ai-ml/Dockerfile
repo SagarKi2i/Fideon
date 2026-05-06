@@ -2,8 +2,8 @@ FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 
 WORKDIR /app
 
-# Install cloudflared + dependencies
-RUN apt-get update && apt-get install -y curl git && \
+# Install cloudflared + build tools (needed by setup.sh at runtime)
+RUN apt-get update && apt-get install -y curl git build-essential cmake libgomp1 && \
     mkdir -p --mode=0755 /usr/share/keyrings && \
     curl -fsSL https://pkg.cloudflare.com/cloudflare-public-v2.gpg | \
     tee /usr/share/keyrings/cloudflare-public-v2.gpg >/dev/null && \
@@ -13,27 +13,18 @@ RUN apt-get update && apt-get install -y curl git && \
     apt-get update && apt-get install -y cloudflared && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install Python packages
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install FileBrowser (port 8080 file manager)
+RUN curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
 
-# Copy all code
+# Copy code + requirements (pip install happens at first boot into /workspace/venv)
+COPY requirements.txt .
 COPY . .
 
 # Permissions
 RUN chmod +x startup.sh setup.sh
 
-# Build llama.cpp
-RUN bash setup.sh --skip-pip
-
-# Create directories
-RUN mkdir -p /workspace/uploads \
-             /workspace/fine_tuning/training_samples \
-             /workspace/fine_tuning/models \
-             /workspace/logs
-
-EXPOSE 8000
+EXPOSE 8000 8080 8188 8888
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["/app/startup.sh"]
+CMD ["/bin/bash", "-c", "/app/startup.sh & /start.sh"]

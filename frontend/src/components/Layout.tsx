@@ -31,6 +31,8 @@ import {
 } from "@/components/ui/breadcrumb";
 import { Skeleton } from "@/components/ui/skeleton";
 import { IdleSessionWatcher } from "@/components/IdleSessionWatcher";
+import { DeviceStatusIndicator } from "@/components/DeviceStatusIndicator";
+import { getStoredDeviceJwt, clearStoredDeviceJwt } from "@/lib/deviceApi";
 
 interface LayoutProps {
   children: ReactNode;
@@ -144,6 +146,23 @@ export function Layout({ children }: LayoutProps) {
 
   const handleLogout = async () => {
     try {
+      // Force device offline if one is connected
+      const deviceJwt = getStoredDeviceJwt();
+      if (deviceJwt) {
+        try {
+          await fetch(apiUrl("/api/v1/devices/offline"), {
+            method: "POST",
+            headers: { Authorization: `Bearer ${deviceJwt}` },
+          });
+        } catch (e) {
+          // ignore network errors for offline ping
+        }
+      }
+      if (typeof window !== "undefined" && window.electron?.device?.clearAuth) {
+        await window.electron.device.clearAuth();
+      }
+      clearStoredDeviceJwt();
+
       // Revoke session server-side through the backend (which also writes the audit row).
       const { data: sessData } = await supabase.auth.getSession();
       const token = sessData.session?.access_token;
@@ -214,10 +233,19 @@ export function Layout({ children }: LayoutProps) {
   return (
     <SidebarProvider defaultOpen={true}>
       <IdleSessionWatcher />
+      {/* Skip link — keyboard users can jump straight to page content */}
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded focus:bg-background focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:shadow-md focus:ring-2 focus:ring-ring"
+      >
+        Skip to main content
+      </a>
+      {/* Screen-reader live region — components can announce status changes here */}
+      <div id="sr-announcer" role="status" aria-live="polite" aria-atomic="true" className="sr-only" />
       <div className="flex min-h-screen w-full bg-background">
         <AppSidebar />
         <div className="flex-1 flex flex-col min-w-0">
-          <header className="sticky top-0 z-10 flex h-14 items-center gap-2 border-b border-border bg-card/80 backdrop-blur-sm px-3 md:px-4">
+          <header role="banner" className="sticky top-0 z-10 flex h-14 items-center gap-2 border-b border-border bg-card/80 backdrop-blur-sm px-3 md:px-4">
             <SidebarTrigger className="text-foreground" />
             <div className="min-w-0">
               <Breadcrumb>
@@ -270,6 +298,7 @@ export function Layout({ children }: LayoutProps) {
             </div>
             <div className="flex-1" />
             <div className="flex items-center gap-2 md:gap-3">
+              <DeviceStatusIndicator />
               <Button variant="ghost" size="icon" onClick={toggleTheme} aria-label="Toggle dark mode">
                 {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
               </Button>
@@ -318,7 +347,7 @@ export function Layout({ children }: LayoutProps) {
               </DropdownMenu>
             </div>
           </header>
-          <main className="flex-1 p-3 md:p-6 overflow-auto">
+          <main id="main-content" role="main" className="flex-1 p-3 md:p-6 overflow-auto">
             {children}
           </main>
         </div>

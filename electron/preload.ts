@@ -43,6 +43,13 @@ contextBridge.exposeInMainWorld("electron", {
     getAuth: () => ipcRenderer.invoke("device:getAuth"),
     clearAuth: () => ipcRenderer.invoke("device:clearAuth"),
     ensureAuth: () => ipcRenderer.invoke("device:ensureAuth"),
+    getDeviceInfo: () => ipcRenderer.invoke("device:getDeviceInfo"),
+    onDeactivated: (callback: () => void) => {
+      ipcRenderer.on("device:deactivated", () => callback());
+    },
+    removeDeactivatedListener: () => {
+      ipcRenderer.removeAllListeners("device:deactivated");
+    },
   },
 
   webhooks: {
@@ -56,6 +63,8 @@ contextBridge.exposeInMainWorld("electron", {
     ) => ipcRenderer.invoke("webhooks:update", accessToken, id, patch),
     delete: (accessToken: string, id: string) => ipcRenderer.invoke("webhooks:delete", accessToken, id),
     rotateSecret: (accessToken: string, id: string) => ipcRenderer.invoke("webhooks:rotateSecret", accessToken, id),
+    testEvent: (accessToken: string, eventType: string, payload: Record<string, unknown>) =>
+      ipcRenderer.invoke("webhooks:testEvent", accessToken, eventType, payload),
   },
 
   model: {

@@ -6,12 +6,13 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
-import { Webhook, Copy, Trash2, RotateCcw } from "lucide-react";
+import { Webhook, Copy, Trash2, RotateCcw, Send } from "lucide-react";
 import {
   createWebhook,
   deleteWebhook,
   fetchWebhooks,
   rotateWebhookSecret,
+  sendTestEvent,
   updateWebhook,
   type WebhookRow,
 } from "@/lib/webhooksApi";
@@ -34,6 +35,8 @@ export function WebhooksSettingsPanel() {
   const [newEvents, setNewEvents] = useState<Set<string>>(new Set(CANONICAL_EVENTS));
   const [creating, setCreating] = useState(false);
   const [revealedSecret, setRevealedSecret] = useState<string | null>(null);
+  const [testEventType, setTestEventType] = useState<string>(CANONICAL_EVENTS[0]);
+  const [sendingTest, setSendingTest] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -94,6 +97,26 @@ export function WebhooksSettingsPanel() {
       });
     } finally {
       setCreating(false);
+    }
+  };
+
+  const handleSendTest = async () => {
+    if (rows.filter((w: any) => w.is_active).length === 0) {
+      toast({ title: "No active webhooks", description: "Enable at least one webhook first.", variant: "destructive" });
+      return;
+    }
+    try {
+      setSendingTest(true);
+      const { event_id } = await sendTestEvent(testEventType, { source: "manual_test" });
+      toast({ title: "Test event sent", description: `Event ID: ${event_id}` });
+    } catch (e) {
+      toast({
+        title: "Send failed",
+        description: e instanceof Error ? e.message : "Unknown error",
+        variant: "destructive",
+      });
+    } finally {
+      setSendingTest(false);
     }
   };
 
@@ -180,10 +203,37 @@ export function WebhooksSettingsPanel() {
 
       <Card className="bg-card border-border shadow-card">
         <CardHeader>
-          <CardTitle className="text-card-foreground text-base">Registered endpoints</CardTitle>
-          <CardDescription>
-            {loading ? "Loading…" : rows.length === 0 ? "No webhooks yet." : `${rows.length} configured`}
-          </CardDescription>
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div>
+              <CardTitle className="text-card-foreground text-base">Registered endpoints</CardTitle>
+              <CardDescription>
+                {loading ? "Loading…" : rows.length === 0 ? "No webhooks yet." : `${rows.length} configured`}
+              </CardDescription>
+            </div>
+            {rows.length > 0 && (
+              <div className="flex items-center gap-2">
+                <select
+                  className="text-xs border border-border rounded px-2 py-1 bg-background text-foreground"
+                  value={testEventType}
+                  onChange={(e) => setTestEventType(e.target.value)}
+                >
+                  {CANONICAL_EVENTS.map((ev: any) => (
+                    <option key={ev} value={ev}>{ev}</option>
+                  ))}
+                </select>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void handleSendTest()}
+                  disabled={sendingTest}
+                >
+                  <Send className="h-3.5 w-3.5 mr-1" />
+                  {sendingTest ? "Sending…" : "Send test"}
+                </Button>
+              </div>
+            )}
+          </div>
         </CardHeader>
         <CardContent className="space-y-3">
           {rows.map((w: any) => (

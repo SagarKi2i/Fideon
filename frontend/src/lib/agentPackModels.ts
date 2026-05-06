@@ -1,24 +1,29 @@
 /**
- * Maps signup wizard agent pack ids (see Signup.tsx AGENT_PACKS) to insurance marketplace model ids.
- * A model is unlocked for a tenant if it appears in at least one of the tenant's selected packs.
+ * Maps agent pack IDs to insurance marketplace model IDs.
+ * A model is accessible to a tenant if it appears in at least one of the tenant's packs.
+ *
+ * Pack structure (function-based, 5 packs — mirrors sir's doc v3):
+ *   underwriting — quote generation, policy comparison, ACORD, coverage validation, risk tools
+ *   claims       — FNOL, carrier claims intake, adjudication, fraud detection, subrogation
+ *   distribution — document retrieval, renewal review, broker advisory, communication, loss runs
+ *   mga          — all MGA segment pods
+ *   carrier      — all Carrier segment pods
+ *
+ * A pod may belong to multiple packs (e.g. policy-comparison is in both underwriting + distribution).
+ * The modelIdsForAgentPacks() union handles deduplication automatically.
  */
 export const AGENT_PACK_TO_MODEL_IDS: Record<string, readonly string[]> = {
   underwriting: [
     "quote-generation",
+    "policy-comparison",          // also in distribution
     "coverage-validation",
-    "acord-parser",
-    "carrier-submission-intake",
     "endorsement-intelligence",
+    "acord_form_understanding",
+    "compliance-checker",
     "risk-appetite",
-    "broker-advisory",
+    "multi-document",
+    "red-flag-detector",
     "premium-estimation",
-    "mga-binding-authority",
-    "mga-program-underwriting",
-    "mga-capacity-matching",
-    "carrier-submission-triage",
-    "carrier-risk-scoring",
-    "carrier-pricing-engine",
-    "carrier-reinsurance",
   ],
   claims: [
     "claims-fnol",
@@ -28,20 +33,33 @@ export const AGENT_PACK_TO_MODEL_IDS: Record<string, readonly string[]> = {
     "carrier-subrogation",
   ],
   distribution: [
-    "policy-comparison",
+    "policy-comparison",          // also in underwriting
     "document-retrieval",
     "renewal-review",
+    "broker-advisory",
     "communication-generator",
-    "mga-bordereaux-generator",
-    "mga-producer-management",
-    "carrier-policy-issuance",
+    "loss-run-reporting",
   ],
-  compliance: [
-    "compliance-checker",
-    "red-flag-detector",
+  mga: [
+    "mga-binding-authority",
+    "mga-program-underwriting",
+    "mga-bordereaux-generator",
+    "mga-capacity-matching",
+    "mga-producer-management",
     "mga-treaty-compliance",
   ],
-  "agentic-rag": ["multi-document", "document-retrieval"],
+  carrier: [
+    "carrier-submission-intake",
+    "carrier-submission-triage",
+    "carrier-risk-scoring",
+    "carrier-pricing-engine",
+    "carrier-claims-intake",
+    "carrier-claims-adjudication",
+    "carrier-fraud-detection",
+    "carrier-subrogation",
+    "carrier-policy-issuance",
+    "carrier-reinsurance",
+  ],
 };
 
 export function modelIdsForAgentPacks(packIds: string[]): Set<string> {

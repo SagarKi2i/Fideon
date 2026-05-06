@@ -429,7 +429,16 @@ app.whenReady().then(async () => {
   }
 
   try {
-    const runner = await ensureDeviceAuthAndStartHeartbeat({ log, heartbeatSeconds: 60 });
+    const runner = await ensureDeviceAuthAndStartHeartbeat({
+      log,
+      heartbeatSeconds: 60,
+      onDeactivated: () => {
+        log(`[device] device deactivated by admin — notifying renderer`);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("device:deactivated");
+        }
+      },
+    });
     deviceHeartbeatStopper = runner.stop;
   } catch (err) {
     log(`[device] ensureDeviceAuthAndStartHeartbeat failed: ${formatUnknownError(err)}`);
@@ -529,7 +538,16 @@ ipcMain.handle("device:ensureAuth", async () => {
     log(`[ipc] device:ensureAuth success device_id=${String(auth.device_id || "")}`);
     // Ensure heartbeat loop is running after an explicit reconnect.
     try {
-      const runner = await ensureDeviceAuthAndStartHeartbeat({ log, heartbeatSeconds: 60 });
+      const runner = await ensureDeviceAuthAndStartHeartbeat({
+        log,
+        heartbeatSeconds: 60,
+        onDeactivated: () => {
+          log(`[device] device deactivated by admin — notifying renderer`);
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send("device:deactivated");
+          }
+        },
+      });
       deviceHeartbeatStopper = runner.stop;
     } catch (err) {
       log(`[device] ensureDeviceAuthAndStartHeartbeat failed: ${formatUnknownError(err)}`);
@@ -633,6 +651,24 @@ ipcMain.handle("webhooks:rotateSecret", async (_event, accessToken: string, id: 
     return { success: false, error: String(err) };
   }
 });
+
+ipcMain.handle(
+  "webhooks:testEvent",
+  async (_event, accessToken: string, eventType: string, payload: Record<string, unknown>) => {
+    try {
+      const r = await callBackendApi({
+        path: "/api/v1/webhooks/test-event",
+        method: "POST",
+        accessToken,
+        body: { event_type: eventType, payload },
+      });
+      if (!r.ok) return { success: false, status: r.status, payload: r.payload };
+      return { success: true, event_id: r.payload?.event_id };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  },
+);
 
 // IPC: auto-launch placeholder using OS login items (where supported)
 ipcMain.handle("settings:getAutoLaunch", async () => {

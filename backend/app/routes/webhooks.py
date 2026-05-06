@@ -148,7 +148,7 @@ async def update_webhook(webhook_id: str, request: Request, authorization: Optio
         if not url or len(url) > 2048:
             raise HTTPException(status_code=400, detail="url is required (max 2048 chars)")
         try:
-            validate_webhook_url(url)
+            await async_validate_webhook_url(url)
         except SSRFBlockedError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         patch["url"] = url

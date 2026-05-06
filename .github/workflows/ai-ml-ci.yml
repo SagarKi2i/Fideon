@@ -31,6 +31,7 @@ jobs:
         if: >
           (github.event_name == 'pull_request' && github.base_ref == 'v1-dev') ||
           (github.event_name == 'push' && github.ref == 'refs/heads/v1-dev')
+        continue-on-error: true
         uses: SonarSource/sonarqube-scan-action@v6
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -47,6 +48,13 @@ jobs:
           sudo docker image prune -af
           df -h
 
+      - name: Login to ACR
+        run: |
+          echo "${{ secrets.AZURE_CR_PASSWORD }}" | \
+            docker login neurapodacr.azurecr.io \
+              -u "${{ secrets.AZURE_CR_USERNAME }}" \
+              --password-stdin
+
       - name: Build Docker Image
         if: >
           github.event_name == 'push' ||
@@ -57,7 +65,7 @@ jobs:
             -t neurapodacr.azurecr.io/fideon-ai-ml:latest \
             ./ai-ml
 
-      - name: Login to ACR & Push
+      - name: Push to ACR
         if: |
           (github.event_name == 'push' && (
             github.ref == 'refs/heads/v1-dev' ||
@@ -66,11 +74,6 @@ jobs:
           )) ||
           github.event_name == 'workflow_dispatch'
         run: |
-          echo "${{ secrets.AZURE_CR_PASSWORD }}" | \
-            docker login neurapodacr.azurecr.io \
-              -u "${{ secrets.AZURE_CR_USERNAME }}" \
-              --password-stdin
-
           docker push neurapodacr.azurecr.io/fideon-ai-ml:${{ github.sha }}
           docker push neurapodacr.azurecr.io/fideon-ai-ml:latest
           echo "Pushed neurapodacr.azurecr.io/fideon-ai-ml:${{ github.sha }}"

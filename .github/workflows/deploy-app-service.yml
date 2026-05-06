@@ -155,6 +155,10 @@ jobs:
           NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
           NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
           CORS_ALLOWED_ORIGINS: ${{ secrets.CORS_ALLOWED_ORIGINS }}
+          NEXT_PUBLIC_APP_URL: ${{ secrets.NEXT_PUBLIC_APP_URL }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          RESEND_FROM_EMAIL: ${{ secrets.RESEND_FROM_EMAIL }}
+          FRONTEND_URL: ${{ secrets.FRONTEND_URL }}
         run: |
           set -e
           az account set --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
@@ -178,6 +182,11 @@ jobs:
             if [ -n "$API_URL" ]; then
               FE_SETTINGS+=("NEXT_PUBLIC_API_URL=${API_URL}")
             fi
+            # Pin the app's own public URL so password-reset redirect_to is always correct
+            # regardless of which URL the user accessed the frontend from.
+            FE_APP_NAME="${{ vars.AZURE_WEBAPP_FRONTEND }}"
+            APP_URL="${NEXT_PUBLIC_APP_URL:-https://${FE_APP_NAME}.azurewebsites.net}"
+            FE_SETTINGS+=("NEXT_PUBLIC_APP_URL=${APP_URL}")
             # Disable Web Locks to prevent auth deadlock behind Azure APIM
             # (navigator.locks stalls in NODE_ENV=production, causing 403s on all Supabase queries)
             FE_SETTINGS+=("NEXT_PUBLIC_SUPABASE_AUTH_NO_WEB_LOCKS=true")
@@ -227,6 +236,27 @@ jobs:
             if [ -n "$FE_APP" ]; then
               SETTINGS+=("CORS_ALLOWED_ORIGINS=https://${FE_APP}.azurewebsites.net,http://localhost:3000,http://localhost:3003")
             fi
+          fi
+          if [ -n "$RESEND_API_KEY" ]; then
+            SETTINGS+=("RESEND_API_KEY=${RESEND_API_KEY}")
+          fi
+          if [ -n "$RESEND_FROM_EMAIL" ]; then
+            SETTINGS+=("RESEND_FROM_EMAIL=${RESEND_FROM_EMAIL}")
+          fi
+          # FRONTEND_URL: used in server-generated emails (invite approval, etc.)
+          # Use explicit secret; fall back to NEXT_PUBLIC_APP_URL or derive from frontend app name.
+          BE_FRONTEND_URL="${FRONTEND_URL}"
+          if [ -z "$BE_FRONTEND_URL" ] && [ -n "$NEXT_PUBLIC_APP_URL" ]; then
+            BE_FRONTEND_URL="$NEXT_PUBLIC_APP_URL"
+          fi
+          if [ -z "$BE_FRONTEND_URL" ]; then
+            FE_APP_VAR="${{ vars.AZURE_WEBAPP_FRONTEND }}"
+            if [ -n "$FE_APP_VAR" ]; then
+              BE_FRONTEND_URL="https://${FE_APP_VAR}.azurewebsites.net"
+            fi
+          fi
+          if [ -n "$BE_FRONTEND_URL" ]; then
+            SETTINGS+=("FRONTEND_URL=${BE_FRONTEND_URL}")
           fi
 
           az webapp config appsettings set \

@@ -2,11 +2,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { 
-  Shield, 
-  Heart, 
-  Building2, 
-  Scale, 
+import {
+  Shield,
+  Heart,
+  Building2,
+  Scale,
   Plane,
   CheckCircle2,
   ShieldCheck,
@@ -70,7 +70,7 @@ function getModelVersion(modelId: string): string {
     "policy-comparison": "v2.0",
     "document-retrieval": "v2.3",
     "claims-fnol": "v1.9",
-    "acord-parser": "v2.2",
+    "acord_form_understanding": "v2.2",
     "carrier-submission-intake": "v1.7",
     "carrier-claims-adjudication": "v1.8",
   };
@@ -111,7 +111,7 @@ const insuranceSegments: Record<string, { label: string; icon: any; description:
 };
 
 // Convert insurance models to ModelCard format
-const convertInsuranceModels = (models: InsuranceModel[]): ModelCard[] => 
+const convertInsuranceModels = (models: InsuranceModel[]): ModelCard[] =>
   models.map((model: any) => ({
     id: model.id,
     name: model.name,
@@ -481,8 +481,8 @@ export default function Marketplace() {
   const filteredModels = getFilteredModels();
 
   const groupedModels = filteredModels.reduce((acc: any, model: any) => {
-    const key = model.domain === "insurance" && model.segment 
-      ? `insurance-${model.segment}` 
+    const key = model.domain === "insurance" && model.segment
+      ? `insurance-${model.segment}`
       : model.domain;
     if (!acc[key]) {
       acc[key] = [];
@@ -573,8 +573,8 @@ export default function Marketplace() {
       showPlanLimitHint && !actionBlockedByRole ? "Plan limit reached" : actionButtonContent.label;
 
     return (
-      <Card 
-        key={model.id} 
+      <Card
+        key={model.id}
         style={{ animationDelay: `${index * 50}ms` }}
         className={cn(
           "group relative overflow-hidden flex flex-col h-full min-h-[280px] md:min-h-[340px] transition-all duration-500 border backdrop-blur-sm touch-manipulation animate-scale-in",
@@ -584,7 +584,7 @@ export default function Marketplace() {
       >
         {/* Enhanced Background Gradient Effect */}
         <div className="absolute inset-0 bg-gradient-primary opacity-0 group-hover:opacity-5 transition-opacity duration-300 pointer-events-none" />
-        
+
         <div
           className={cn(
             "relative flex flex-col flex-1 min-h-0",
@@ -608,7 +608,7 @@ export default function Marketplace() {
               </Badge>
             </div>
           )}
-          
+
           <div className="relative flex items-center justify-center pt-5 md:pt-8 pb-3 md:pb-5 bg-gradient-subtle">
             <div className="p-3 md:p-4 rounded-lg md:rounded-xl bg-gradient-to-br from-primary/15 to-primary/5 group-hover:from-primary/20 group-hover:to-primary/10 group-hover:scale-110 transition-all duration-500 shadow-card">
               <Icon className="h-8 w-8 md:h-11 md:w-11 text-primary group-hover:animate-float" />
@@ -707,8 +707,8 @@ export default function Marketplace() {
           <Tabs value={selectedDomain} onValueChange={(v) => { setSelectedDomain(v); setSelectedInsuranceSegment("all"); }} className="w-full">
             <div className="w-full overflow-x-auto scrollbar-hide">
             <TabsList className="inline-flex h-10 md:h-12 w-max min-w-full flex-nowrap items-center justify-start rounded-lg md:rounded-xl bg-muted/50 backdrop-blur-sm p-1 gap-1">
-              <TabsTrigger 
-                value="all" 
+              <TabsTrigger
+                value="all"
                 className="shrink-0 rounded-md md:rounded-lg px-3 md:px-4 text-xs md:text-sm data-[state=active]:bg-card data-[state=active]:shadow-card transition-all whitespace-nowrap touch-manipulation"
               >
                 <Sparkles className="h-3.5 w-3.5 md:h-4 md:w-4 mr-1.5 md:mr-2" />
@@ -720,8 +720,8 @@ export default function Marketplace() {
                 const Icon = domainIcons[domain];
                 const count = domainCounts[domain as keyof typeof domainCounts] ?? 0;
                 return (
-                  <TabsTrigger 
-                    key={domain} 
+                  <TabsTrigger
+                    key={domain}
                     value={domain}
                     className="shrink-0 rounded-md md:rounded-lg px-3 md:px-4 text-xs md:text-sm data-[state=active]:bg-card data-[state=active]:shadow-card transition-all whitespace-nowrap touch-manipulation"
                   >
@@ -742,20 +742,20 @@ export default function Marketplace() {
               <Tabs value={selectedInsuranceSegment} onValueChange={setSelectedInsuranceSegment} className="w-full">
                 <div className="w-full overflow-x-auto scrollbar-hide">
                 <TabsList className="inline-flex h-9 w-max min-w-full flex-nowrap items-center justify-start rounded-lg bg-primary/5 backdrop-blur-sm p-1 gap-1">
-                  <TabsTrigger 
-                    value="all" 
+                  <TabsTrigger
+                    value="all"
                     className="shrink-0 rounded-md px-4 text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground transition-all whitespace-nowrap"
                   >
                     All Insurance
                     <Badge variant="secondary" className="ml-2 text-[10px] bg-background/50">{allInsuranceModels.length}</Badge>
                   </TabsTrigger>
                   {Object.entries(insuranceSegments).map(([segment, { label, icon: SegmentIcon }]) => {
-                    const count = segment === "broker" ? brokerModelCards.length 
-                      : segment === "mga" ? mgaModelCards.length 
+                    const count = segment === "broker" ? brokerModelCards.length
+                      : segment === "mga" ? mgaModelCards.length
                       : carrierModelCards.length;
                     return (
-                      <TabsTrigger 
-                        key={segment} 
+                      <TabsTrigger
+                        key={segment}
                         value={segment}
                         className="shrink-0 rounded-md px-4 text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground transition-all whitespace-nowrap"
                       >
@@ -805,7 +805,7 @@ export default function Marketplace() {
               </div>
             </div>
           ))}
-          
+
           {!loading && filteredModels.length === 0 && (
             <div className="text-center py-12 md:py-20">
               <div className="inline-flex items-center justify-center w-12 h-12 md:w-16 md:h-16 rounded-full bg-muted mb-3 md:mb-4">

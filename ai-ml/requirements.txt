@@ -17,6 +17,8 @@
 # spaCy model (required by presidio-analyzer):
 #   python -m spacy download en_core_web_sm
 # =============================================================================
+# PyTorch CUDA wheels — must come from PyTorch index, not PyPI
+--extra-index-url https://download.pytorch.org/whl/cu130
 
 # ── PyTorch stack (CUDA 13.0) ─────────────────────────────────────────────────
 # +cu130 suffix forces the CUDA 13.0 wheel from the PyTorch index, not the
@@ -64,15 +66,15 @@ presidio-anonymizer==2.2.0
 spacy==3.7.4
 
 # ── Transformer fine-tuning stack ────────────────────────────────────────────
-# transformers 4.50.0: fixes empty cache_position crash and get_rope_index
-# empty-list crash in Qwen2-VL generation (both present in 4.49.x).
-transformers==4.50.0
-accelerate==1.0.0
+# transformers 4.56.2: satisfies surya-ocr 0.17.1 (>=4.56.1) and trl 1.3.0 (>=4.56.2)
+transformers==4.56.2
+accelerate==1.13.0
 peft==0.19.1
 trl==1.3.0
 bitsandbytes==0.49.2
-safetensors==0.4.3
-datasets==3.0.0
+safetensors==0.7.0
+# datasets 4.8.5: required by trl 1.3.0 (>=4.7.0)
+datasets==4.8.5
 # peft 0.19.x requires huggingface-hub>=0.28.0
 huggingface-hub==0.28.0
 qwen-vl-utils==0.0.14
@@ -83,14 +85,14 @@ einops==0.8.0
 av==12.3.0
 
 # ── Surya OCR ─────────────────────────────────────────────────────────────────
-surya-ocr==0.13.0
+# 0.17.x requires torch>=2.7.0 (satisfied by 2.11.0) and transformers>=4.56.1
+surya-ocr==0.17.1
 
 # ── Document / PDF processing ────────────────────────────────────────────────
 PyMuPDF==1.27.2.3
-# 10.4.0 keeps compatibility with surya-ocr 0.13.0 and torchvision 0.26.0.
 Pillow==10.4.0
-# 1.26.4 keeps numpy 1.x ABI; prevents 2.x breaking changes (surya, docling).
-numpy==1.26.4
+# numpy 2.4.4: compatible with surya-ocr 0.17.1 and docling 2.92.0
+numpy==2.4.4
 PyPDF2==3.0.1
 pypdf==6.10.2
 python-docx==1.1.2
@@ -98,7 +100,9 @@ openpyxl==3.1.5
 pdfplumber==0.11.9
 rapidfuzz==3.14.5
 pytesseract==0.3.10
-docling==2.5.0
+# docling 2.92.0 + pypdfium2 4.30.0: satisfies surya-ocr 0.17.1 and docling constraints
+docling==2.92.0
+pypdfium2==4.30.0
 
 # ── Vector / RAG ─────────────────────────────────────────────────────────────
 psycopg[binary]==3.1.0
@@ -114,7 +118,14 @@ supabase==2.5.0
 # ── Testing ───────────────────────────────────────────────────────────────────
 pytest==8.0.0
 
+# ── JupyterLab (port 8888) ────────────────────────────────────────────────────
+jupyterlab>=4.0.0
+
 # ── Optional: PaddleOCR secondary OCR ────────────────────────────────────────
 # Uncomment to enable SCANNED_USE_PADDLE_SECONDARY=true flow.
 # paddleocr
 # paddlepaddle
+
+# ── Optional: DeepEval LLM-judge metrics ─────────────────────────────────────
+# Install manually if needed:  pip install deepeval
+# deepeval>=0.21.0

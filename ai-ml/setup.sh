@@ -10,13 +10,21 @@
 #   Only /workspace/ (the network volume) persists. Installing here means
 #   setup.sh only needs to run once — not after every restart.
 # =============================================================================
-set -euo pipefail
+# -e is intentionally omitted: cmake --build can receive SIGTERM at the very
+# end of a long build (RunPod timeout / container preemption) and would exit
+# non-zero even though all binaries were already written to disk.  We check
+# for the binary explicitly after the build instead of relying on exit codes.
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LLAMA_DIR="/workspace/llama.cpp"
 BIN_DIR="/workspace/bin"
 SKIP_PIP=0
-for arg in "$@"; do [[ "$arg" == "--skip-pip" ]] && SKIP_PIP=1; done
+SKIP_VERIFY=0
+for arg in "$@"; do
+  [[ "$arg" == "--skip-pip" ]]    && SKIP_PIP=1
+  [[ "$arg" == "--skip-verify" ]] && SKIP_VERIFY=1
+done
 
 mkdir -p "$BIN_DIR"
 
@@ -50,11 +58,18 @@ else
 fi
 
 cd "$LLAMA_DIR"
-cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release -j$(nproc)
+
+# Skip cmake entirely if the binary is already present (e.g. interrupted build
+# that wrote the binary before the SIGTERM arrived).
+if [[ -f build/bin/llama-quantize ]]; then
+  echo "  llama-quantize already built — skipping cmake"
+else
+  cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+  cmake --build build --config Release -j$(nproc)
+fi
 
 # Install to /workspace/bin so binaries survive pod restarts
-cp build/bin/llama-quantize "$BIN_DIR/llama-quantize"
+cp build/bin/llama-quantize "$BIN_DIR/llama-quantize" 2>/dev/null || true
 
 # ── 3. llama.cpp Python dependencies (needed by convert_hf_to_gguf.py) ───────
 echo ""
@@ -75,17 +90,21 @@ chmod +x "$BIN_DIR/llama-convert-hf-to-gguf"
 echo "✓ llama.cpp built with CUDA — binaries in $BIN_DIR"
 
 # ── 4. Verify ─────────────────────────────────────────────────────────────────
-echo ""
-echo "[4/4] Verifying..."
-export PATH="$BIN_DIR:$PATH"
-python3 -c "import torch; print(f'✓ torch {torch.__version__}  |  CUDA: {torch.cuda.is_available()}')"
-python3 -c "import transformers; print(f'✓ transformers {transformers.__version__}')"
-python3 -c "import peft; print(f'✓ peft {peft.__version__}')"
-python3 -c "import bitsandbytes; print(f'✓ bitsandbytes {bitsandbytes.__version__}')"
-python3 -c "import boto3; print(f'✓ boto3 {boto3.__version__}')"
-python3 -c "import gguf; print(f'✓ gguf (llama.cpp converter dependency)')"
-"$BIN_DIR/llama-quantize" --help > /dev/null && echo "✓ llama-quantize (CUDA)"
-"$BIN_DIR/llama-convert-hf-to-gguf" --help > /dev/null && echo "✓ llama-convert-hf-to-gguf"
+if [[ "$SKIP_VERIFY" -eq 0 ]]; then
+  echo ""
+  echo "[4/4] Verifying..."
+  export PATH="$BIN_DIR:$PATH"
+  python3 -c "import torch; print(f'✓ torch {torch.__version__}  |  CUDA: {torch.cuda.is_available()}')"
+  python3 -c "import transformers; print(f'✓ transformers {transformers.__version__}')"
+  python3 -c "import peft; print(f'✓ peft {peft.__version__}')"
+  python3 -c "import bitsandbytes; print(f'✓ bitsandbytes {bitsandbytes.__version__}')"
+  python3 -c "import boto3; print(f'✓ boto3 {boto3.__version__}')"
+  python3 -c "import gguf; print(f'✓ gguf (llama.cpp converter dependency)')"
+  "$BIN_DIR/llama-quantize" --help > /dev/null && echo "✓ llama-quantize (CUDA)"
+  "$BIN_DIR/llama-convert-hf-to-gguf" --help > /dev/null && echo "✓ llama-convert-hf-to-gguf"
+else
+  echo "[4/4] Skipping verification (--skip-verify)"
+fi
 
 echo ""
 echo "================================================================"

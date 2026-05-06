@@ -11,7 +11,7 @@ from urllib.parse import quote
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 
-from app.core.config import SUPABASE_ANON_KEY, SUPABASE_URL
+from app.core.config import SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL
 from app.core.limiter import limiter
 from app.core.supabase import (
     insert_auth_audit_row,
@@ -24,6 +24,9 @@ from app.core.supabase import (
 router = APIRouter()
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_PASSWORD_STRENGTH_RE = re.compile(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d]).+$")
+_PASSWORD_MIN = 8
+_PASSWORD_MAX = 72
 
 
 def _anon_headers() -> dict:
@@ -209,6 +212,50 @@ async def signup(request: Request):
         raise HTTPException(status_code=400, detail="Invalid email address")
     if not password:
         raise HTTPException(status_code=400, detail="Password is required")
+    if len(password) < _PASSWORD_MIN or len(password) > _PASSWORD_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Password must be {_PASSWORD_MIN}–{_PASSWORD_MAX} characters.",
+        )
+    if not _PASSWORD_STRENGTH_RE.match(password):
+        raise HTTPException(
+            status_code=400,
+            detail="Password must contain at least 1 uppercase letter, 1 lowercase letter, 1 number, and 1 special character.",
+        )
+
+    # ── Seat-limit pre-flight check (before calling GoTrue) ──────────────────
+    # Enforcing here avoids leaving an orphaned auth.users row when the tenant
+    # is already at its seat limit — the DB trigger is the final safety net.
+    tenant_name_meta = str(data_meta.get("tenant_name") or "").strip()
+    if tenant_name_meta:
+        try:
+            tenant_rows = await postgrest_get(
+                "tenants",
+                f"select=id,max_users&is_active=eq.true&name=eq.{quote(tenant_name_meta, safe='')}&limit=1",
+            )
+            if tenant_rows:
+                t_row = tenant_rows[0]
+                t_max_users = t_row.get("max_users")
+                if t_max_users is not None:
+                    t_id = str(t_row.get("id") or "")
+                    if t_id:
+                        seat_rows = await postgrest_get(
+                            "app_users",
+                            f"select=user_id&tenant_id=eq.{quote(t_id, safe='')}&status=neq.deleted",
+                        )
+                        current_count = len(seat_rows or [])
+                        if current_count >= int(t_max_users):
+                            raise HTTPException(
+                                status_code=422,
+                                detail=(
+                                    f"FIDEON_OS_LIMIT:SEATS Seat limit reached ({current_count}/{t_max_users}). "
+                                    "Upgrade your plan to add more users."
+                                ),
+                            )
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # Non-blocking: if lookup fails, let the DB trigger enforce it
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
@@ -218,7 +265,7 @@ async def signup(request: Request):
         )
 
     result = resp.json() if resp.content else {}
-    if not resp.ok:
+    if not resp.is_success:
         # GoTrue uses different keys depending on version: "msg", "message", "error_description", "error".
         raw_msg: str = (
             result.get("msg")
@@ -251,7 +298,40 @@ async def signup(request: Request):
                 if login_resp.status_code == 200:
                     return login_resp.json()
             except Exception:
-                pass  # Recovery failed; fall through to the original error.
+                pass  # Recovery login failed; try DB presence check next.
+
+            # Recovery login failed — check if the user row was actually committed.
+            # Handles cases where a custom access token hook fails on both signup
+            # and login, but the app_users record IS present (trigger succeeded).
+            try:
+                existing = await postgrest_get(
+                    "app_users",
+                    f"select=user_id,status&email=eq.{quote(email, safe='')}&limit=1",
+                )
+                if existing:
+                    return {"created_needs_verification": True, "email": email}
+            except Exception:
+                pass
+
+            # Final fallback: check auth.users directly via the GoTrue admin API.
+            # Catches the case where auth.users was committed but the app_users
+            # trigger failed, leaving no row in app_users for the check above.
+            try:
+                async with httpx.AsyncClient(timeout=5) as admin_client:
+                    admin_resp = await admin_client.get(
+                        f"{SUPABASE_URL}/auth/v1/admin/users",
+                        headers={
+                            "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                        },
+                        params={"email": email, "per_page": "1"},
+                    )
+                if admin_resp.status_code == 200:
+                    users_list = (admin_resp.json() or {}).get("users") or []
+                    if any(str(u.get("email") or "").lower() == email for u in users_list):
+                        return {"created_needs_verification": True, "email": email}
+            except Exception:
+                pass
 
             raise HTTPException(status_code=500, detail=raw_msg or "Signup failed due to an internal error. Please try again.")
 

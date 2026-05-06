@@ -1,4 +1,4 @@
-// Ollama service for local model execution
+﻿// Ollama service for local model execution
 // This service communicates with Ollama running on localhost
 
 export interface OllamaModel {
@@ -117,7 +117,7 @@ export async function checkNetworkStatus(): Promise<boolean> {
 // Model name mapping from our system to Ollama models
 export const MODEL_MAPPINGS: Record<string, string> = {
   'policy-comparison': 'llama3.2:latest',
-  'acord-parser': 'llama3.2:latest',
+  'acord_form_understanding': 'llama3.2:latest',
   'claims-fnol': 'llama3.2:latest',
   'renewal-review': 'llama3.2:latest',
   'document-search': 'llama3.2:latest',
@@ -156,6 +156,8 @@ declare global {
           | { success: true; machineName: string; machineId: string; platform: string }
           | { success: false; error?: string }
         >;
+        onDeactivated?: (callback: () => void) => void;
+        removeDeactivatedListener?: () => void;
       };
       webhooks?: {
         // Outbound webhook CRUD via backend (used by Settings UI in Electron).
@@ -168,6 +170,7 @@ declare global {
         ) => Promise<{ success: boolean; payload?: any; status?: number; error?: string }>;
         delete?: (accessToken: string, id: string) => Promise<{ success: boolean; payload?: any; status?: number; error?: string }>;
         rotateSecret?: (accessToken: string, id: string) => Promise<any>;
+        testEvent?: (accessToken: string, eventType: string, payload: Record<string, unknown>) => Promise<{ success: boolean; event_id?: string; payload?: any; status?: number; error?: string }>;
       };
       model?: {
         checkUpdate: (domain: string) => Promise<{
