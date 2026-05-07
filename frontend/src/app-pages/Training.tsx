@@ -370,8 +370,8 @@ export default function Training() {
 
       // Step 2: Sync samples to RunPod pod filesystem
       setFinetuneStatus(`Syncing ${samples.length} sample(s) to RunPod…`);
-      const syncResult = await syncFeedbacksToRunpod(
-        samples.map((s) => ({
+      const syncResult = await syncFeedbacksToRunpod([
+        ...samples.map((s) => ({
           prompt: s.prompt,
           original_response: s.original_response,
           corrected_response: s.corrected_response,

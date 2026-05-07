@@ -83,6 +83,12 @@ RUNPOD_PROXY_BASE_URL = os.getenv("RUNPOD_PROXY_BASE_URL", "").strip()
 # Upload server URL — separate port (8080) for PDF ingestion. Falls back to RUNPOD_PROXY_BASE_URL.
 # Example: https://<pod-id>-8080.proxy.runpod.net
 RUNPOD_UPLOAD_BASE_URL = os.getenv("RUNPOD_UPLOAD_BASE_URL", "").strip()
+# Policy Comparison Engine pod URL — the standalone FastAPI server running in
+# ai-ml/Policy Comparison Engine/server.py (default port 8081).
+# Example: https://<pod-id>-8081.proxy.runpod.net
+# When set, POST /api/acord/compare delegates extraction + comparison to the pod.
+# When unset, the backend falls back to its own extraction + Groq/OpenAI comparison.
+POLICY_COMPARISON_POD_URL = os.getenv("POLICY_COMPARISON_POD_URL", "").strip().rstrip("/")
 # Aliases (e.g. llm-gateway): POD_ID, PROXY_URL
 if not RUNPOD_POD_ID:
     RUNPOD_POD_ID = (os.getenv("POD_ID") or "").strip()

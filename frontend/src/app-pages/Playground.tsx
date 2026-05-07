@@ -231,6 +231,7 @@ export default function Playground() {
             data.policyAFile,
             data.policyBFile,
             data.deviationThresholdPercent ?? 10,
+            data.lob ?? undefined,
           );
           setResult(JSON.stringify(comparisonResult, null, 2));
           setIsRunning(false);

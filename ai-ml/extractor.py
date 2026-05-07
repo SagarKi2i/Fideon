@@ -11,12 +11,15 @@ Models are loaded lazily and cached for reuse across requests.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger("fideon.extractor")
 
 
 # ── Transformers 4.50+ compatibility patch ────────────────────────────────────
@@ -349,11 +352,12 @@ def _parse_qwen_output(text: str) -> Tuple[Optional[Dict], str, str]:
 # ── Qwen2-VL prompt ───────────────────────────────────────────────────────────
 
 _PROMPT_TEMPLATE = """\
-You are an expert insurance document parser. You are given page images of an ACORD form,
-plus pre-processed outputs from two independent parsers (Surya OCR and Docling).
+You are an expert insurance document parser. You are given page images of an ACORD form.
+Pre-processed outputs from Surya OCR and Docling may be appended below when available.
 
-Use ALL inputs — the images (ground truth), Surya OCR text, Docling markdown, and Docling KV pairs —
-to produce three outputs:
+Use ALL available inputs — the images are always the ground truth. If OCR or structured
+outputs are not provided, extract all fields directly from the page images.
+Produce three outputs:
 
 ---
 FIELDS:
@@ -433,6 +437,8 @@ def _run_qwen_extraction(
     prompt = _PROMPT_TEMPLATE
     if context_parts:
         prompt += "\n\n" + "\n\n".join(context_parts)
+    else:
+        prompt += "\n\nNote: Surya OCR and Docling outputs are unavailable. Extract all fields directly from the page images."
 
     content: List[Dict[str, Any]] = [
         {"type": "image", "image": img} for img in page_images
@@ -506,9 +512,10 @@ def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
     if not images:
         return {"error": "No pages found in PDF"}
 
-    # ── Step 1: Surya + Docling in parallel ───────────────────────────────────
+    # ── Step 1: Surya + Docling in parallel (failures are non-fatal) ─────────
     surya_ocr_text: str = ""
     docling_result: Dict[str, Any] = {"markdown": "", "tables": [], "kv_pairs": {}}
+    arm_warnings: List[str] = []
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         future_surya = pool.submit(_run_surya_ocr, images)
@@ -516,17 +523,125 @@ def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
 
         for future in as_completed([future_surya, future_docling]):
             if future is future_surya:
-                surya_ocr_text = future.result()
+                try:
+                    surya_ocr_text = future.result()
+                except Exception as exc:
+                    logger.warning("Surya OCR arm failed — Qwen2-VL will extract from images only: %s", exc)
+                    arm_warnings.append(f"Surya OCR unavailable: {exc}")
             else:
-                docling_result = future.result()
+                try:
+                    docling_result = future.result()
+                except Exception as exc:
+                    logger.warning("Docling arm failed — Qwen2-VL will extract from images only: %s", exc)
+                    arm_warnings.append(f"Docling unavailable: {exc}")
 
-    # ── Step 2: Qwen2-VL with both arm outputs ────────────────────────────────
+    # ── Step 2: Qwen2-VL always runs — uses images + whatever arms produced ──
     qwen_result = _run_qwen_extraction(images, surya_ocr_text, docling_result, form_type)
 
-    return {
+    result = {
         "form_type_detected": f"acord{form_type}",
         "pdf_type": pdf_type,
         "extracted_json": qwen_result["fields"],
         "full_text": qwen_result["qwen_raw_text"] or surya_ocr_text,
         "markdown": qwen_result["qwen_markdown"] or docling_result.get("markdown", ""),
     }
+    if arm_warnings:
+        result["warnings"] = arm_warnings
+    return result
+
+
+# ── Policy Comparison helper (used by Policy Comparison Engine pod only) ──────
+
+def extract_policy_text(pdf_path: str) -> Dict[str, Any]:
+    """
+    Extract plain full-text from any insurance policy PDF.
+
+    Used by the Policy Comparison Engine. Does not perform ACORD-specific field
+    extraction. For scanned PDFs, runs Surya OCR + Docling in parallel. If both
+    arms fail, falls back to Qwen2-VL to extract raw text directly from images
+    so the caller always receives usable text.
+
+    Returns:
+        {
+            "full_text":   str,
+            "markdown":    str,
+            "page_count":  int,
+            "pdf_type":    "digital" | "scanned",
+            "warnings":    list[str],  # present only when arms degraded/failed
+        }
+    """
+    if not Path(pdf_path).exists():
+        return {"error": f"File not found: {pdf_path}", "full_text": "", "page_count": 0, "pdf_type": "unknown"}
+
+    import fitz as _fitz
+
+    doc = _fitz.open(pdf_path)
+    page_count = len(doc)
+    embedded = "".join(p.get_text("text") for p in doc).strip()
+    doc.close()
+
+    if len(embedded) > 100:
+        # Digital PDF — native text layer is reliable and fast
+        return {
+            "full_text": embedded,
+            "markdown": "",
+            "page_count": page_count,
+            "pdf_type": "digital",
+        }
+
+    # Scanned PDF — Surya OCR + Docling in parallel (failures are non-fatal)
+    images = _pdf_to_images(pdf_path)
+    if not images:
+        return {"error": "No pages found", "full_text": "", "page_count": page_count, "pdf_type": "scanned"}
+
+    ocr_text: str = ""
+    docling_result: Dict[str, Any] = {"markdown": "", "tables": [], "kv_pairs": {}}
+    arm_warnings: List[str] = []
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut_surya = pool.submit(_run_surya_ocr, images)
+        fut_docling = pool.submit(_run_docling, pdf_path)
+
+        for future in as_completed([fut_surya, fut_docling]):
+            if future is fut_surya:
+                try:
+                    ocr_text = future.result()
+                except Exception as exc:
+                    logger.warning("Surya OCR arm failed in extract_policy_text — continuing: %s", exc)
+                    arm_warnings.append(f"Surya OCR unavailable: {exc}")
+            else:
+                try:
+                    docling_result = future.result()
+                except Exception as exc:
+                    logger.warning("Docling arm failed in extract_policy_text — continuing: %s", exc)
+                    arm_warnings.append(f"Docling unavailable: {exc}")
+
+    full_text = ocr_text
+    markdown = docling_result.get("markdown", "")
+
+    # Both arms produced nothing — fall back to Qwen2-VL for raw text extraction
+    if not full_text.strip() and not markdown.strip():
+        logger.warning("Both arms failed in extract_policy_text — falling back to Qwen2-VL")
+        try:
+            qwen_result = _run_qwen_extraction(
+                images,
+                surya_ocr_text="",
+                docling_result={"markdown": "", "tables": [], "kv_pairs": {}},
+                form_type="policy",
+            )
+            full_text = qwen_result.get("qwen_raw_text") or ""
+            markdown = qwen_result.get("qwen_markdown") or ""
+            arm_warnings.append("Fell back to Qwen2-VL for text extraction")
+        except Exception as exc:
+            logger.error("Qwen2-VL fallback also failed in extract_policy_text: %s", exc)
+            arm_warnings.append(f"Qwen2-VL fallback failed: {exc}")
+
+    result: Dict[str, Any] = {
+        "full_text": full_text,
+        "markdown": markdown,
+        "page_count": page_count,
+        "pdf_type": "scanned",
+    }
+    if arm_warnings:
+        result["warnings"] = arm_warnings
+    return result

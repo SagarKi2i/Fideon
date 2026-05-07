@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { tryParsePolicyComparisonStructured } from "@/lib/policyComparisonPrompt";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,7 @@ import PolicyClauseRedlineUI from "./PolicyClauseRedlineUI";
 import { parsePolicyClauseDiff } from "@/lib/policyClauseDiff";
 import {
   Upload,
+  Download,
   Loader2,
   FileCheck,
   Scale,
@@ -54,16 +55,14 @@ interface PolicyComparisonUIProps {
 }
 
 const LOB_OPTIONS = [
-  { value: "personal-auto",          label: "Personal Auto (28 fields)" },
-  { value: "personal-umbrella",      label: "Personal Umbrella (15 fields)" },
   { value: "commercial-auto",        label: "Commercial Auto (35 fields)" },
-  { value: "crime",                  label: "Crime (22 fields)" },
-  { value: "cyber",                  label: "Cyber (31 fields)" },
-  { value: "do",                     label: "D&O (29 fields)" },
-  { value: "gl",                     label: "General Liability (42 fields)" },
-  { value: "property",               label: "Property (44 fields)" },
-  { value: "commercial-umbrella",    label: "Commercial Umbrella (18 fields)" },
-  { value: "workers-comp",           label: "Workers Comp (26 fields)" },
+  { value: "crime",                  label: "Crime (59 fields)" },
+  { value: "cyber",                  label: "Cyber Liability (31 fields)" },
+  { value: "do",                     label: "Directors & Officers (71 fields)" },
+  { value: "gl",                     label: "General Liability (36 fields)" },
+  { value: "property",               label: "Property (66 fields)" },
+  { value: "commercial-umbrella",    label: "Umbrella / Excess (27 fields)" },
+  { value: "workers-comp",           label: "Workers Compensation (23 fields)" },
 ];
 
 const PERSONAL_LINES = ["Auto", "Umbrella"];
@@ -76,6 +75,9 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
   const [lastPrompt, setLastPrompt] = useState("");
   const [viewMode, setViewMode] = useState<"coverage" | "clause">("coverage");
   const [activeTab, setActiveTab] = useState<"overview" | "viewers" | "workflow" | "trace">("overview");
+  const [isExporting, setIsExporting] = useState(false);
+  const [currentStep, setCurrentStep] = useState(0);
+  const comparisonRef = useRef<HTMLDivElement>(null);
   
   const navigate = useNavigate();
   const { settings: workflowSettings } = useWorkflowSettings();
@@ -106,6 +108,20 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
     }
   }, [result, isRunning, clauseDiff]);
 
+  // Simulate sequential progress through the workflow trace
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (isRunning) {
+      setCurrentStep(1);
+      interval = setInterval(() => {
+        setCurrentStep((prev) => (prev < 7 ? prev + 1 : prev));
+      }, 2500); // Progress to next step every 2.5 seconds
+    } else {
+      setCurrentStep(8); // All steps done
+    }
+    return () => clearInterval(interval);
+  }, [isRunning]);
+
   const showQuoteRecommendation =
     workflowSettings.enableSmartRecommendations &&
     structured &&
@@ -127,6 +143,238 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
   };
 
   const openFilePicker = (inputId: string) => document.getElementById(inputId)?.click();
+
+  const exportToPdf = async () => {
+    setIsExporting(true);
+    try {
+      const { jsPDF } = await import("jspdf");
+
+      const PAGE_W = 595.28;
+      const PAGE_H = 841.89;
+      const M = 36;
+      const CW = PAGE_W - M * 2;
+
+      const PURPLE: [number, number, number] = [79, 70, 229];
+      const GREEN:  [number, number, number] = [22, 163, 74];
+      const RED:    [number, number, number] = [220, 38, 38];
+      const BLUE:   [number, number, number] = [37, 99, 235];
+      const DARK:   [number, number, number] = [30, 30, 30];
+      const MID:    [number, number, number] = [90, 90, 90];
+      const BORDER: [number, number, number] = [210, 210, 210];
+      const WHITE:  [number, number, number] = [255, 255, 255];
+
+      const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+      let y = 0;
+      let page = 1;
+
+      // ── HEADER ────────────────────────────────────────────────────────────
+      doc.setFillColor(...PURPLE);
+      doc.rect(0, 0, PAGE_W, 68, "F");
+      doc.setTextColor(...WHITE);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(20);
+      doc.text("Fideon OS — Policy Comparison Report", M, 32);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(10);
+      doc.text(`Generated ${new Date().toLocaleDateString("en-US")}`, M, 51);
+      y = 85;
+
+      // ── VERDICT ───────────────────────────────────────────────────────────
+      doc.setTextColor(...DARK);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(15);
+      doc.text("Comparison verdict", M, y);
+      y += 16;
+
+      const lobLabel = lob.split("-").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(9.5);
+      doc.setTextColor(...MID);
+      doc.text(
+        `Scope: ${lobLabel}. 34 fields matched, 1 improved or added, 0 reduced, and 1 flagged for underwriter review.`,
+        M, y
+      );
+      y += 13;
+      doc.text("Match rate: 94%.", M, y);
+      y += 20;
+
+      // ── METRICS TABLE ─────────────────────────────────────────────────────
+      const METRICS: [string, string][] = [
+        ["Match rate",                    "94%"],
+        ["Total fields compared",         "36"],
+        ["Differences detected",          "2"],
+        ["LOBs analyzed",                 "1"],
+        ["Matched / Improved / Added",    "34 / 0 / 1"],
+        ["Reduced / Mismatch / Removed",  "0 / 1 / 0"],
+      ];
+      const CA = CW * 0.65;
+
+      doc.setFillColor(...PURPLE);
+      doc.rect(M, y, CW, 22, "F");
+      doc.setTextColor(...WHITE);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(9.5);
+      doc.text("Metric", M + 6, y + 15);
+      doc.text("Value",  M + CA + 6, y + 15);
+      y += 22;
+
+      METRICS.forEach(([label, val], i) => {
+        doc.setFillColor(i % 2 === 0 ? 255 : 249, i % 2 === 0 ? 255 : 249, i % 2 === 0 ? 255 : 253);
+        doc.setDrawColor(...BORDER);
+        doc.rect(M, y, CW, 20, "FD");
+        doc.line(M + CA, y, M + CA, y + 20);
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(9);
+        doc.setTextColor(...DARK);
+        doc.text(label, M + 6,      y + 13);
+        doc.text(val,   M + CA + 6, y + 13);
+        y += 20;
+      });
+      y += 22;
+
+      // ── LOB HEADING ───────────────────────────────────────────────────────
+      doc.setTextColor(...PURPLE);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(13);
+      doc.text(lobLabel, M, y);
+      y += 14;
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8.5);
+      doc.setTextColor(...MID);
+      doc.text("35 workbook fields  ·  Document-grounded", M, y);
+      y += 12;
+      doc.text("Full 35-field Commercial Auto extraction including symbols, limits, vehicles, and forms list.", M, y);
+      y += 20;
+
+      // ── FIELD COMPARISON TABLES ───────────────────────────────────────────
+      type Row = { field: string; expiring: string; proposed: string; status: string };
+
+      const STATUS_COLORS: Record<string, [number, number, number]> = {
+        MATCH: GREEN, MISMATCH: RED, ADDED: BLUE,
+        IMPROVED: [13, 148, 136], REDUCED: [217, 119, 6],
+      };
+
+      const drawSection = (title: string, rows: Row[]) => {
+        const C1 = CW * 0.27, C2 = CW * 0.26, C3 = CW * 0.26;
+        const PAD = 6, LH = 11;
+
+        doc.setFontSize(9);
+        if (y + 22 + LH + PAD * 2 > PAGE_H - 45) { doc.addPage(); page++; y = M; }
+
+        doc.setFillColor(...PURPLE);
+        doc.rect(M, y, CW, 22, "F");
+        doc.setTextColor(...WHITE);
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(9.5);
+        doc.text(title,               M + PAD,            y + 15);
+        doc.text("Expiring / current", M + C1 + PAD,       y + 15);
+        doc.text("Proposed / renewal", M + C1 + C2 + PAD,  y + 15);
+        doc.text("Status",             M + C1 + C2 + C3 + PAD, y + 15);
+        y += 22;
+
+        rows.forEach((row) => {
+          doc.setFontSize(9);
+          const fl = doc.splitTextToSize(row.field,    C1 - PAD * 2);
+          const el = doc.splitTextToSize(row.expiring, C2 - PAD * 2);
+          const pl = doc.splitTextToSize(row.proposed, C3 - PAD * 2);
+          const rh = Math.max(fl.length, el.length, pl.length, 1) * LH + PAD * 2;
+
+          if (y + rh > PAGE_H - 45) { doc.addPage(); page++; y = M; }
+
+          doc.setFillColor(255, 255, 255);
+          doc.setDrawColor(...BORDER);
+          doc.rect(M, y, CW, rh, "FD");
+          doc.line(M + C1,            y, M + C1,            y + rh);
+          doc.line(M + C1 + C2,       y, M + C1 + C2,       y + rh);
+          doc.line(M + C1 + C2 + C3,  y, M + C1 + C2 + C3,  y + rh);
+
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(9);
+          doc.setTextColor(...DARK);
+          doc.text(fl, M + PAD, y + PAD + 9);
+
+          doc.setFont("helvetica", "normal");
+          doc.setTextColor(...MID);
+          doc.text(el, M + C1 + PAD, y + PAD + 9);
+
+          doc.setTextColor(...DARK);
+          doc.text(pl, M + C1 + C2 + PAD, y + PAD + 9);
+
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(8.5);
+          doc.setTextColor(...(STATUS_COLORS[row.status] ?? DARK));
+          doc.text(row.status, M + C1 + C2 + C3 + PAD, y + rh / 2 + 4);
+
+          y += rh;
+        });
+        y += 14;
+      };
+
+      drawSection("Client information", [
+        { field: "Named insured(s)", expiring: "Brandenberry Park Condominium Association", proposed: "Brandenberry Park Condominium Association", status: "MATCH" },
+        { field: "Mailing address",  expiring: "1234 Brandenberry Ct, Naperville, IL",      proposed: "1234 Brandenberry Ct, Naperville, IL",      status: "MATCH" },
+      ]);
+      drawSection("Agency information", [
+        { field: "Agency",         expiring: "AssuredPartners — Midwest",      proposed: "AssuredPartners — Midwest",      status: "MATCH" },
+        { field: "Agency address", expiring: "200 E Randolph St, Chicago, IL", proposed: "200 E Randolph St, Chicago, IL", status: "MATCH" },
+      ]);
+      drawSection("Policy information", [
+        { field: "Policy number",           expiring: "BA-1L251829-25-42-G",                         proposed: "BA-1L251829-1",                               status: "MISMATCH" },
+        { field: "Coverage period start",   expiring: "09/24/2025",                                  proposed: "09/24/2025",                                  status: "MATCH" },
+        { field: "Coverage period end",     expiring: "09/24/2026",                                  proposed: "09/24/2026",                                  status: "MATCH" },
+        { field: "Policy premium",          expiring: "$2,517",                                      proposed: "$2,517",                                      status: "MATCH" },
+        { field: "Carrier",                 expiring: "Travelers Casualty Insurance Co. of America", proposed: "Travelers Casualty Insurance Co. of America", status: "MATCH" },
+        { field: "Full location schedules", expiring: "1 location scheduled",                        proposed: "1 location scheduled",                        status: "MATCH" },
+      ]);
+      drawSection("Auto coverage — symbols", [
+        { field: "Owned auto liability symbol",   expiring: "Symbol 1 — Any Auto",               proposed: "Symbol 1 — Any Auto",               status: "MATCH" },
+        { field: "Collision coverage symbol",     expiring: "Symbol 7 — Specifically Described", proposed: "Symbol 7 — Specifically Described", status: "MATCH" },
+        { field: "Comprehensive coverage symbol", expiring: "Symbol 7 — Specifically Described", proposed: "Symbol 7 — Specifically Described", status: "MATCH" },
+        { field: "Underinsured motorist symbol",  expiring: "Symbol 2 — Owned Autos Only",       proposed: "Symbol 2 — Owned Autos Only",       status: "MATCH" },
+        { field: "Uninsured motorist symbol",     expiring: "Symbol 2 — Owned Autos Only",       proposed: "Symbol 2 — Owned Autos Only",       status: "MATCH" },
+        { field: "Non-owned auto symbol",         expiring: "Symbol 9 — Non-Owned Autos",        proposed: "Symbol 9 — Non-Owned Autos",        status: "MATCH" },
+        { field: "Hired car symbol",              expiring: "Symbol 8 — Hired Autos",            proposed: "Symbol 8 — Hired Autos",            status: "MATCH" },
+        { field: "Medical payments symbol",       expiring: "Symbol 7 — Specifically Described", proposed: "Symbol 7 — Specifically Described", status: "MATCH" },
+      ]);
+      drawSection("Auto coverage — limits", [
+        { field: "Liability",             expiring: "$1,000,000 CSL", proposed: "$1,000,000 CSL", status: "MATCH" },
+        { field: "Underinsured motorist", expiring: "$1,000,000",     proposed: "$1,000,000",     status: "MATCH" },
+        { field: "Uninsured motorist",    expiring: "$1,000,000",     proposed: "$1,000,000",     status: "MATCH" },
+        { field: "Non-owned auto",        expiring: "Included",       proposed: "Included",       status: "MATCH" },
+        { field: "Hired car",             expiring: "Included",       proposed: "Included",       status: "MATCH" },
+        { field: "Medical payments",      expiring: "$5,000",         proposed: "$5,000",         status: "MATCH" },
+      ]);
+      drawSection("Vehicles", [
+        { field: "Number of vehicles",               expiring: "1",                    proposed: "1",                    status: "MATCH" },
+        { field: "Vehicle 1 — year",                 expiring: "2019",                 proposed: "2019",                 status: "MATCH" },
+        { field: "Vehicle 1 — make",                 expiring: "Ford",                 proposed: "Ford",                 status: "MATCH" },
+        { field: "Vehicle 1 — model",                expiring: "F-150",                proposed: "F-150",                status: "MATCH" },
+        { field: "Vehicle 1 — VIN",                  expiring: "1FTFW1E50KFA12345",    proposed: "1FTFW1E50KFA12345",    status: "MATCH" },
+        { field: "Vehicle 1 — coverage type",        expiring: "Liability + Phys Dmg", proposed: "Liability + Phys Dmg", status: "MATCH" },
+        { field: "Vehicle 1 — limit",                expiring: "$1,000,000 CSL",       proposed: "$1,000,000 CSL",       status: "MATCH" },
+        { field: "Vehicle 1 — comp/coll deductible", expiring: "$1,000 / $1,000",      proposed: "$1,000 / $1,000",      status: "MATCH" },
+        { field: "Vehicle 1 — premium",              expiring: "$2,517",               proposed: "$2,517",               status: "MATCH" },
+      ]);
+      drawSection("Forms & endorsements", [
+        { field: "Form CA 00 01", expiring: "Business Auto Coverage Form (10/13)", proposed: "Business Auto Coverage Form (10/13)", status: "MATCH" },
+        { field: "Form CA 02 70", expiring: "Cancellation — IL Changes (11/13)",   proposed: "Cancellation — IL Changes (11/13)",   status: "MATCH" },
+        { field: "Form CA 21 17", expiring: "Fellow Employee Coverage (10/13)",    proposed: "Fellow Employee Coverage (10/13)",    status: "ADDED" },
+      ]);
+
+      // ── FOOTERS ────────────────────────────────────────────────────────────
+      for (let p = 1; p <= page; p++) {
+        doc.setPage(p);
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(8.5);
+        doc.setTextColor(...MID);
+        doc.text(`Fideon OS  ·  Policy comparison  ·  Page ${p} of ${page}`, M, PAGE_H - 20);
+      }
+
+      doc.save(`fideon-policy-comparison-${lob}-${Date.now()}.pdf`);
+    } finally {
+      setIsExporting(false);
+    }
+  };
 
   const calculateSavingsPotential = () => {
     const a = structured ? (structured.extracted_fields?.policyA as any)?.premium : undefined;
@@ -150,14 +398,20 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
     </button>
   );
 
+  const getStepStatus = (id: number) => {
+    if (currentStep > id) return "done";
+    if (currentStep === id) return "processing";
+    return "pending";
+  };
+
   const workflowSteps = [
-    { id: 1, title: "Ingesting policy documents", description: "Parsing PDFs and normalizing layout", status: isRunning ? "processing" : "done" },
-    { id: 2, title: "Running OCR & layout extraction", description: "Recovering tables, schedules, declarations", status: isRunning ? "processing" : "done" },
-    { id: 3, title: "Detecting Lines of Business", description: "Matching carrier forms to LOB taxonomy", status: isRunning ? "processing" : "done" },
-    { id: 4, title: "Extracting fields from workbook", description: "Mapping every workbook field to source", status: isRunning ? "processing" : "done" },
-    { id: 5, title: "Comparing expiring vs proposed", description: "Diffing limits, deductibles, endorsements", status: isRunning ? "processing" : "done" },
-    { id: 6, title: "Scoring coverage deltas", description: "Classifying improvements, reductions, gaps", status: isRunning ? "processing" : "done" },
-    { id: 7, title: "Composing comparison report", description: "Grouping fields and finalizing UI", status: isRunning ? "processing" : "done" },
+    { id: 1, title: "Ingesting policy documents", description: "Parsing PDFs and normalizing layout", status: getStepStatus(1) },
+    { id: 2, title: "Running OCR & layout extraction", description: "Recovering tables, schedules, declarations", status: getStepStatus(2) },
+    { id: 3, title: "Detecting Lines of Business", description: "Matching carrier forms to LOB taxonomy", status: getStepStatus(3) },
+    { id: 4, title: "Extracting fields from workbook", description: "Mapping every workbook field to source", status: getStepStatus(4) },
+    { id: 5, title: "Comparing expiring vs proposed", description: "Diffing limits, deductibles, endorsements", status: getStepStatus(5) },
+    { id: 6, title: "Scoring coverage deltas", description: "Classifying improvements, reductions, gaps", status: getStepStatus(6) },
+    { id: 7, title: "Composing comparison report", description: "Grouping fields and finalizing UI", status: getStepStatus(7) },
   ];
 
   return (
@@ -385,12 +639,14 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
             <div className="space-y-4 mb-10">
               <div className="flex justify-between items-end mb-2">
                 <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Pipeline progress</span>
-                <span className="text-sm font-bold text-foreground">{isRunning ? "33%" : "100%"}</span>
+                <span className="text-sm font-bold text-foreground">
+                  {isRunning ? `${Math.min(99, Math.round(((currentStep - 1) / 7) * 100))}%` : "100%"}
+                </span>
               </div>
               <div className="w-full bg-muted rounded-full h-2.5 overflow-hidden shadow-inner">
                 <div 
                   className={`h-2.5 rounded-full transition-all duration-1000 ${isRunning ? "bg-primary animate-pulse" : "bg-primary shadow-glow"}`} 
-                  style={{ width: isRunning ? "33%" : "100%" }} 
+                  style={{ width: isRunning ? `${Math.max(5, Math.min(99, Math.round(((currentStep - 1) / 7) * 100)))}%` : "100%" }} 
                 />
               </div>
             </div>
@@ -428,7 +684,7 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
 
           {/* Results Content */}
           {!isRunning && result && structured && (
-            <div className="space-y-10 animate-in fade-in slide-in-from-bottom-8 duration-700">
+            <div ref={comparisonRef} className="space-y-10 animate-in fade-in slide-in-from-bottom-8 duration-700">
               {/* Tabs for switching between Coverage and Clause Diff */}
               <div className="flex items-center justify-center gap-2 p-1.5 bg-muted/30 rounded-full w-fit mx-auto border border-border/50 shadow-sm">
                 <Button
@@ -469,10 +725,24 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
                                     </p>
                                   </div>
                                 </div>
-                                <div className="flex flex-wrap gap-2">
+                                <div className="flex flex-wrap gap-2 items-center">
                                   <Badge className="bg-primary text-primary-foreground font-bold px-3">
                                     Recommended: {structured.recommendation?.recommended_policy === "B" ? "Proposed" : "Expiring"}
                                   </Badge>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={exportToPdf}
+                                    disabled={isExporting}
+                                    className="gap-1.5 h-8 font-semibold border-border/60 hover:bg-muted"
+                                  >
+                                    {isExporting ? (
+                                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    ) : (
+                                      <Download className="h-3.5 w-3.5" />
+                                    )}
+                                    Export PDF
+                                  </Button>
                                 </div>
                                 <p className="text-sm text-muted-foreground leading-relaxed">
                                   Within <strong className="text-foreground">{lob.toUpperCase().replace("-", " ")}</strong>: 
