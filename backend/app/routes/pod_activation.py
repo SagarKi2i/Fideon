@@ -1,10 +1,13 @@
 import asyncio
+import json
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import quote
 
+import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 
+from app.core.config import SUPABASE_URL
 from app.core.supabase import (
     get_user_context,
     insert_audit_log,
@@ -13,6 +16,7 @@ from app.core.supabase import (
     postgrest_get,
     postgrest_insert,
     postgrest_patch,
+    service_headers,
     verify_user,
 )
 from app.services.tenant_activation_limits import assert_tenant_may_add_distinct_model
@@ -20,6 +24,87 @@ from app.services.webhook_engine import WEBHOOK_EVENT_MODEL_DEPLOYED, try_emit_w
 
 router = APIRouter()
 VALID_STATUSES = {"pending", "approved", "rejected"}
+
+
+async def _sync_model_to_user_devices(
+    user_id: str, model_id: str, model_name: str, domain: str, allocated_by: str
+) -> None:
+    """
+    After a model is allocated to a user, auto-insert device_models rows for all
+    active devices registered by that user so Device Setup shows the same list as
+    My Models. Non-blocking — errors are swallowed so allocation always succeeds.
+    """
+    try:
+        devices = await postgrest_get(
+            "devices",
+            f"select=id&registered_by=eq.{quote(user_id, safe='')}&is_active=eq.true",
+        )
+        if not devices:
+            return
+
+        rows = [
+            {
+                "device_id": str(d["id"]),
+                "model_id": model_id,
+                "model_name": model_name,
+                "domain": domain,
+                "ollama_model_name": f"{model_id}:latest",
+                "allocated_by": allocated_by,
+            }
+            for d in devices
+            if d.get("id")
+        ]
+        if not rows:
+            return
+
+        headers = service_headers()
+        # ignore-duplicates: if the admin already added this model to the device manually, skip
+        headers["Prefer"] = "resolution=ignore-duplicates,return=minimal"
+        async with httpx.AsyncClient(timeout=15) as client:
+            await client.post(
+                f"{SUPABASE_URL}/rest/v1/device_models",
+                headers=headers,
+                content=json.dumps(rows),
+            )
+
+        # Notify each device about the new model (best-effort)
+        try:
+            from app.services.device_sync_orchestrator import trigger_device_sync
+            await asyncio.gather(
+                *[trigger_device_sync(str(d["id"]), model_ids=[model_id]) for d in devices if d.get("id")],
+                return_exceptions=True,
+            )
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+async def _remove_model_from_user_devices(user_id: str, model_id: str) -> None:
+    """
+    After a model is removed from a user's activated_models, also remove the
+    corresponding device_models rows for all devices registered by that user.
+    Non-blocking.
+    """
+    try:
+        devices = await postgrest_get(
+            "devices",
+            f"select=id&registered_by=eq.{quote(user_id, safe='')}&is_active=eq.true",
+        )
+        if not devices:
+            return
+        device_ids = [str(d["id"]) for d in devices if d.get("id")]
+        if not device_ids:
+            return
+        encoded_ids = ",".join(quote(did, safe="") for did in device_ids)
+        await postgrest_delete(
+            "device_models",
+            f"device_id=in.({encoded_ids})&model_id=eq.{quote(model_id, safe='')}",
+        )
+    except Exception:
+        pass
+
+
 VALID_DOMAINS = {"insurance", "healthcare", "banking", "legal", "travel"}
 
 
@@ -326,6 +411,13 @@ async def approve_activation_request(
                 "domain": activation_request["domain"],
             },
         )
+        await _sync_model_to_user_devices(
+            user_id=str(activation_request["user_id"]),
+            model_id=str(activation_request["model_id"]),
+            model_name=str(activation_request.get("model_name") or ""),
+            domain=str(activation_request.get("domain") or "unknown"),
+            allocated_by=str(requester["id"]),
+        )
         await try_emit_webhook_event(
             str(requester_tenant_id),
             WEBHOOK_EVENT_MODEL_DEPLOYED,
@@ -493,6 +585,7 @@ async def allocate_model_to_user(
             "domain": domain,
         },
     )
+    await _sync_model_to_user_devices(user_id, model_id, model_name, domain, str(requester["id"]))
     await insert_audit_log(
         request=request,
         user_id=requester["id"],
@@ -541,6 +634,9 @@ async def deallocate_model(
     await postgrest_delete(
         "activated_models",
         f"id=eq.{quote(allocation_id, safe='')}",
+    )
+    await _remove_model_from_user_devices(
+        allocation_user_id, str(allocation_rows[0].get("model_id") or "")
     )
     await insert_audit_log(
         request=request,
@@ -620,6 +716,7 @@ async def delete_my_model_data(
             ),
         ),
     )
+    await _remove_model_from_user_devices(user_id, normalized_model_id)
 
     await insert_audit_log(
         request=request,

@@ -112,38 +112,70 @@ export async function ensureDeviceAuthAsync(opts?: { log?: (msg: string) => void
 
 async function registerDevice(): Promise<{ device_id: string; device_token: string }> {
   const hw = getMachineId();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 60000);
-  try {
-    const res = await fetch(`${apiBaseUrl()}/api/v1/devices/register`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: controller.signal,
-      body: JSON.stringify({
-        hardware_fingerprint: hw,
-        device_name: deviceLabel(),
-        os_type: process.platform,
-        app_version: process.env.npm_package_version || undefined,
-        metadata: {
-          source: "electron-main",
-        },
-      }),
-    });
-    clearTimeout(timeoutId);
-    const payload = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      const p: any = payload;
-      const msg = p?.error || p?.detail || JSON.stringify(payload) || `HTTP ${res.status}`;
-      throw new Error(`Device register failed: ${msg}`);
+  /**
+   * Retries are intentionally generous here because in production the admin "Enable"
+   * action can take time to propagate (replica lag). During that window, register can
+   * return 403 even though the device is being enabled.
+   */
+  const maxRetries = 6;
+  let lastErr: any = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt > 0) {
+      // Wait before retrying to allow backend propagation (replica lag) to settle.
+      // Backoff: 2s, 4s, 8s, 12s, 16s, 20s (capped)
+      const delayMs = Math.min(20_000, 2_000 * Math.max(1, attempt) * Math.min(2 ** (attempt - 1), 10));
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
-    return payload as { device_id: string; device_token: string };
-  } catch (err: any) {
-    clearTimeout(timeoutId);
-    if (err?.name === "AbortError") {
-      throw new Error(`Device registration timed out — backend unreachable at ${apiBaseUrl()}. Check your network or API URL.`);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
+    try {
+      const res = await fetch(`${apiBaseUrl()}/api/v1/devices/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          hardware_fingerprint: hw,
+          device_name: deviceLabel(),
+          os_type: process.platform,
+          app_version: process.env.npm_package_version || undefined,
+          metadata: {
+            source: "electron-main",
+            retry_attempt: attempt > 0 ? attempt : undefined,
+          },
+        }),
+      });
+      clearTimeout(timeoutId);
+
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const p: any = payload;
+        const msg = p?.error || p?.detail || JSON.stringify(payload) || `HTTP ${res.status}`;
+        
+        // If it's a 403 (Deactivated) or 429 (Rate Limit), we retry.
+        // 403 is often transient "replica lag" after an admin clicks "Enable".
+        if ((res.status === 403 || res.status === 429) && attempt < maxRetries) {
+          lastErr = new Error(msg);
+          continue; 
+        }
+        throw new Error(`Device register failed: ${msg}`);
+      }
+      return payload as { device_id: string; device_token: string };
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      if (err?.name === "AbortError") {
+        lastErr = new Error(`Device registration timed out — backend unreachable at ${apiBaseUrl()}. Check your network or API URL.`);
+      } else {
+        lastErr = err;
+      }
+      
+      // For network errors or timeouts, we also retry.
+      if (attempt < maxRetries) continue;
+      throw lastErr;
     }
-    throw err;
   }
+  throw lastErr || new Error("Device registration failed after retries");
 }
 
 class DeviceAuthError extends Error {

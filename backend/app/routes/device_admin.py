@@ -5,6 +5,7 @@ Device admin endpoints — replaces direct frontend Supabase calls for:
   - Device token regeneration (DeviceDetails.tsx)
   - Admin device-pairings list (AdminDashboard.tsx)
 """
+import asyncio
 import hashlib
 import json
 import secrets
@@ -163,6 +164,39 @@ async def remove_device_model(
         f"id=eq.{quote(record_id, safe='')}&device_id=eq.{quote(device_id, safe='')}",
     )
     return {"success": True}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BACKFILL — sync existing activated_models → device_models for all linked devices
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.post("/api/v1/admin/devices/backfill-model-sync")
+async def backfill_device_model_sync(authorization: Optional[str] = Header(default=None)):
+    """
+    One-time backfill: for every active device that has a registered_by user,
+    copy all of that user's activated_models into device_models (ignore duplicates).
+    Run this once after deploying the auto-sync feature to catch models that were
+    allocated before the feature existed.
+    """
+    await _admin_uid(authorization)
+
+    devices = await postgrest_get(
+        "devices",
+        "select=id,registered_by&is_active=eq.true&registered_by=not.is.null",
+    )
+    if not devices:
+        return {"success": True, "devices_synced": 0}
+
+    from app.routes.device import _sync_user_models_to_device
+    results = await asyncio.gather(
+        *[
+            _sync_user_models_to_device(str(d["registered_by"]), str(d["id"]))
+            for d in devices
+            if d.get("id") and d.get("registered_by")
+        ],
+        return_exceptions=True,
+    )
+    return {"success": True, "devices_synced": len([r for r in results if not isinstance(r, Exception)])}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

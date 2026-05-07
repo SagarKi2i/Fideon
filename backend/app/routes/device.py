@@ -104,6 +104,54 @@ async def _generate_magic_login_link(
     return _extract_magic_link_payload(body, user_email)
 
 
+async def _sync_user_models_to_device(user_id: str, device_id: str) -> None:
+    """
+    When a device is linked to a user, copy all the user's activated_models into
+    device_models so Device Setup shows the same list as My Models.
+    Non-blocking — errors are swallowed so linking always succeeds.
+    """
+    try:
+        models = await postgrest_get(
+            "activated_models",
+            f"select=model_id,model_name,domain&user_id=eq.{quote(user_id, safe='')}",
+        )
+        if not models:
+            return
+
+        rows = [
+            {
+                "device_id": device_id,
+                "model_id": str(m["model_id"]),
+                "model_name": str(m.get("model_name") or m["model_id"]),
+                "domain": str(m.get("domain") or "unknown"),
+                "ollama_model_name": f"{m['model_id']}:latest",
+                "allocated_by": user_id,
+            }
+            for m in models
+            if m.get("model_id")
+        ]
+        if not rows:
+            return
+
+        headers = service_headers()
+        headers["Prefer"] = "resolution=ignore-duplicates,return=minimal"
+        async with httpx.AsyncClient(timeout=15) as client:
+            await client.post(
+                f"{SUPABASE_URL}/rest/v1/device_models",
+                headers=headers,
+                content=json.dumps(rows),
+            )
+
+        try:
+            from app.services.device_sync_orchestrator import trigger_device_sync
+            model_ids = [str(m["model_id"]) for m in models if m.get("model_id")]
+            await trigger_device_sync(device_id, model_ids=model_ids)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 async def _resolve_device_from_bearer(authorization: Optional[str]) -> tuple[str, dict[str, Any]]:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Device JWT required")
@@ -761,6 +809,7 @@ async def link_device_v1(request: Request, authorization: Optional[str] = Header
         new_value={"tenant_id": requester_tenant_id, "registered_by": user["id"]},
     )
     log.info("device.linked", device_id=device_id, user_id=user["id"], tenant_id=requester_tenant_id)
+    await _sync_user_models_to_device(str(user["id"]), device_id)
     return {"success": True, "device_id": device_id}
 
 
@@ -873,15 +922,51 @@ async def get_device_admin(device_id: str = Path(...), authorization: Optional[s
         "device_usage_logs",
         f"select=*&device_id=eq.{quote(device_id, safe='')}&order=logged_at.desc&limit=50",
     )
-    available_models = await postgrest_get(
-        "activated_models",
-        "select=id,model_id,model_name,domain&limit=200",
-    )
+
+    # Fetch the linked user's activated models (Active Pods).
+    # Used both for the "Allocate Models" dropdown AND to surface user activations
+    # that haven't yet been explicitly device-allocated (so admin sees the full picture).
+    registered_by = device.get("registered_by")
+    user_activated: list = []
+    if registered_by:
+        try:
+            user_activated = await postgrest_get(
+                "activated_models",
+                f"select=id,model_id,model_name,domain,activated_at&user_id=eq.{quote(str(registered_by), safe='')}&limit=200",
+            ) or []
+        except Exception:
+            user_activated = []
+
+    # Merge: add user-activated models not already in device_models so admin can see
+    # which models the linked user has active even before explicit device allocation.
+    device_model_ids = {m.get("model_id") for m in (models or []) if m.get("model_id")}
+    merged_models = list(models or [])
+    for um in user_activated:
+        if um.get("model_id") not in device_model_ids:
+            merged_models.append({
+                "id": um.get("id"),
+                "device_id": device_id,
+                "model_id": um.get("model_id"),
+                "model_name": um.get("model_name"),
+                "domain": um.get("domain"),
+                "ollama_model_name": None,
+                "is_downloaded": False,
+                "allocated_at": um.get("activated_at"),
+                "last_synced_at": None,
+                "source": "user_activated",
+            })
+
+    # Available models for allocation: scope to the linked user's activations.
+    # Falls back to empty list when no user is linked (admin can still type a model id).
+    available_models = [
+        {"id": m.get("id"), "model_id": m.get("model_id"), "model_name": m.get("model_name"), "domain": m.get("domain")}
+        for m in user_activated
+    ]
 
     return {
         "success": True,
         "device": device,
-        "device_models": models,
+        "device_models": merged_models,
         "sync_logs": sync_logs,
         "usage_logs": usage_logs,
         "available_models": available_models,
@@ -1023,6 +1108,8 @@ async def confirm_device_pairing(request: Request):
     if not inserted_devices:
         raise HTTPException(status_code=500, detail="Failed to create linked device")
     linked_device = inserted_devices[0]
+
+    await _sync_user_models_to_device(str(pairing["user_id"]), str(linked_device["id"]))
 
     await postgrest_patch(
         "device_pairings",
