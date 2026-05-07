@@ -498,18 +498,27 @@ async def generate_text(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         text_input = processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
+        # Slow tokenizer (no tokenizer.json in checkpoint) returns "" even for
+        # text-only messages when chat_template is missing from tokenizer_config.json.
+        if not text_input or not text_input.strip():
+            text_input = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+
         inputs = processor(
             text=[text_input],
             padding=True,
             return_tensors="pt",
         ).to(model.device)
 
-        with torch.no_grad():
+        if inputs["input_ids"].shape[1] == 0:
+            raise ValueError("Processor returned empty input_ids for /generate request")
+
+        use_sampling = temperature > 0
+        with torch.inference_mode():
             generated_ids = model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                do_sample=temperature > 0,
+                do_sample=use_sampling,
+                temperature=temperature if use_sampling else None,
             )
 
         trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
