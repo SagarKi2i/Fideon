@@ -212,11 +212,11 @@ async function heartbeat(deviceJwt: string): Promise<void> {
   }
 }
 
-export async function ensureDeviceAuthAndStartHeartbeat(opts: {
+export function startHeartbeatLoop(deviceJwt: string, opts: {
   log: (msg: string) => void;
   heartbeatSeconds?: number;
   onDeactivated?: () => void;
-}): Promise<{ stop: () => void }> {
+}): { stop: () => void } {
   const hbSeconds = Math.max(10, Math.floor(opts.heartbeatSeconds ?? 60));
   let stopped = false;
   let timer: NodeJS.Timeout | null = null;
