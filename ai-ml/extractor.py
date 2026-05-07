@@ -237,7 +237,7 @@ def _load_qwen() -> None:
 
         logger.info("[qwen] Loading processor...")
         print("[qwen] Loading processor...", flush=True)
-        _qwen_processor = AutoProcessor.from_pretrained(QWEN_MODEL_ID, use_fast=False)
+        _qwen_processor = AutoProcessor.from_pretrained(QWEN_MODEL_ID)
 
         # bfloat16 is native on A100 — wider dynamic range, no overflow vs float16.
         # Enable flash_attention_2 when available (requires flash-attn installed);
