@@ -326,6 +326,13 @@ _extract_jobs: Dict[str, Dict[str, Any]] = {}
 _extract_jobs_lock = threading.Lock()
 _gpu_semaphore = threading.Semaphore(1)  # serialize GPU extraction — prevents VRAM contention
 
+# ---------------------------------------------------------------------------
+# Share-gradients job store + pending-share directory
+# ---------------------------------------------------------------------------
+_share_jobs: Dict[str, Dict[str, Any]] = {}
+_share_jobs_lock = threading.Lock()
+PENDING_SHARE_DIR = Path(os.getenv("PENDING_SHARE_DIR", "/workspace/fine_tuning/pending_shares"))
+
 
 def _run_extract_job(job_id: str, pdf_path: str, form_type: str) -> None:
     """Background thread: full Surya + Docling + Qwen2-VL extraction."""
@@ -806,9 +813,6 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
         if s.get("sample_id") in used_ids and s.get("run_id")
     ]
     _mark_acord_runs_approved(supabase_run_ids)
-
-    # ── Mark Supabase training_feedback rows as used ──────────────────────────
-    _mark_training_feedback_used(ingested_fb_ids)
 
     # ── Launch cycle in background thread ─────────────────────────────────────
     job_id = str(uuid.uuid4())
