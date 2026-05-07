@@ -512,6 +512,23 @@ def _run_qwen_extraction(
         messages, tokenize=False, add_generation_prompt=True
     )
 
+    # Slow tokenizer (no tokenizer.json in local checkpoint) returns "" for
+    # messages that contain image-type content items. Detect and recover by
+    # constructing the Qwen2-VL chat text manually. The processor will still
+    # expand each single <|image_pad|> to the correct patch count via image_grid_thw.
+    if not text_input or not text_input.strip():
+        logger.warning(
+            "[qwen] apply_chat_template returned empty string — "
+            "slow tokenizer detected, building chat text manually"
+        )
+        vision_tokens = "".join(
+            "<|vision_start|><|image_pad|><|vision_end|>" for _ in page_images
+        )
+        text_input = (
+            f"<|im_start|>user\n{vision_tokens}{prompt}<|im_end|>\n<|im_start|>assistant\n"
+        )
+        logger.info("[qwen] Manual text_input length: %d chars", len(text_input))
+
     inputs = _qwen_processor(
         text=[text_input],
         images=page_images,
