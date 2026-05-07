@@ -120,14 +120,20 @@ export async function ensureDeviceAuthAsync(opts?: { log?: (msg: string) => void
 
 async function registerDevice(): Promise<{ device_id: string; device_token: string }> {
   const hw = getMachineId();
-  const maxRetries = 2;
+  /**
+   * Retries are intentionally generous here because in production the admin "Enable"
+   * action can take time to propagate (replica lag). During that window, register can
+   * return 403 even though the device is being enabled.
+   */
+  const maxRetries = 6;
   let lastErr: any = null;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (attempt > 0) {
       // Wait before retrying to allow backend propagation (replica lag) to settle.
-      // 1st retry: 2s, 2nd retry: 4s
-      await new Promise((resolve) => setTimeout(resolve, attempt * 2000));
+      // Backoff: 2s, 4s, 8s, 12s, 16s, 20s (capped)
+      const delayMs = Math.min(20_000, 2_000 * Math.max(1, attempt) * Math.min(2 ** (attempt - 1), 10));
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
 
     const controller = new AbortController();
@@ -155,7 +161,7 @@ async function registerDevice(): Promise<{ device_id: string; device_token: stri
         const p: any = payload;
         const msg = p?.error || p?.detail || JSON.stringify(payload) || `HTTP ${res.status}`;
         
-        // If it's a 403 (Deactivated) or 429 (Rate Limit), we retry. 
+        // If it's a 403 (Deactivated) or 429 (Rate Limit), we retry.
         // 403 is often transient "replica lag" after an admin clicks "Enable".
         if ((res.status === 403 || res.status === 429) && attempt < maxRetries) {
           lastErr = new Error(msg);
