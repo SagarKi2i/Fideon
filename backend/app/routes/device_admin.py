@@ -200,6 +200,89 @@ async def backfill_device_model_sync(authorization: Optional[str] = Header(defau
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# CLEANUP — remove duplicate never-checked-in orphan devices
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.post("/api/v1/admin/devices/cleanup-orphans")
+async def cleanup_orphan_devices(authorization: Optional[str] = Header(default=None)):
+    """
+    One-time cleanup: removes duplicate 'never_checked_in' devices.
+
+    Strategy:
+    - For each user who has multiple never-checked-in devices, keep the most
+      recently created one and delete the rest.
+    - Also deletes never-checked-in devices with no linked user (registered_by IS NULL)
+      that have no associated device_models rows (safe to remove).
+
+    Returns counts of what was deleted vs kept.
+    """
+    await _admin_uid(authorization)
+
+    # Fetch all never-checked-in devices
+    orphans = await postgrest_get(
+        "devices",
+        "select=id,registered_by,created_at,device_name&status=eq.never_checked_in",
+    )
+    if not orphans:
+        return {"success": True, "deleted": 0, "kept": 0, "message": "No orphan devices found"}
+
+    # Group by registered_by (user), keeping the most recent per user
+    from collections import defaultdict
+    by_user: dict[str, list[dict]] = defaultdict(list)
+    no_user: list[dict] = []
+
+    for d in orphans:
+        uid = d.get("registered_by")
+        if uid:
+            by_user[uid].append(d)
+        else:
+            no_user.append(d)
+
+    ids_to_delete: list[str] = []
+
+    # For users with duplicates: keep newest, delete the rest
+    for uid, devices in by_user.items():
+        if len(devices) <= 1:
+            continue
+        # Sort by created_at descending — keep index 0
+        sorted_devs = sorted(
+            devices,
+            key=lambda x: x.get("created_at") or "",
+            reverse=True,
+        )
+        ids_to_delete.extend(str(d["id"]) for d in sorted_devs[1:])
+
+    # For no-user orphans: delete those with no device_models rows
+    for d in no_user:
+        models = await postgrest_get(
+            "device_models",
+            f"select=id&device_id=eq.{quote(str(d['id']), safe='')}&limit=1",
+        )
+        if not models:
+            ids_to_delete.append(str(d["id"]))
+
+    if not ids_to_delete:
+        return {"success": True, "deleted": 0, "kept": len(orphans), "message": "No duplicates to remove"}
+
+    # Delete in batches of 50 to avoid URL length limits
+    deleted = 0
+    batch_size = 50
+    for i in range(0, len(ids_to_delete), batch_size):
+        batch = ids_to_delete[i : i + batch_size]
+        encoded = ",".join(quote(did, safe="") for did in batch)
+        await postgrest_delete("devices", f"id=in.({encoded})")
+        deleted += len(batch)
+
+    kept = len(orphans) - deleted
+    return {
+        "success": True,
+        "deleted": deleted,
+        "kept": kept,
+        "message": f"Removed {deleted} orphan device(s). {kept} kept.",
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # DEVICE TOKEN REGENERATION
 # ═══════════════════════════════════════════════════════════════════════════════
 

@@ -758,7 +758,6 @@ export default function DeviceDetails() {
                     <TableRow>
                       <TableHead>Model Name</TableHead>
                       <TableHead>Domain</TableHead>
-                      <TableHead>Status</TableHead>
                       <TableHead>Allocated</TableHead>
                       <TableHead>Last Synced</TableHead>
                       <TableHead className="text-right">Actions</TableHead>
@@ -770,15 +769,6 @@ export default function DeviceDetails() {
                         <TableCell className="font-medium">{model.model_name}</TableCell>
                         <TableCell>
                           <Badge variant="outline">{model.domain}</Badge>
-                        </TableCell>
-                        <TableCell>
-                          {model.is_downloaded ? (
-                            <Badge variant="outline" className="bg-success/10 text-success">
-                              Downloaded
-                            </Badge>
-                          ) : (
-                            <Badge variant="outline">Pending</Badge>
-                          )}
                         </TableCell>
                         <TableCell className="text-sm text-muted-foreground">
                           {formatDistanceToNow(new Date(model.allocated_at), {

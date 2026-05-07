@@ -132,6 +132,14 @@ function formatUnknownError(err: unknown): string {
   }
 }
 
+function simplifyDeviceAuthError(message: string): string {
+  const m = (message || "").toLowerCase();
+  if (m.includes("deactivated") || m.includes("device is deactivated")) return "Device is deactivated";
+  if (m.includes("device disabled") || m.includes("device is disabled") || m.includes("disabled"))
+    return "Device is disabled";
+  return message;
+}
+
 async function waitForHttpReady(
   url: string,
   opts?: { timeoutMs?: number; perAttemptTimeoutMs?: number; minDelayMs?: number; maxDelayMs?: number },
@@ -573,8 +581,11 @@ ipcMain.handle("device:ensureAuth", async () => {
     deviceHeartbeatStopper = runner.stop;
     return { success: true, device_id: auth.device_id, device_jwt: auth.device_jwt };
   } catch (err) {
-    log(`[ipc] device:ensureAuth failed: ${formatUnknownError(err)}`);
-    return { success: false, error: formatUnknownError(err) };
+    const raw = formatUnknownError(err);
+    const simplified = simplifyDeviceAuthError(raw);
+    // Keep full error (including stack) in file log, but only send simplified message to renderer.
+    log(`[ipc] device:ensureAuth failed: ${raw}`);
+    return { success: false, error: simplified };
   }
 });
 
