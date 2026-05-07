@@ -169,6 +169,11 @@ def _load_surya() -> None:
     with _surya_lock:
         if _surya_loaded:
             return
+        import time as _time
+        _t0 = _time.time()
+        logger.info("[surya] Loading Surya OCR models (DetectionPredictor + RecognitionPredictor)...")
+        print("[surya] Loading Surya OCR models...", flush=True)
+
         from surya.detection import DetectionPredictor
         from surya.recognition import FoundationPredictor, RecognitionPredictor
 
@@ -177,6 +182,9 @@ def _load_surya() -> None:
             foundation_predictor=FoundationPredictor()
         )
         _surya_loaded = True
+        _elapsed = round(_time.time() - _t0, 1)
+        logger.info("[surya] ✓ Surya OCR loaded successfully in %ss", _elapsed)
+        print(f"[surya] ✓ Surya OCR loaded successfully in {_elapsed}s", flush=True)
 
 
 def _load_docling() -> None:
@@ -184,6 +192,11 @@ def _load_docling() -> None:
     with _docling_lock:
         if _docling_loaded:
             return
+        import time as _time
+        _t0 = _time.time()
+        logger.info("[docling] Loading Docling document converter (OCR + table structure)...")
+        print("[docling] Loading Docling document converter...", flush=True)
+
         from docling.document_converter import DocumentConverter, PdfFormatOption
         from docling.datamodel.pipeline_options import PdfPipelineOptions
         from docling.datamodel.base_models import InputFormat
@@ -198,6 +211,9 @@ def _load_docling() -> None:
             }
         )
         _docling_loaded = True
+        _elapsed = round(_time.time() - _t0, 1)
+        logger.info("[docling] ✓ Docling loaded successfully in %ss", _elapsed)
+        print(f"[docling] ✓ Docling loaded successfully in {_elapsed}s", flush=True)
 
 
 def _load_qwen() -> None:
@@ -205,8 +221,13 @@ def _load_qwen() -> None:
     with _qwen_lock:
         if _qwen_loaded:
             return
+        import time as _time
         import torch
         from transformers import AutoConfig, AutoProcessor, Qwen2VLForConditionalGeneration
+
+        _t0 = _time.time()
+        logger.info("[qwen] Loading Qwen2-VL-7B from %s ...", QWEN_MODEL_ID)
+        print(f"[qwen] Loading Qwen2-VL-7B from {QWEN_MODEL_ID} ...", flush=True)
 
         # Load config first and patch fields missing from older model checkpoints
         # that transformers 4.57 now requires during weight initialisation.
@@ -214,15 +235,36 @@ def _load_qwen() -> None:
         if hasattr(config, "vision_config") and not hasattr(config.vision_config, "initializer_range"):
             config.vision_config.initializer_range = 0.02
 
+        logger.info("[qwen] Loading processor...")
+        print("[qwen] Loading processor...", flush=True)
         _qwen_processor = AutoProcessor.from_pretrained(QWEN_MODEL_ID)
+
+        # bfloat16 is native on A100 — wider dynamic range, no overflow vs float16.
+        # Enable flash_attention_2 when available (requires flash-attn installed);
+        # falls back to eager attention transparently if the package is absent.
+        _dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+        _attn = "flash_attention_2" if torch.cuda.is_available() else None
+        try:
+            import flash_attn  # noqa: F401 — confirm package is present
+        except ImportError:
+            _attn = None
+
+        _attn_label = _attn or "eager (flash-attn not installed)"
+        logger.info("[qwen] Loading model weights — dtype=%s  attention=%s", _dtype, _attn_label)
+        print(f"[qwen] Loading model weights — dtype={_dtype}  attention={_attn_label}", flush=True)
+
+        _load_kwargs: dict = dict(config=config, torch_dtype=_dtype, device_map="auto")
+        if _attn:
+            _load_kwargs["attn_implementation"] = _attn
+
         _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
-            QWEN_MODEL_ID,
-            config=config,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto",
+            QWEN_MODEL_ID, **_load_kwargs
         )
         _qwen_model.eval()
         _qwen_loaded = True
+        _elapsed = round(_time.time() - _t0, 1)
+        logger.info("[qwen] ✓ Qwen2-VL-7B loaded successfully in %ss", _elapsed)
+        print(f"[qwen] ✓ Qwen2-VL-7B loaded successfully in {_elapsed}s", flush=True)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

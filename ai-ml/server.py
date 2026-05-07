@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -80,6 +81,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---------------------------------------------------------------------------
+# Model preload at startup — eliminates 524 timeout on first real request.
+# Models are loaded in a background thread so uvicorn becomes ready
+# immediately (health/readyz pass) while GPU loading continues.
+# ---------------------------------------------------------------------------
+def _preload_models() -> None:
+    try:
+        from extractor import _load_surya, _load_docling, _load_qwen
+        print("[preload] Loading Surya OCR...", flush=True)
+        _load_surya()
+        print("[preload] Loading Docling...", flush=True)
+        _load_docling()
+        print("[preload] Loading Qwen2-VL...", flush=True)
+        _load_qwen()
+        print("[preload] All models loaded — pod is fully warm.", flush=True)
+    except Exception as exc:
+        print(f"[preload] Model preload failed (non-fatal): {exc}", flush=True)
+
+
+_executor.submit(_preload_models)
 
 
 # ---------------------------------------------------------------------------
