@@ -329,25 +329,44 @@ _extract_jobs_lock = threading.Lock()
 def _run_extract_job(job_id: str, pdf_path: str, form_type: str) -> None:
     """Background thread: full Surya + Docling + Qwen2-VL extraction."""
     import time as _time
+    import traceback as _tb
 
     def _set(phase: str, **kwargs: Any) -> None:
         with _extract_jobs_lock:
             _extract_jobs[job_id].update({"phase": phase, **kwargs})
+        print(f"[extract:{job_id[:8]}] phase={phase} {kwargs}", flush=True)
 
     _set("running", started_at=datetime.now(timezone.utc).isoformat())
+    print(f"[extract:{job_id[:8]}] Starting extraction: pdf={pdf_path} form_type={form_type}", flush=True)
     t0 = _time.time()
     try:
         from extractor import run_full_extraction
+        _set("running", step="surya+docling+qwen")
         result = run_full_extraction(pdf_path, form_type)
         elapsed = round(_time.time() - t0, 1)
+
         if "error" in result:
-            _set("failed", error=result["error"], elapsed_s=elapsed,
+            err = result["error"]
+            print(f"[extract:{job_id[:8]}] FAILED after {elapsed}s: {err}", flush=True)
+            _set("failed", error=err, elapsed_s=elapsed,
                  completed_at=datetime.now(timezone.utc).isoformat())
         else:
+            warnings = result.get("warnings", [])
+            print(f"[extract:{job_id[:8]}] ✓ Completed in {elapsed}s"
+                  f" pdf_type={result.get('pdf_type')}"
+                  f" fields={len(result.get('extracted_json') or {})}"
+                  f"{' warnings=' + str(warnings) if warnings else ''}", flush=True)
             _set("completed", result=result, elapsed_s=elapsed,
                  completed_at=datetime.now(timezone.utc).isoformat())
+
     except Exception as exc:
-        _set("failed", error=str(exc), elapsed_s=round(_time.time() - t0, 1),
+        elapsed = round(_time.time() - t0, 1)
+        tb = _tb.format_exc()
+        print(f"[extract:{job_id[:8]}] EXCEPTION after {elapsed}s: {exc}\n{tb}", flush=True)
+        _set("failed",
+             error=str(exc),
+             traceback=tb,
+             elapsed_s=elapsed,
              completed_at=datetime.now(timezone.utc).isoformat())
 
 

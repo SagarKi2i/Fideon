@@ -286,17 +286,31 @@ async def extract_acord_from_upload(
     max_wait      = 900    # 15 minutes
     waited        = 0
     result: Dict[str, Any] = {}
+    status: Dict[str, Any] = {}
     while waited < max_wait:
         await _asyncio.sleep(poll_interval)
         waited += poll_interval
         status = await _runpod_get(f"/extract/{job_id}/status")
         phase  = status.get("phase", "")
-        log.info("acord_extract.poll", job_id=job_id, phase=phase, waited_s=waited)
+        log.info("acord_extract.poll",
+                 job_id=job_id, phase=phase, waited_s=waited,
+                 step=status.get("step", ""))
         if phase == "completed":
             result = status.get("result", {})
             break
         if phase == "failed":
-            raise HTTPException(status_code=500, detail=f"Extraction failed on pod: {status.get('error')}")
+            error_msg  = status.get("error", "unknown error")
+            traceback_ = status.get("traceback", "")
+            log.error("acord_extract.pod_failed",
+                      job_id=job_id,
+                      upload_id=upload_id,
+                      error=error_msg,
+                      traceback=traceback_,
+                      elapsed_s=status.get("elapsed_s"))
+            detail = f"Extraction failed on pod: {error_msg}"
+            if traceback_:
+                detail += f"\n\nTraceback:\n{traceback_}"
+            raise HTTPException(status_code=500, detail=detail)
 
     if not result:
         raise HTTPException(status_code=504, detail=f"Extraction timed out after {max_wait}s (job_id={job_id})")

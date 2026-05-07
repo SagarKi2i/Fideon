@@ -286,15 +286,30 @@ def _pdf_to_images(pdf_path: str, dpi: int = 150) -> List:
 # ── Arm A: Surya OCR ──────────────────────────────────────────────────────────
 
 def _run_surya_ocr(images: List) -> str:
+    import traceback as _tb
     _load_surya()
-    ocr_results = _rec_predictor(images, det_predictor=_det_predictor)
+    logger.info("[surya] Running OCR on %d page(s)...", len(images))
+
+    try:
+        ocr_results = _rec_predictor(images, det_predictor=_det_predictor)
+    except Exception as exc:
+        # "index -1 is out of bounds for dimension 0 with size 0" — Surya
+        # returns empty detection tensors on blank/sparse pages; the recognition
+        # step then crashes trying to slice into an empty result.
+        logger.error("[surya] OCR inference failed: %s\n%s", exc, _tb.format_exc())
+        raise
 
     lines: List[str] = []
-    for result in ocr_results:
-        for tl in result.text_lines:
+    for page_idx, result in enumerate(ocr_results):
+        page_lines = getattr(result, "text_lines", []) or []
+        if not page_lines:
+            logger.warning("[surya] Page %d: no text lines detected (blank or very sparse page)", page_idx + 1)
+        for tl in page_lines:
             text = (tl.text or "").strip()
             if text:
                 lines.append(text)
+
+    logger.info("[surya] OCR complete — %d text lines extracted across %d page(s)", len(lines), len(images))
     return "\n".join(lines)
 
 
