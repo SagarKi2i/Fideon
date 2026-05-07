@@ -324,6 +324,7 @@ def list_jobs() -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 _extract_jobs: Dict[str, Dict[str, Any]] = {}
 _extract_jobs_lock = threading.Lock()
+_gpu_semaphore = threading.Semaphore(1)  # serialize GPU extraction — prevents VRAM contention
 
 
 def _run_extract_job(job_id: str, pdf_path: str, form_type: str) -> None:
@@ -341,8 +342,12 @@ def _run_extract_job(job_id: str, pdf_path: str, form_type: str) -> None:
     t0 = _time.time()
     try:
         from extractor import run_full_extraction
-        _set("running", step="surya+docling+qwen")
-        result = run_full_extraction(pdf_path, form_type)
+        _set("running", step="waiting_for_gpu")
+        print(f"[extract:{job_id[:8]}] Waiting for GPU semaphore...", flush=True)
+        with _gpu_semaphore:
+            _set("running", step="surya+docling+qwen")
+            print(f"[extract:{job_id[:8]}] GPU acquired — running extraction", flush=True)
+            result = run_full_extraction(pdf_path, form_type)
         elapsed = round(_time.time() - t0, 1)
 
         if "error" in result:

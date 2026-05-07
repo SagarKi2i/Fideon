@@ -253,7 +253,7 @@ def _load_qwen() -> None:
         logger.info("[qwen] Loading model weights — dtype=%s  attention=%s", _dtype, _attn_label)
         print(f"[qwen] Loading model weights — dtype={_dtype}  attention={_attn_label}", flush=True)
 
-        _load_kwargs: dict = dict(config=config, torch_dtype=_dtype, device_map="auto")
+        _load_kwargs: dict = dict(config=config, dtype=_dtype, device_map="auto")
         if _attn:
             _load_kwargs["attn_implementation"] = _attn
 
