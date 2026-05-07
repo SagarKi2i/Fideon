@@ -635,10 +635,42 @@ def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
     # ── Step 2: Qwen2-VL always runs — uses images + whatever arms produced ──
     qwen_result = _run_qwen_extraction(images, surya_ocr_text, docling_result, form_type)
 
+    extracted_fields = qwen_result["fields"]
+
+    # ── Step 3: Regex fallback when Qwen produced a narrative instead of JSON ──
+    # Detected by presence of _raw_qwen_output key (only set when JSON parsing failed).
+    # Run the same regex patterns used for digital PDFs against the Surya OCR text —
+    # this guarantees at least the standard ACORD fields are extracted.
+    if "_raw_qwen_output" in extracted_fields and surya_ocr_text.strip():
+        logger.warning(
+            "[extraction] Qwen did not output structured fields — "
+            "running regex extraction on Surya OCR text as fallback"
+        )
+        regex_fields: Dict[str, Any] = {}
+        for field_key, pattern in _ACORD_REGEX_PATTERNS.items():
+            m = re.search(pattern, surya_ocr_text, re.IGNORECASE | re.DOTALL)
+            if m:
+                value = (m.group(1) or "").strip().split("\n")[0].strip()
+                if value:
+                    regex_fields[field_key] = value
+
+        # Also pull KV pairs from Docling when available
+        if docling_result.get("kv_pairs"):
+            for k, v in docling_result["kv_pairs"].items():
+                if k and v and k not in regex_fields:
+                    regex_fields[k] = v
+
+        if regex_fields:
+            logger.info("[extraction] Regex fallback extracted %d fields", len(regex_fields))
+            extracted_fields = regex_fields
+        else:
+            # Keep _raw_qwen_output so the backend LLM can still process it
+            logger.warning("[extraction] Regex fallback found 0 fields — keeping raw Qwen output")
+
     result = {
         "form_type_detected": f"acord{form_type}",
         "pdf_type": pdf_type,
-        "extracted_json": qwen_result["fields"],
+        "extracted_json": extracted_fields,
         "full_text": qwen_result["qwen_raw_text"] or surya_ocr_text,
         "markdown": qwen_result["qwen_markdown"] or docling_result.get("markdown", ""),
     }
