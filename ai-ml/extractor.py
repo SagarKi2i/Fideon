@@ -392,7 +392,17 @@ def _parse_qwen_output(text: str) -> Tuple[Optional[Dict], str, str]:
         )
         parsed = _parse_fields_section(text[fi + len(fields_marker) : next_after_fields])
     else:
+        # No FIELDS: marker — try to extract any JSON object from the output
         parsed = _parse_fields_section(text)
+        if parsed is None:
+            # Last resort: scan for first { ... } block in the entire output
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end > start:
+                try:
+                    parsed = json.loads(text[start : end + 1])
+                except json.JSONDecodeError:
+                    pass
 
     # RAW TEXT block ends at MARKDOWN: (if present after it)
     if ri != -1:
@@ -524,7 +534,12 @@ def _run_qwen_extraction(
         vision_tokens = "".join(
             "<|vision_start|><|image_pad|><|vision_end|>" for _ in page_images
         )
+        # System prompt is required for Qwen2-VL instruction-following mode;
+        # without it the model generates narrative summaries instead of structured output.
         text_input = (
+            "<|im_start|>system\n"
+            "You are an expert insurance document parser. Follow the output format instructions exactly.\n"
+            "<|im_end|>\n"
             f"<|im_start|>user\n{vision_tokens}{prompt}<|im_end|>\n<|im_start|>assistant\n"
         )
         logger.info("[qwen] Manual text_input length: %d chars", len(text_input))
