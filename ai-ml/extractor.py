@@ -470,12 +470,17 @@ def _run_qwen_extraction(
     _load_qwen()
     import torch
 
+    if not images:
+        raise ValueError("_run_qwen_extraction received empty images list — PDF may have no renderable pages")
+
     # Send up to 4 pages so multi-page ACORD forms (125, 140, etc.) are fully covered
     page_images = images[:4]
+    if not surya_ocr_text or not surya_ocr_text.strip():
+        surya_ocr_text = "(no OCR text available)"
 
     # Build reference context from both arms
     context_parts: List[str] = []
-    if surya_ocr_text.strip():
+    if surya_ocr_text.strip() and surya_ocr_text != "(no OCR text available)":
         context_parts.append(
             f"=== Surya OCR text (line-by-line) ===\n{surya_ocr_text[:2500]}"
         )
@@ -515,7 +520,12 @@ def _run_qwen_extraction(
     ).to(_qwen_model.device)
 
     if inputs["input_ids"].shape[1] == 0:
-        raise ValueError("Qwen processor returned empty input_ids — images may be corrupt or unsupported")
+        shapes = {k: tuple(v.shape) for k, v in inputs.items() if hasattr(v, "shape")}
+        raise ValueError(
+            f"Qwen processor returned empty input_ids — "
+            f"images={len(page_images)}, text_len={len(text_input)}, "
+            f"input shapes={shapes}"
+        )
 
     with torch.inference_mode():
         generated_ids = _qwen_model.generate(**inputs, max_new_tokens=3072, do_sample=False)
