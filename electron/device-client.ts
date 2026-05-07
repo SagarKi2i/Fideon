@@ -87,23 +87,15 @@ export async function ensureDeviceAuthAsync(opts?: { log?: (msg: string) => void
   if (existingJwt && existingId) {
     try {
       // Prefer heartbeat: validates JWT without adapter_registry domain setup.
-      // 401/403 = invalid/expired/revoked JWT → re-register; otherwise token is accepted.
-      const validateCtrl = new AbortController();
-      const validateTimeout = setTimeout(() => validateCtrl.abort(), 30000);
-      let res: Response;
-      try {
-        res = await fetch(`${apiBaseUrl()}/api/v1/devices/heartbeat`, {
-          method: "PUT",
-          headers: { Authorization: `Bearer ${existingJwt}` },
-          signal: validateCtrl.signal,
-        });
-      } finally {
-        clearTimeout(validateTimeout);
-      }
-      if (res.status !== 401 && res.status !== 403) {
+      // 401 = invalid/expired JWT → re-register; otherwise token is accepted.
+      const res = await fetch(`${apiBaseUrl()}/api/v1/devices/heartbeat`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${existingJwt}` },
+      });
+      if (res.ok) {
         return { device_id: existingId, device_jwt: existingJwt };
       }
-      opts?.log?.(`[device] stored JWT rejected by backend (${res.status}) — re-registering`);
+      opts?.log?.(`[device] stored JWT rejected by backend (status=${res.status}) — re-registering`);
     } catch {
       // Network error or timeout — use stored JWT so brief outages do not force re-register.
       return { device_id: existingId, device_jwt: existingJwt };
@@ -220,14 +212,11 @@ async function heartbeat(deviceJwt: string): Promise<void> {
   }
 }
 
-export function startHeartbeatLoop(
-  deviceJwt: string,
-  opts: {
-    log: (msg: string) => void;
-    heartbeatSeconds?: number;
-    onDeactivated?: () => void;
-  },
-): { stop: () => void } {
+export async function ensureDeviceAuthAndStartHeartbeat(opts: {
+  log: (msg: string) => void;
+  heartbeatSeconds?: number;
+  onDeactivated?: () => void;
+}): Promise<{ stop: () => void }> {
   const hbSeconds = Math.max(10, Math.floor(opts.heartbeatSeconds ?? 60));
   let stopped = false;
   let timer: NodeJS.Timeout | null = null;
