@@ -237,7 +237,7 @@ def _load_qwen() -> None:
 
         logger.info("[qwen] Loading processor...")
         print("[qwen] Loading processor...", flush=True)
-        _qwen_processor = AutoProcessor.from_pretrained(QWEN_MODEL_ID)
+        _qwen_processor = AutoProcessor.from_pretrained(QWEN_MODEL_ID, use_fast=False)
 
         # bfloat16 is native on A100 — wider dynamic range, no overflow vs float16.
         # Enable flash_attention_2 when available (requires flash-attn installed);
@@ -469,7 +469,6 @@ def _run_qwen_extraction(
 ) -> Dict[str, Any]:
     _load_qwen()
     import torch
-    from qwen_vl_utils import process_vision_info
 
     # Send up to 4 pages so multi-page ACORD forms (125, 140, etc.) are fully covered
     page_images = images[:4]
@@ -508,19 +507,18 @@ def _run_qwen_extraction(
         messages, tokenize=False, add_generation_prompt=True
     )
 
-    # process_vision_info handles PIL image resizing/normalization for Qwen2-VL
-    image_inputs, video_inputs = process_vision_info(messages)
-
     inputs = _qwen_processor(
         text=[text_input],
-        images=image_inputs,
-        videos=video_inputs,
+        images=page_images,
         padding=True,
         return_tensors="pt",
     ).to(_qwen_model.device)
 
-    with torch.no_grad():
-        generated_ids = _qwen_model.generate(**inputs, max_new_tokens=3072)
+    if inputs["input_ids"].shape[1] == 0:
+        raise ValueError("Qwen processor returned empty input_ids — images may be corrupt or unsupported")
+
+    with torch.inference_mode():
+        generated_ids = _qwen_model.generate(**inputs, max_new_tokens=3072, do_sample=False)
 
     trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
     output_text = _qwen_processor.batch_decode(
