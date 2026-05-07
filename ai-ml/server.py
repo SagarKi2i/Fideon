@@ -320,21 +320,50 @@ def list_jobs() -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# POST /extract/{upload_id}  — full ACORD extraction (Surya + Docling + Qwen VL)
+# Extraction job store (mirrors _ocr_jobs pattern)
+# ---------------------------------------------------------------------------
+_extract_jobs: Dict[str, Dict[str, Any]] = {}
+_extract_jobs_lock = threading.Lock()
+
+
+def _run_extract_job(job_id: str, pdf_path: str, form_type: str) -> None:
+    """Background thread: full Surya + Docling + Qwen2-VL extraction."""
+    import time as _time
+
+    def _set(phase: str, **kwargs: Any) -> None:
+        with _extract_jobs_lock:
+            _extract_jobs[job_id].update({"phase": phase, **kwargs})
+
+    _set("running", started_at=datetime.now(timezone.utc).isoformat())
+    t0 = _time.time()
+    try:
+        from extractor import run_full_extraction
+        result = run_full_extraction(pdf_path, form_type)
+        elapsed = round(_time.time() - t0, 1)
+        if "error" in result:
+            _set("failed", error=result["error"], elapsed_s=elapsed,
+                 completed_at=datetime.now(timezone.utc).isoformat())
+        else:
+            _set("completed", result=result, elapsed_s=elapsed,
+                 completed_at=datetime.now(timezone.utc).isoformat())
+    except Exception as exc:
+        _set("failed", error=str(exc), elapsed_s=round(_time.time() - t0, 1),
+             completed_at=datetime.now(timezone.utc).isoformat())
+
+
+# ---------------------------------------------------------------------------
+# POST /extract/{upload_id}  — submit async ACORD extraction job
 # ---------------------------------------------------------------------------
 @app.post("/extract/{upload_id}")
-async def extract_acord(
+def extract_acord(
     upload_id: str,
     form_type_hint: str = "25",
 ) -> Dict[str, Any]:
     """
-    Full ACORD extraction pipeline for an already-uploaded PDF.
-
-    Step 1 (parallel): Surya OCR + Docling run concurrently.
-    Step 2 (serial):   Qwen2-VL receives page images + both outputs.
-
-    Returns: { form_type_detected, pdf_type, extracted_json, full_text, markdown }
-    Long-running (30s–5min on GPU).
+    Submit a full ACORD extraction job (Surya OCR + Docling + Qwen2-VL).
+    Returns immediately with a job_id — poll GET /extract/{job_id}/status.
+    Async because Qwen2-VL inference can take 3-10 min; RunPod proxy
+    has a hard ~100s HTTP timeout so synchronous extraction always 524s.
     """
     record = _uploads.get(upload_id)
     if not record:
@@ -363,17 +392,44 @@ async def extract_acord(
         elif ftl.startswith("acord"):
             ft = ft[5:]
 
-    import asyncio
-    loop = asyncio.get_running_loop()
+    job_id = str(uuid.uuid4())
+    job: Dict[str, Any] = {
+        "job_id":    job_id,
+        "upload_id": upload_id,
+        "filename":  record.get("filename", ""),
+        "form_type": ft,
+        "pdf_path":  pdf_path,
+        "phase":     "queued",
+        "queued_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with _extract_jobs_lock:
+        _extract_jobs[job_id] = job
 
-    from extractor import run_full_extraction
+    _executor.submit(_run_extract_job, job_id, pdf_path, ft)
 
-    result = await loop.run_in_executor(_executor, run_full_extraction, pdf_path, ft)
+    return {
+        "job_id":    job_id,
+        "upload_id": upload_id,
+        "phase":     "queued",
+        "message":   f"Extraction queued. Poll GET /extract/{job_id}/status for progress.",
+    }
 
-    if "error" in result:
-        raise HTTPException(status_code=500, detail=result["error"])
 
-    return result
+# ---------------------------------------------------------------------------
+# GET /extract/{job_id}/status  — poll extraction job
+# ---------------------------------------------------------------------------
+@app.get("/extract/{job_id}/status")
+def extract_status(job_id: str) -> Dict[str, Any]:
+    """
+    Poll an async extraction job.
+    phase: queued → running → completed | failed
+    When completed, 'result' contains the full extraction output.
+    """
+    with _extract_jobs_lock:
+        job = _extract_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Extraction job '{job_id}' not found")
+    return job
 
 
 # ---------------------------------------------------------------------------

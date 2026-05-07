@@ -266,18 +266,48 @@ async def extract_acord_from_upload(
 
     log.info("acord_extract.start", upload_id=upload_id, filename=filename, form_type=form_type)
 
-    # No timeout — RunPod GPU inference duration is unpredictable
-    result = await _runpod_post(
+    # Submit async extraction job — returns immediately with job_id.
+    # RunPod proxy has a hard ~100s HTTP timeout; synchronous extraction
+    # always 524s for scanned PDFs (Qwen2-VL takes 3-10 min).
+    job = await _runpod_post(
         f"/extract/{upload_id}",
-        timeout=None,
+        timeout=30.0,
         params={"form_type_hint": form_type},
     )
+    job_id = job.get("job_id")
+    if not job_id:
+        raise HTTPException(status_code=502, detail="RunPod did not return an extraction job_id")
+
+    log.info("acord_extract.job_queued", upload_id=upload_id, job_id=job_id)
+
+    # Poll /extract/{job_id}/status until completed or failed (max 15 min)
+    import asyncio as _asyncio
+    poll_interval = 5      # seconds between polls
+    max_wait      = 900    # 15 minutes
+    waited        = 0
+    result: Dict[str, Any] = {}
+    while waited < max_wait:
+        await _asyncio.sleep(poll_interval)
+        waited += poll_interval
+        status = await _runpod_get(f"/extract/{job_id}/status")
+        phase  = status.get("phase", "")
+        log.info("acord_extract.poll", job_id=job_id, phase=phase, waited_s=waited)
+        if phase == "completed":
+            result = status.get("result", {})
+            break
+        if phase == "failed":
+            raise HTTPException(status_code=500, detail=f"Extraction failed on pod: {status.get('error')}")
+
+    if not result:
+        raise HTTPException(status_code=504, detail=f"Extraction timed out after {max_wait}s (job_id={job_id})")
 
     log.info(
         "acord_extract.done",
         upload_id=upload_id,
+        job_id=job_id,
         form_type=result.get("form_type_detected"),
         pdf_type=result.get("pdf_type"),
+        elapsed_s=status.get("elapsed_s"),
     )
     raw_text = result.get("full_text") or result.get("raw_text") or ""
     runpod_fields = result.get("extracted_json") or result.get("fields") or {}
