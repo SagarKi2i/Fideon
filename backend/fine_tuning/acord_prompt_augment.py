@@ -35,8 +35,9 @@ INSTRUCTION_VARIANTS: List[str] = [
     "Respond with JSON matching the six-field extraction schema; null for absent values.",
 ] + ADDITIONAL_VARIANTS
 
-# Cap after all augmentation (env override)
-MAX_AUGMENTED_ROWS = int(os.getenv("ACORD_EXPORT_MAX_ROWS", "300"))
+# Cap after all augmentation — default 99999 (effectively unlimited).
+# Override with ACORD_EXPORT_MAX_ROWS env var if you need to bound training set size.
+MAX_AUGMENTED_ROWS = int(os.getenv("ACORD_EXPORT_MAX_ROWS", "99999"))
 
 
 def expand_instruction_variants(

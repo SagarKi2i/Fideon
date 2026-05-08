@@ -61,7 +61,7 @@ export async function createAcordRun(params: {
     .select("id")
     .single();
 
-  if (error) throw new Error(`Failed to save extraction run: ${error.message}`);
+  if (error) throw new Error(error.message ?? `Failed to save extraction run (code ${error.code})`);
   return data.id as string;
 }
 
@@ -157,15 +157,12 @@ export async function sendAcordToReview(
  * Excludes runs already marked 'approved' (used in a previous fine-tune).
  */
 export async function getAcordTrainingCount(): Promise<number> {
-  // Count runs owned by this user that have been submitted (have feedback) but not yet trained.
-  // Uses acord_extraction_runs directly — its RLS is just `auth.uid() = created_by`, no JOIN needed.
-  const { count, error } = await db
-    .from("acord_extraction_runs")
-    .select("id", { count: "exact", head: true })
-    .in("status", ["submitted", "needs_admin_review"]);
-
-  if (error) return 0;
-  return count ?? 0;
+  // Two .eq() queries instead of .in() — avoids PostgREST inconsistency where .in() returns 0.
+  const [{ count: c1 }, { count: c2 }] = await Promise.all([
+    db.from("acord_extraction_runs").select("id", { count: "exact", head: true }).eq("status", "submitted"),
+    db.from("acord_extraction_runs").select("id", { count: "exact", head: true }).eq("status", "needs_admin_review"),
+  ]);
+  return (c1 ?? 0) + (c2 ?? 0);
 }
 
 // ── Training samples for RunPod sync ─────────────────────────────────────────
@@ -178,33 +175,42 @@ export async function getAcordTrainingCount(): Promise<number> {
  * Fetches feedback first, then gets the matching runs (excluding 'approved').
  */
 export async function getAcordTrainingSamples(): Promise<AcordTrainingSample[]> {
-  // Step 1: get submitted runs owned by this user (simple RLS: auth.uid() = created_by)
-  const { data: runs, error: runsError } = await db
-    .from("acord_extraction_runs")
-    .select("id, raw_text, extracted_json, form_type_detected")
-    .in("status", ["submitted", "needs_admin_review"]);
+  // Step 1: fetch submitted + needs_admin_review runs with two reliable .eq() queries
+  const [{ data: submitted }, { data: needsReview }] = await Promise.all([
+    db.from("acord_extraction_runs")
+      .select("id, raw_text, extracted_json, form_type_detected")
+      .eq("status", "submitted"),
+    db.from("acord_extraction_runs")
+      .select("id, raw_text, extracted_json, form_type_detected")
+      .eq("status", "needs_admin_review"),
+  ]);
+  const allRuns: any[] = [...(submitted ?? []), ...(needsReview ?? [])];
+  if (allRuns.length === 0) return [];
 
-  if (runsError || !runs || runs.length === 0) return [];
+  const runIds = allRuns.map((r: any) => r.id);
 
-  const runIds = (runs as any[]).map((r: any) => r.id);
+  // Step 2: batch the .in() to avoid URL length limits (safe batch ≤ 500 IDs)
+  const BATCH = 500;
+  const allFeedbacks: any[] = [];
+  for (let i = 0; i < runIds.length; i += BATCH) {
+    const { data: feedbacks } = await db
+      .from("acord_extraction_feedback")
+      .select("run_id, corrected_json")
+      .eq("actor_role", "user")
+      .in("run_id", runIds.slice(i, i + BATCH));
+    if (feedbacks) allFeedbacks.push(...(feedbacks as any[]));
+  }
 
-  // Step 2: get feedback for those runs
-  const { data: feedbacks, error: fbError } = await db
-    .from("acord_extraction_feedback")
-    .select("run_id, corrected_json")
-    .eq("actor_role", "user")
-    .in("run_id", runIds);
-
-  if (fbError || !feedbacks || feedbacks.length === 0) return [];
+  if (allFeedbacks.length === 0) return [];
 
   // Step 3: join in memory — last feedback per run_id wins
   const fbMap = new Map<string, any>();
-  for (const fb of feedbacks as any[]) {
+  for (const fb of allFeedbacks) {
     fbMap.set(fb.run_id, fb.corrected_json);
   }
 
   const samples: AcordTrainingSample[] = [];
-  for (const run of runs as any[]) {
+  for (const run of allRuns) {
     const correctedJson = fbMap.get(run.id);
     if (!correctedJson) continue;
     samples.push({
@@ -233,46 +239,83 @@ export type AcordSampleDisplay = {
 };
 
 /**
- * Returns all pending training samples with full detail data for display,
- * ordered by created_at descending (latest first).
- * Joins acord_extraction_runs with acord_extraction_feedback in memory.
+ * Returns all pending training samples for display, ordered latest first.
+ *
+ * Fetches only lightweight metadata columns in the list query — raw_text and
+ * extracted_json are omitted because they can be many KB per row and cause
+ * Supabase to reject the response when many rows are returned together.
+ * Full content is loaded on-demand via getAcordSampleDetail() when a row is expanded.
  */
 export async function getAcordSamplesForDisplay(): Promise<AcordSampleDisplay[]> {
-  const { data: runs, error: runsError } = await db
+  // Fetch ALL runs for this user (RLS ensures only own rows), then filter client-side.
+  // This avoids any PostgREST .in() / .eq() inconsistency that returns 0 despite rows existing.
+  const { data: allRuns, error: runsError } = await db
     .from("acord_extraction_runs")
-    .select("id, source_filename, form_type_detected, status, created_at, raw_text, extracted_json")
-    .in("status", ["submitted", "needs_admin_review"])
-    .order("created_at", { ascending: false });
+    .select("id, source_filename, form_type_detected, status, created_at");
 
-  if (runsError || !runs || runs.length === 0) return [];
+  if (runsError) {
+    console.error("[acordSupabaseApi] runs query error:", runsError);
+    throw new Error(runsError.message ?? `Supabase error code ${runsError.code}`);
+  }
+
+  console.log("[acordSupabaseApi] all runs:", (allRuns ?? []).map((r: any) => `${r.status}`));
+
+  const runs = (allRuns ?? [] as any[])
+    .filter((r: any) => r.status === "submitted" || r.status === "needs_admin_review")
+    .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+  console.log("[acordSupabaseApi] filtered runs:", runs.length);
+  if (runs.length === 0) return [];
 
   const runIds = (runs as any[]).map((r: any) => r.id);
 
-  const { data: feedbacks } = await db
+  const { data: feedbacks, error: fbError } = await db
     .from("acord_extraction_feedback")
     .select("run_id, corrected_json")
     .eq("actor_role", "user")
     .in("run_id", runIds);
 
-  // Last feedback per run_id wins
+  if (fbError) console.warn("[acordSupabaseApi] feedbacks query error:", fbError);
+  console.log("[acordSupabaseApi] feedbacks returned:", feedbacks?.length ?? 0);
+
   const fbMap = new Map<string, any>();
-  for (const fb of (feedbacks as any[]) ?? []) {
+  for (const fb of (feedbacks ?? []) as any[]) {
     fbMap.set(fb.run_id, fb.corrected_json);
   }
 
-  return (runs as any[]).map((r: any) => {
-    const correctedJson = fbMap.get(r.id) ?? null;
-    return {
-      run_id: r.id,
-      source_filename: r.source_filename || "Unknown file",
-      form_type: r.form_type_detected || "ACORD",
-      status: r.status,
-      created_at: r.created_at,
-      prompt: r.raw_text || JSON.stringify(r.extracted_json ?? {}),
-      original_response: JSON.stringify(r.extracted_json ?? {}, null, 2),
-      corrected_response: correctedJson ? JSON.stringify(correctedJson, null, 2) : null,
-    };
-  });
+  return (runs as any[]).map((r: any) => ({
+    run_id: r.id,
+    source_filename: r.source_filename || "Unknown file",
+    form_type: r.form_type_detected || "ACORD",
+    status: r.status,
+    created_at: r.created_at,
+    prompt: "",
+    original_response: "",
+    corrected_response: (() => {
+      const cj = fbMap.get(r.id);
+      return cj ? JSON.stringify(cj, null, 2) : null;
+    })(),
+  }));
+}
+
+/**
+ * Loads the full raw_text and extracted_json for a single run.
+ * Called when the user expands an individual sample row.
+ */
+export async function getAcordSampleDetail(runId: string): Promise<{
+  prompt: string;
+  original_response: string;
+} | null> {
+  const { data, error } = await db
+    .from("acord_extraction_runs")
+    .select("raw_text, extracted_json")
+    .eq("id", runId)
+    .single();
+  if (error || !data) return null;
+  return {
+    prompt: (data as any).raw_text || JSON.stringify((data as any).extracted_json ?? {}),
+    original_response: JSON.stringify((data as any).extracted_json ?? {}, null, 2),
+  };
 }
 
 // ── Mark samples used after training ─────────────────────────────────────────

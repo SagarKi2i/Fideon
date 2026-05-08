@@ -11,12 +11,15 @@ Models are loaded lazily and cached for reuse across requests.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger("fideon.extractor")
 
 
 # ── Transformers 4.50+ compatibility patch ────────────────────────────────────
@@ -71,31 +74,175 @@ _qwen_loaded = False
 QWEN_MODEL_ID = os.getenv("QWEN_MODEL_ID", "/workspace/models/qwen2-vl-7b")
 
 
-# ── Fast native extraction for digital PDFs (RunPod-local, no Surya/Qwen) ────
-_ACORD_REGEX_PATTERNS: Dict[str, str] = {
-    "policy_number": r"(?:Policy(?:\s+No\.?|\s+Number)?)\s*[:\-]\s*([A-Z0-9\-]{4,40})",
-    "effective_date": r"(?:Effective|Eff\.?\s*Date)\s*[:\-]\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})",
-    "expiration_date": r"(?:Expiration|Exp(?:iry)?\.?\s*Date)\s*[:\-]\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})",
-    "named_insured": r"(?:NAMED\s+INSURED|Name\s+of\s+Insured)\s*[:\-]?\s*(.{3,80})",
-    "mailing_address": r"(?:Mailing\s+Address|Address)\s*[:\-]\s*(.{5,100})",
-    "producer_name": r"(?:PRODUCER|Producer|Agency Name)\s*[:\-]\s*(.{3,80})",
-    "producer_contact": r"(?:Contact\s+Name|Contact)\s*[:\-]\s*(.{3,60})",
-    "producer_phone": r"(?:Phone|Ph\.?)\s*[:\-]\s*([\d\s\(\)\-\+\.]{7,20})",
-    "producer_fax": r"(?:Fax)\s*[:\-]\s*([\d\s\(\)\-\+\.]{7,20})",
-    "producer_email": r"(?:E-?Mail|Email)\s*[:\-]\s*([\w\.\+\-]+@[\w\.\-]+\.\w{2,})",
-    "insurer_a": r"INSURER\s+A\s*[:\-]\s*(.{3,80})",
-    "insurer_b": r"INSURER\s+B\s*[:\-]\s*(.{3,80})",
-    "insurer_c": r"INSURER\s+C\s*[:\-]\s*(.{3,80})",
-    "naic_code": r"NAIC\s*#?\s*[:\-]?\s*(\d{5})",
-    "certificate_number": r"(?:Certificate\s+(?:No\.?|Number))\s*[:\-]\s*([A-Z0-9\-]{4,30})",
-    "description_of_ops": r"(?:DESCRIPTION\s+OF\s+OPERATIONS)[^\n]*\n(.{10,500})",
-    "certificate_holder": r"(?:CERTIFICATE\s+HOLDER)\s*[:\-]?\s*(.{5,200})",
-    "gl_each_occurrence": r"(?:Each\s+Occurrence)\s*\$?\s*([\d,]+)",
-    "gl_general_aggregate": r"(?:General\s+Aggregate)\s*\$?\s*([\d,]+)",
-    "auto_combined_limit": r"(?:Combined\s+Single\s+Limit)\s*\$?\s*([\d,]+)",
-    "umbrella_each_occ": r"(?:UMBRELLA|EXCESS).*?Each\s+Occurrence\s*\$?\s*([\d,]+)",
-    "wc_el_each_accident": r"E\.L\.\s+Each\s+Accident\s*\$?\s*([\d,]+)",
-}
+
+
+def _extract_kv_from_ocr_text(text: str) -> Dict[str, str]:
+    """
+    Extract key-value pairs from Surya OCR text.
+    No hardcoded field names — labels read verbatim from OCR output.
+
+    Handles three layouts Surya produces on ACORD forms:
+      1. Colon-separated on same line:     "PHONE: +91-800585843"
+      2. Single label then single value:   "POLICY NUMBER\\nPOLICY987654321"
+      3. N-label block then N-value block: "NAIC CODE\\nCARRIER\\n34214\\nAgency Name"
+    """
+    kv: Dict[str, str] = {}
+
+    # Common checkbox/boolean values that look like labels but aren't
+    _VALUE_WORDS = {"YES", "NO", "Y", "N", "NA", "NONE", "TRUE", "FALSE", "X", "XX", "N/A"}
+
+    def _to_key(raw: str) -> str:
+        return re.sub(r'[^a-z0-9]+', '_', raw.lower()).strip('_')
+
+    def _is_label_line(line: str) -> bool:
+        """True when the line looks like an ACORD field label (ALL CAPS, no digits)."""
+        s = line.strip()
+        if not s or len(s) < 4 or len(s) > 65:
+            return False
+        if s.upper() in _VALUE_WORDS:
+            return False
+        upper_chars = sum(1 for c in s if c.isupper())
+        alpha_chars = sum(1 for c in s if c.isalpha())
+        if alpha_chars == 0:
+            return False
+        # Labels are ≥ 80% uppercase letters (e.g. "NAIC CODE", "POLICY NUMBER")
+        if upper_chars / alpha_chars < 0.80:
+            return False
+        # Values often contain digits; labels on ACORD forms never do
+        if re.search(r'\d', s):
+            return False
+        if re.match(r'^[-=_\s]{2,}$', s):
+            return False
+        return True
+
+    def _is_value_line(line: str) -> bool:
+        s = line.strip()
+        return bool(s) and not re.match(r'^[-=_\s]{2,}$', s)
+
+    def _add(label: str, value: str) -> None:
+        key = _to_key(label)
+        val = value.strip()[:300]
+        if key and val and len(key) >= 2 and key not in kv:
+            kv[key] = val
+
+    lines = text.splitlines()
+
+    # ── Strategy 1: colon-separated pairs (same line / inline multi-column) ───
+    for line in lines:
+        line_s = line.strip()
+        if not line_s or ":" not in line_s:
+            continue
+        # Surya sometimes writes multi-column pairs on one line with 3+ spaces
+        segments = re.split(r'\s{3,}', line_s)
+        for seg in segments:
+            seg = seg.strip()
+            if ":" not in seg:
+                continue
+            colon_idx = seg.index(":")
+            key_raw = seg[:colon_idx].strip()
+            value = seg[colon_idx + 1:].strip()
+            if not key_raw or not value:
+                continue
+            if len(key_raw) < 2 or len(key_raw) > 65:
+                continue
+            if re.match(r'^[\d\s\-\.\(\)\/\+]+$', key_raw):
+                continue
+            if re.match(r'^[-=_\s]{2,}$', value):
+                continue
+            _add(key_raw, value)
+
+    # ── Strategies 2 & 3: label-then-value consecutive-line layout ────────────
+    # Scan for runs of ALL-CAPS label lines, then collect the value lines that
+    # immediately follow. When counts match (N labels → N values), pair positionally.
+    i = 0
+    n = len(lines)
+    while i < n:
+        stripped = lines[i].strip()
+        if not stripped:
+            i += 1
+            continue
+
+        if _is_label_line(stripped):
+            # Collect consecutive label-only lines (blank line breaks the block)
+            label_block = [stripped]
+            j = i + 1
+            while j < n and _is_label_line(lines[j].strip()):
+                label_block.append(lines[j].strip())
+                j += 1
+
+            # Allow exactly one blank line between label block and value block
+            if j < n and not lines[j].strip():
+                j += 1
+
+            # Collect consecutive value lines (stop at blank line or next label)
+            value_block: List[str] = []
+            while j < n:
+                vs = lines[j].strip()
+                if not vs:
+                    break
+                if _is_label_line(vs):
+                    break
+                if _is_value_line(vs):
+                    value_block.append(vs)
+                j += 1
+
+            if len(label_block) == len(value_block):
+                # N labels → N values: pair positionally
+                for lbl, val in zip(label_block, value_block):
+                    _add(lbl, val)
+            elif len(label_block) == 1 and value_block:
+                # Single label → join first 3 value lines
+                _add(label_block[0], " ".join(value_block[:3]))
+            # Mismatched multi-label block → skip to avoid wrong pairings
+
+            i = j
+        else:
+            i += 1
+
+    return kv
+
+
+def _extract_kv_from_ocr_text(text: str) -> Dict[str, str]:
+    """
+    Extract EVERY key-value pair verbatim from Surya OCR text.
+    No hardcoded field names. Values taken directly from OCR — zero hallucination.
+
+    Strategy:
+      1. Split each line by 3+ whitespace gaps (Surya puts multi-column fields
+         side-by-side, e.g. "PHONE: 123   FAX: 456").
+      2. For each segment, split at the first colon to get key and value.
+      3. Normalise the key to snake_case; keep the value exactly as read.
+    """
+    kv: Dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        # Split inline pairs separated by 3+ spaces (multi-column OCR layout)
+        segments = re.split(r'\s{3,}', line)
+        for seg in segments:
+            seg = seg.strip()
+            if ":" not in seg:
+                continue
+            colon_idx = seg.index(":")
+            key_raw = seg[:colon_idx].strip()
+            value   = seg[colon_idx + 1:].strip()
+
+            if not key_raw or not value:
+                continue
+            # Reject keys that are too long, too short, or purely numeric/symbolic
+            if len(key_raw) < 2 or len(key_raw) > 65:
+                continue
+            if re.match(r'^[\d\s\-\.\(\)\/\+]+$', key_raw):
+                continue
+            # Reject separator-only values
+            if re.match(r'^[-=_\s]{2,}$', value):
+                continue
+            value = value[:300]  # cap runaway values
+            key = re.sub(r'[^a-z0-9]+', '_', key_raw.lower()).strip('_')
+            if key and value and key not in kv:
+                kv[key] = value
+    return kv
 
 
 def _extract_digital_native(pdf_path: str, preextracted_text: str = "") -> tuple[Dict[str, Any], str]:
@@ -144,17 +291,11 @@ def _extract_digital_native(pdf_path: str, preextracted_text: str = "") -> tuple
     except Exception:
         pass
 
-    # Layer 4: regex enrich
+    # Layer 4: generic KV extraction — no hardcoded field names
     if raw_text:
-        for field_key, pattern in _ACORD_REGEX_PATTERNS.items():
-            if field_key in fields:
-                continue
-            m = re.search(pattern, raw_text, re.IGNORECASE | re.DOTALL)
-            if not m:
-                continue
-            value = (m.group(1) or "").strip().split("\n")[0].strip()
-            if value:
-                fields[field_key] = value
+        for k, v in _extract_kv_from_ocr_text(raw_text).items():
+            if k not in fields:
+                fields[k] = v
 
     return fields, raw_text
 
@@ -166,6 +307,11 @@ def _load_surya() -> None:
     with _surya_lock:
         if _surya_loaded:
             return
+        import time as _time
+        _t0 = _time.time()
+        logger.info("[surya] Loading Surya OCR models (DetectionPredictor + RecognitionPredictor)...")
+        print("[surya] Loading Surya OCR models...", flush=True)
+
         from surya.detection import DetectionPredictor
         from surya.recognition import FoundationPredictor, RecognitionPredictor
 
@@ -174,6 +320,9 @@ def _load_surya() -> None:
             foundation_predictor=FoundationPredictor()
         )
         _surya_loaded = True
+        _elapsed = round(_time.time() - _t0, 1)
+        logger.info("[surya] ✓ Surya OCR loaded successfully in %ss", _elapsed)
+        print(f"[surya] ✓ Surya OCR loaded successfully in {_elapsed}s", flush=True)
 
 
 def _load_docling() -> None:
@@ -181,6 +330,11 @@ def _load_docling() -> None:
     with _docling_lock:
         if _docling_loaded:
             return
+        import time as _time
+        _t0 = _time.time()
+        logger.info("[docling] Loading Docling document converter (OCR + table structure)...")
+        print("[docling] Loading Docling document converter...", flush=True)
+
         from docling.document_converter import DocumentConverter, PdfFormatOption
         from docling.datamodel.pipeline_options import PdfPipelineOptions
         from docling.datamodel.base_models import InputFormat
@@ -195,6 +349,9 @@ def _load_docling() -> None:
             }
         )
         _docling_loaded = True
+        _elapsed = round(_time.time() - _t0, 1)
+        logger.info("[docling] ✓ Docling loaded successfully in %ss", _elapsed)
+        print(f"[docling] ✓ Docling loaded successfully in {_elapsed}s", flush=True)
 
 
 def _load_qwen() -> None:
@@ -202,8 +359,13 @@ def _load_qwen() -> None:
     with _qwen_lock:
         if _qwen_loaded:
             return
+        import time as _time
         import torch
         from transformers import AutoConfig, AutoProcessor, Qwen2VLForConditionalGeneration
+
+        _t0 = _time.time()
+        logger.info("[qwen] Loading Qwen2-VL-7B from %s ...", QWEN_MODEL_ID)
+        print(f"[qwen] Loading Qwen2-VL-7B from {QWEN_MODEL_ID} ...", flush=True)
 
         # Load config first and patch fields missing from older model checkpoints
         # that transformers 4.57 now requires during weight initialisation.
@@ -211,15 +373,36 @@ def _load_qwen() -> None:
         if hasattr(config, "vision_config") and not hasattr(config.vision_config, "initializer_range"):
             config.vision_config.initializer_range = 0.02
 
+        logger.info("[qwen] Loading processor...")
+        print("[qwen] Loading processor...", flush=True)
         _qwen_processor = AutoProcessor.from_pretrained(QWEN_MODEL_ID)
+
+        # bfloat16 is native on A100 — wider dynamic range, no overflow vs float16.
+        # Enable flash_attention_2 when available (requires flash-attn installed);
+        # falls back to eager attention transparently if the package is absent.
+        _dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+        _attn = "flash_attention_2" if torch.cuda.is_available() else None
+        try:
+            import flash_attn  # noqa: F401 — confirm package is present
+        except ImportError:
+            _attn = None
+
+        _attn_label = _attn or "eager (flash-attn not installed)"
+        logger.info("[qwen] Loading model weights — dtype=%s  attention=%s", _dtype, _attn_label)
+        print(f"[qwen] Loading model weights — dtype={_dtype}  attention={_attn_label}", flush=True)
+
+        _load_kwargs: dict = dict(config=config, dtype=_dtype, device_map="auto")
+        if _attn:
+            _load_kwargs["attn_implementation"] = _attn
+
         _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
-            QWEN_MODEL_ID,
-            config=config,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto",
+            QWEN_MODEL_ID, **_load_kwargs
         )
         _qwen_model.eval()
         _qwen_loaded = True
+        _elapsed = round(_time.time() - _t0, 1)
+        logger.info("[qwen] ✓ Qwen2-VL-7B loaded successfully in %ss", _elapsed)
+        print(f"[qwen] ✓ Qwen2-VL-7B loaded successfully in {_elapsed}s", flush=True)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -241,15 +424,30 @@ def _pdf_to_images(pdf_path: str, dpi: int = 150) -> List:
 # ── Arm A: Surya OCR ──────────────────────────────────────────────────────────
 
 def _run_surya_ocr(images: List) -> str:
+    import traceback as _tb
     _load_surya()
-    ocr_results = _rec_predictor(images, det_predictor=_det_predictor)
+    logger.info("[surya] Running OCR on %d page(s)...", len(images))
+
+    try:
+        ocr_results = _rec_predictor(images, det_predictor=_det_predictor)
+    except Exception as exc:
+        # "index -1 is out of bounds for dimension 0 with size 0" — Surya
+        # returns empty detection tensors on blank/sparse pages; the recognition
+        # step then crashes trying to slice into an empty result.
+        logger.error("[surya] OCR inference failed: %s\n%s", exc, _tb.format_exc())
+        raise
 
     lines: List[str] = []
-    for result in ocr_results:
-        for tl in result.text_lines:
+    for page_idx, result in enumerate(ocr_results):
+        page_lines = getattr(result, "text_lines", []) or []
+        if not page_lines:
+            logger.warning("[surya] Page %d: no text lines detected (blank or very sparse page)", page_idx + 1)
+        for tl in page_lines:
             text = (tl.text or "").strip()
             if text:
                 lines.append(text)
+
+    logger.info("[surya] OCR complete — %d text lines extracted across %d page(s)", len(lines), len(images))
     return "\n".join(lines)
 
 
@@ -332,7 +530,17 @@ def _parse_qwen_output(text: str) -> Tuple[Optional[Dict], str, str]:
         )
         parsed = _parse_fields_section(text[fi + len(fields_marker) : next_after_fields])
     else:
+        # No FIELDS: marker — try to extract any JSON object from the output
         parsed = _parse_fields_section(text)
+        if parsed is None:
+            # Last resort: scan for first { ... } block in the entire output
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end > start:
+                try:
+                    parsed = json.loads(text[start : end + 1])
+                except json.JSONDecodeError:
+                    pass
 
     # RAW TEXT block ends at MARKDOWN: (if present after it)
     if ri != -1:
@@ -349,11 +557,12 @@ def _parse_qwen_output(text: str) -> Tuple[Optional[Dict], str, str]:
 # ── Qwen2-VL prompt ───────────────────────────────────────────────────────────
 
 _PROMPT_TEMPLATE = """\
-You are an expert insurance document parser. You are given page images of an ACORD form,
-plus pre-processed outputs from two independent parsers (Surya OCR and Docling).
+You are an expert insurance document parser. You are given page images of an ACORD form.
+Pre-processed outputs from Surya OCR and Docling may be appended below when available.
 
-Use ALL inputs — the images (ground truth), Surya OCR text, Docling markdown, and Docling KV pairs —
-to produce three outputs:
+Use ALL available inputs — the images are always the ground truth. If OCR or structured
+outputs are not provided, extract all fields directly from the page images.
+Produce three outputs:
 
 ---
 FIELDS:
@@ -408,14 +617,18 @@ def _run_qwen_extraction(
 ) -> Dict[str, Any]:
     _load_qwen()
     import torch
-    from qwen_vl_utils import process_vision_info
+
+    if not images:
+        raise ValueError("_run_qwen_extraction received empty images list — PDF may have no renderable pages")
 
     # Send up to 4 pages so multi-page ACORD forms (125, 140, etc.) are fully covered
     page_images = images[:4]
+    if not surya_ocr_text or not surya_ocr_text.strip():
+        surya_ocr_text = "(no OCR text available)"
 
     # Build reference context from both arms
     context_parts: List[str] = []
-    if surya_ocr_text.strip():
+    if surya_ocr_text.strip() and surya_ocr_text != "(no OCR text available)":
         context_parts.append(
             f"=== Surya OCR text (line-by-line) ===\n{surya_ocr_text[:2500]}"
         )
@@ -433,6 +646,8 @@ def _run_qwen_extraction(
     prompt = _PROMPT_TEMPLATE
     if context_parts:
         prompt += "\n\n" + "\n\n".join(context_parts)
+    else:
+        prompt += "\n\nNote: Surya OCR and Docling outputs are unavailable. Extract all fields directly from the page images."
 
     content: List[Dict[str, Any]] = [
         {"type": "image", "image": img} for img in page_images
@@ -445,19 +660,45 @@ def _run_qwen_extraction(
         messages, tokenize=False, add_generation_prompt=True
     )
 
-    # process_vision_info handles PIL image resizing/normalization for Qwen2-VL
-    image_inputs, video_inputs = process_vision_info(messages)
+    # Slow tokenizer (no tokenizer.json in local checkpoint) returns "" for
+    # messages that contain image-type content items. Detect and recover by
+    # constructing the Qwen2-VL chat text manually. The processor will still
+    # expand each single <|image_pad|> to the correct patch count via image_grid_thw.
+    if not text_input or not text_input.strip():
+        logger.warning(
+            "[qwen] apply_chat_template returned empty string — "
+            "slow tokenizer detected, building chat text manually"
+        )
+        vision_tokens = "".join(
+            "<|vision_start|><|image_pad|><|vision_end|>" for _ in page_images
+        )
+        # System prompt is required for Qwen2-VL instruction-following mode;
+        # without it the model generates narrative summaries instead of structured output.
+        text_input = (
+            "<|im_start|>system\n"
+            "You are an expert insurance document parser. Follow the output format instructions exactly.\n"
+            "<|im_end|>\n"
+            f"<|im_start|>user\n{vision_tokens}{prompt}<|im_end|>\n<|im_start|>assistant\n"
+        )
+        logger.info("[qwen] Manual text_input length: %d chars", len(text_input))
 
     inputs = _qwen_processor(
         text=[text_input],
-        images=image_inputs,
-        videos=video_inputs,
+        images=page_images,
         padding=True,
         return_tensors="pt",
     ).to(_qwen_model.device)
 
-    with torch.no_grad():
-        generated_ids = _qwen_model.generate(**inputs, max_new_tokens=3072)
+    if inputs["input_ids"].shape[1] == 0:
+        shapes = {k: tuple(v.shape) for k, v in inputs.items() if hasattr(v, "shape")}
+        raise ValueError(
+            f"Qwen processor returned empty input_ids — "
+            f"images={len(page_images)}, text_len={len(text_input)}, "
+            f"input shapes={shapes}"
+        )
+
+    with torch.inference_mode():
+        generated_ids = _qwen_model.generate(**inputs, max_new_tokens=3072, do_sample=False)
 
     trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
     output_text = _qwen_processor.batch_decode(
@@ -506,9 +747,10 @@ def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
     if not images:
         return {"error": "No pages found in PDF"}
 
-    # ── Step 1: Surya + Docling in parallel ───────────────────────────────────
+    # ── Step 1: Surya + Docling in parallel (failures are non-fatal) ─────────
     surya_ocr_text: str = ""
     docling_result: Dict[str, Any] = {"markdown": "", "tables": [], "kv_pairs": {}}
+    arm_warnings: List[str] = []
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         future_surya = pool.submit(_run_surya_ocr, images)
@@ -516,17 +758,149 @@ def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
 
         for future in as_completed([future_surya, future_docling]):
             if future is future_surya:
-                surya_ocr_text = future.result()
+                try:
+                    surya_ocr_text = future.result()
+                except Exception as exc:
+                    logger.warning("Surya OCR arm failed — Qwen2-VL will extract from images only: %s", exc)
+                    arm_warnings.append(f"Surya OCR unavailable: {exc}")
             else:
-                docling_result = future.result()
+                try:
+                    docling_result = future.result()
+                except Exception as exc:
+                    logger.warning("Docling arm failed — Qwen2-VL will extract from images only: %s", exc)
+                    arm_warnings.append(f"Docling unavailable: {exc}")
 
-    # ── Step 2: Qwen2-VL with both arm outputs ────────────────────────────────
+    # ── Step 2: Qwen2-VL always runs — uses images + whatever arms produced ──
     qwen_result = _run_qwen_extraction(images, surya_ocr_text, docling_result, form_type)
 
-    return {
+    extracted_fields = qwen_result["fields"]
+
+    # ── Step 3: OCR fallback when Qwen produced a narrative instead of JSON ──
+    # No hardcoded field names. Every label: value pair found verbatim in the
+    # Surya OCR text is extracted. Values are never fabricated.
+    if "_raw_qwen_output" in extracted_fields and surya_ocr_text.strip():
+        logger.warning("[extraction] Qwen did not output structured fields — running OCR KV scan")
+
+        # Primary: generic OCR extraction — reads every "LABEL: value" pair in the text
+        fallback_fields: Dict[str, Any] = _extract_kv_from_ocr_text(surya_ocr_text)
+
+        # Supplement with Docling structural KV pairs (from tables / form widgets)
+        if docling_result.get("kv_pairs"):
+            for k, v in docling_result["kv_pairs"].items():
+                if k and v and k not in fallback_fields:
+                    fallback_fields[k] = v
+
+        logger.info("[extraction] OCR fallback extracted %d fields", len(fallback_fields))
+
+        if fallback_fields:
+            extracted_fields = fallback_fields
+        else:
+            logger.warning("[extraction] OCR fallback found 0 fields — keeping raw Qwen output")
+
+    result = {
         "form_type_detected": f"acord{form_type}",
         "pdf_type": pdf_type,
-        "extracted_json": qwen_result["fields"],
+        "extracted_json": extracted_fields,
         "full_text": qwen_result["qwen_raw_text"] or surya_ocr_text,
         "markdown": qwen_result["qwen_markdown"] or docling_result.get("markdown", ""),
     }
+    if arm_warnings:
+        result["warnings"] = arm_warnings
+    return result
+
+
+# ── Policy Comparison helper (used by Policy Comparison Engine pod only) ──────
+
+def extract_policy_text(pdf_path: str) -> Dict[str, Any]:
+    """
+    Extract plain full-text from any insurance policy PDF.
+
+    Used by the Policy Comparison Engine. Does not perform ACORD-specific field
+    extraction. For scanned PDFs, runs Surya OCR + Docling in parallel. If both
+    arms fail, falls back to Qwen2-VL to extract raw text directly from images
+    so the caller always receives usable text.
+
+    Returns:
+        {
+            "full_text":   str,
+            "markdown":    str,
+            "page_count":  int,
+            "pdf_type":    "digital" | "scanned",
+            "warnings":    list[str],  # present only when arms degraded/failed
+        }
+    """
+    if not Path(pdf_path).exists():
+        return {"error": f"File not found: {pdf_path}", "full_text": "", "page_count": 0, "pdf_type": "unknown"}
+
+    import fitz as _fitz
+
+    doc = _fitz.open(pdf_path)
+    page_count = len(doc)
+    embedded = "".join(p.get_text("text") for p in doc).strip()
+    doc.close()
+
+    if len(embedded) > 100:
+        # Digital PDF — native text layer is reliable and fast
+        return {
+            "full_text": embedded,
+            "markdown": "",
+            "page_count": page_count,
+            "pdf_type": "digital",
+        }
+
+    # Scanned PDF — Surya OCR + Docling in parallel (failures are non-fatal)
+    images = _pdf_to_images(pdf_path)
+    if not images:
+        return {"error": "No pages found", "full_text": "", "page_count": page_count, "pdf_type": "scanned"}
+
+    ocr_text: str = ""
+    docling_result: Dict[str, Any] = {"markdown": "", "tables": [], "kv_pairs": {}}
+    arm_warnings: List[str] = []
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut_surya = pool.submit(_run_surya_ocr, images)
+        fut_docling = pool.submit(_run_docling, pdf_path)
+
+        for future in as_completed([fut_surya, fut_docling]):
+            if future is fut_surya:
+                try:
+                    ocr_text = future.result()
+                except Exception as exc:
+                    logger.warning("Surya OCR arm failed in extract_policy_text — continuing: %s", exc)
+                    arm_warnings.append(f"Surya OCR unavailable: {exc}")
+            else:
+                try:
+                    docling_result = future.result()
+                except Exception as exc:
+                    logger.warning("Docling arm failed in extract_policy_text — continuing: %s", exc)
+                    arm_warnings.append(f"Docling unavailable: {exc}")
+
+    full_text = ocr_text
+    markdown = docling_result.get("markdown", "")
+
+    # Both arms produced nothing — fall back to Qwen2-VL for raw text extraction
+    if not full_text.strip() and not markdown.strip():
+        logger.warning("Both arms failed in extract_policy_text — falling back to Qwen2-VL")
+        try:
+            qwen_result = _run_qwen_extraction(
+                images,
+                surya_ocr_text="",
+                docling_result={"markdown": "", "tables": [], "kv_pairs": {}},
+                form_type="policy",
+            )
+            full_text = qwen_result.get("qwen_raw_text") or ""
+            markdown = qwen_result.get("qwen_markdown") or ""
+            arm_warnings.append("Fell back to Qwen2-VL for text extraction")
+        except Exception as exc:
+            logger.error("Qwen2-VL fallback also failed in extract_policy_text: %s", exc)
+            arm_warnings.append(f"Qwen2-VL fallback failed: {exc}")
+
+    result: Dict[str, Any] = {
+        "full_text": full_text,
+        "markdown": markdown,
+        "page_count": page_count,
+        "pdf_type": "scanned",
+    }
+    if arm_warnings:
+        result["warnings"] = arm_warnings
+    return result

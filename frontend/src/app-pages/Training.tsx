@@ -28,6 +28,7 @@ import {
   ChevronDown,
   ChevronUp,
   FileText,
+  Info,
 } from "lucide-react";
 import { isElectron } from "@/lib/ollama";
 import { getStoredDeviceToken } from "@/lib/deviceApi";
@@ -50,11 +51,12 @@ import {
   type DeviceContribution,
   type TrainingStats,
 } from "@/lib/trainingApi";
-import { syncFeedbacksToRunpod, startRunpodFinetune, getRunpodJobStatus } from "@/lib/pdfUploadApi";
+import { syncFeedbacksToRunpod, startRunpodFinetune, getRunpodJobStatus, startFederatedLearning, getFederatedJobStatus, shareGradients, getShareGradientsStatus, getShareGradientsJobStatus } from "@/lib/pdfUploadApi";
 import {
   getAcordTrainingCount,
   getAcordTrainingSamples,
   getAcordSamplesForDisplay,
+  getAcordSampleDetail,
   markAcordSamplesUsed,
   type AcordSampleDisplay,
 } from "@/lib/acordSupabaseApi";
@@ -83,10 +85,11 @@ export default function Training() {
   // Expanded feedback item (click to view full details) — Recent Feedback tab
   const [expandedFeedbackId, setExpandedFeedbackId] = useState<string | null>(null);
 
-  // ACORD sample list (shown when user clicks the sample count badge)
-  const [showAcordSamples, setShowAcordSamples] = useState(false);
+  // ACORD sample list — always shown when samples exist, no toggle needed
+  const [showAcordSamples, setShowAcordSamples] = useState(true);
   const [acordSampleList, setAcordSampleList] = useState<AcordSampleDisplay[]>([]);
   const [acordSamplesLoading, setAcordSamplesLoading] = useState(false);
+  const [acordSamplesError, setAcordSamplesError] = useState<string | null>(null);
   const [expandedSampleId, setExpandedSampleId] = useState<string | null>(null);
 
   // Local Training tab — expanded item across all model lists (shared)
@@ -100,33 +103,69 @@ export default function Training() {
     status: string; phase?: string; version?: number; error?: string; eval_scores?: Record<string, any>;
   } | null>(null);
 
-  const refreshLocalAcordCount = async () => {
+  // Federated Learning — Global Update
+  const [isFederatedRunning, setIsFederatedRunning] = useState(false);
+  const [federatedStatus, setFederatedStatus] = useState<string | null>(null);
+  const [activeFederatedJobId, setActiveFederatedJobId] = useState<string | null>(null);
+  const [federatedJobStatus, setFederatedJobStatus] = useState<{
+    status: string; phase?: string; version?: number; versions_aggregated?: number[]; error?: string;
+  } | null>(null);
+
+  // Federated Learning — Share Gradients
+  const [hasPendingShare, setHasPendingShare] = useState(false);
+  const [pendingShareCount, setPendingShareCount] = useState(0);
+  const [isShareGradientsRunning, setIsShareGradientsRunning] = useState(false);
+  const [shareGradientsStatus, setShareGradientsStatus] = useState<string | null>(null);
+  const [activeShareJobId, setActiveShareJobId] = useState<string | null>(null);
+  const [shareJobStatus, setShareJobStatus] = useState<{
+    status: string; phase?: string; version?: number; error?: string;
+  } | null>(null);
+
+  const refreshAcordSamples = async () => {
+    setAcordSamplesLoading(true);
+    setAcordSamplesError(null);
     try {
-      const count = await getAcordTrainingCount();
+      const [count, samples] = await Promise.all([
+        getAcordTrainingCount(),
+        getAcordSamplesForDisplay(),
+      ]);
       setLocalAcordCount(count);
-    } catch {
-      // Supabase unavailable — fall back to localStorage for legacy samples
-      const count = getLocalFeedback().filter(
+      setAcordSampleList(samples);
+    } catch (err: any) {
+      const msg = err?.message ?? String(err) ?? "Unknown error";
+      console.error("[Training] refreshAcordSamples failed:", msg);
+      setAcordSamplesError(msg);
+      // Fall back to localStorage count
+      const localCount = getLocalFeedback().filter(
         (f) => f.model_id === "acord_form_understanding" && !f.is_used_for_training
       ).length;
-      setLocalAcordCount(count);
+      setLocalAcordCount(localCount);
+    } finally {
+      setAcordSamplesLoading(false);
     }
   };
 
-  const handleToggleAcordSamples = async () => {
-    if (showAcordSamples) {
-      setShowAcordSamples(false);
+  const refreshLocalAcordCount = refreshAcordSamples;
+
+  const handleToggleAcordSamples = () => {
+    setShowAcordSamples((prev) => !prev);
+  };
+
+  // Lazy-load prompt + original_response when the user expands a sample row
+  const handleExpandSample = async (runId: string) => {
+    if (expandedSampleId === runId) {
+      setExpandedSampleId(null);
       return;
     }
-    setShowAcordSamples(true);
-    setAcordSamplesLoading(true);
-    try {
-      const samples = await getAcordSamplesForDisplay();
-      setAcordSampleList(samples);
-    } catch {
-      setAcordSampleList([]);
-    } finally {
-      setAcordSamplesLoading(false);
+    setExpandedSampleId(runId);
+    const sample = acordSampleList.find((s) => s.run_id === runId);
+    if (sample && !sample.prompt) {
+      const detail = await getAcordSampleDetail(runId).catch(() => null);
+      if (detail) {
+        setAcordSampleList((prev) =>
+          prev.map((s) => s.run_id === runId ? { ...s, prompt: detail.prompt, original_response: detail.original_response } : s)
+        );
+      }
     }
   };
 
@@ -162,6 +201,55 @@ export default function Training() {
       setIsConnected(connected);
       setWebMode(!electron || !connected);
       await refreshLocalAcordCount();
+      // Check if locally trained weights are ready to share
+      try {
+        const pendingStatus = await getShareGradientsStatus();
+        setHasPendingShare(pendingStatus.has_pending);
+        setPendingShareCount(pendingStatus.pending_count ?? 0);
+      } catch {
+        // RunPod unreachable — leave hasPendingShare = false
+      }
+      // If there are submitted samples but at least one completed training job exists,
+      // those samples were already trained — mark them approved now.
+      // This fixes the case where the browser was closed before the polling callback fired.
+      (() => {
+        const completedJobs = getLocalJobs().filter((j: any) => j.status === "completed");
+        if (completedJobs.length > 0) {
+          getAcordTrainingSamples().then((pending) => {
+            if (pending.length > 0) {
+              markAcordSamplesUsed(pending.map((s) => s.run_id)).catch(() => {});
+              refreshLocalAcordCount();
+            }
+          }).catch(() => {});
+        }
+      })();
+
+      // ── Stale job cleanup ────────────────────────────────────────────────────
+      // Any "running" job from a previous calendar day is definitively stale —
+      // if it had completed, the polling useEffect would have updated localStorage.
+      // This runs before loadData() so both auth paths see clean state.
+      (() => {
+        const todayMidnight = new Date();
+        todayMidnight.setHours(0, 0, 0, 0);
+        const allJobs = getLocalJobs();
+        let changed = false;
+        const cleaned = allJobs.map((j: any) => {
+          if (j.status !== "running") return j;
+          const created = new Date(j.created_at ?? 0);
+          if (created < todayMidnight) {
+            changed = true;
+            return {
+              ...j,
+              status: "failed",
+              error_message: "Job interrupted — RunPod went offline before completion.",
+              completed_at: new Date().toISOString(),
+            };
+          }
+          return j;
+        });
+        if (changed) localStorage.setItem("local_training_jobs", JSON.stringify(cleaned));
+      })();
+
       loadData();
       // Restore live polling for any job still marked running
       const savedJobs = getLocalJobs();
@@ -232,6 +320,90 @@ export default function Training() {
     const interval = window.setInterval(poll, 5000);
     return () => { alive = false; clearInterval(interval); };
   }, [activeRunpodJobId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Poll share-gradients upload job every 5 s while active
+  useEffect(() => {
+    if (!activeShareJobId) return;
+    let alive = true;
+    let failCount = 0;
+    const MAX_FAILURES = 3;
+    const jobIdSnapshot = activeShareJobId;
+    const poll = async () => {
+      try {
+        const status = await getShareGradientsJobStatus(jobIdSnapshot);
+        if (!alive) return;
+        failCount = 0;
+        setShareJobStatus(status);
+        if (["completed", "partial", "failed"].includes(status.status)) {
+          setActiveShareJobId(null);
+          setIsShareGradientsRunning(false);
+          if (status.status === "completed") {
+            setHasPendingShare(false);
+            setShareGradientsStatus(`Weights uploaded to Fideon Weights as model v${status.version ?? "?"}.`);
+          } else if (status.status === "partial") {
+            setHasPendingShare(false);
+            setShareGradientsStatus(`Partially uploaded — some versions succeeded (v${status.version ?? "?"}), some failed. Check RunPod logs.`);
+          } else {
+            setShareGradientsStatus(`Upload failed: ${status.error ?? "unknown error"}`);
+          }
+        }
+      } catch (e: unknown) {
+        if (!alive) return;
+        const isConnectivityFailure =
+          (e instanceof DOMException && e.name === "AbortError") ||
+          (e instanceof Error && /502|503|unreachable|failed to fetch|networkerror|bad gateway/i.test(e.message));
+        if (isConnectivityFailure || ++failCount >= MAX_FAILURES) {
+          setActiveShareJobId(null);
+          setIsShareGradientsRunning(false);
+          setShareGradientsStatus("Lost connection to RunPod — share status unknown.");
+          setShareJobStatus(prev => prev ? { ...prev, status: "failed", error: "RunPod unreachable" } : null);
+        }
+      }
+    };
+    poll();
+    const interval = window.setInterval(poll, 5000);
+    return () => { alive = false; clearInterval(interval); };
+  }, [activeShareJobId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Poll federated aggregation job every 5 s while active
+  useEffect(() => {
+    if (!activeFederatedJobId) return;
+    let alive = true;
+    let failCount = 0;
+    const MAX_FAILURES = 3;
+    const jobIdSnapshot = activeFederatedJobId;
+    const poll = async () => {
+      try {
+        const status = await getFederatedJobStatus(jobIdSnapshot);
+        if (!alive) return;
+        failCount = 0;
+        setFederatedJobStatus(status);
+        if (["completed", "failed"].includes(status.status)) {
+          setActiveFederatedJobId(null);
+          setIsFederatedRunning(false);
+          setFederatedStatus(
+            status.status === "completed"
+              ? `Federated aggregation complete — model v${status.version ?? "?"} pushed to Azure Blob.`
+              : `Federated aggregation failed: ${status.error ?? "unknown error"}`
+          );
+        }
+      } catch (e: unknown) {
+        if (!alive) return;
+        const isConnectivityFailure =
+          (e instanceof DOMException && e.name === "AbortError") ||
+          (e instanceof Error && /502|unreachable|failed to fetch|networkerror/i.test(e.message));
+        if (isConnectivityFailure || ++failCount >= MAX_FAILURES) {
+          setActiveFederatedJobId(null);
+          setIsFederatedRunning(false);
+          setFederatedStatus("Lost connection to RunPod — federated status unknown.");
+          setFederatedJobStatus(prev => prev ? { ...prev, status: "failed", error: "RunPod unreachable" } : null);
+        }
+      }
+    };
+    poll();
+    const interval = window.setInterval(poll, 5000);
+    return () => { alive = false; clearInterval(interval); };
+  }, [activeFederatedJobId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadData = async () => {
     setLoading(true);
@@ -309,26 +481,42 @@ export default function Training() {
     setFinetuneStatus(null);
 
     try {
-      // Step 1: Load submitted samples from Supabase
+      // Step 1: Load BOTH sample sources up front
       setFinetuneStatus("Loading training samples from database…");
-      const samples = await getAcordTrainingSamples();
 
-      if (samples.length === 0) {
+      // Source A: ACORD Parser "Save & Train" corrections (acord_extraction_runs, status=submitted/needs_admin_review)
+      const acordSamples = await getAcordTrainingSamples();
+
+      // Source B: Form feedback (training_feedback table, model_id=acord_form_understanding, not yet used)
+      const formFeedbackSamples = feedback.filter(
+        (f: any) => f.model_id === "acord_form_understanding" && !f.is_used_for_training
+      );
+
+      const totalSamples = acordSamples.length + formFeedbackSamples.length;
+
+      if (totalSamples === 0) {
         setFinetuneStatus("No training samples found. Save a correction from the ACORD Parser first.");
         toast({ title: "No samples", description: "Save at least one correction before fine-tuning.", variant: "destructive" });
         return;
       }
 
-      // Step 2: Sync samples to RunPod pod filesystem
-      setFinetuneStatus(`Syncing ${samples.length} sample(s) to RunPod…`);
-      const syncResult = await syncFeedbacksToRunpod(
-        samples.map((s) => ({
+      // Step 2: Sync ALL samples to RunPod pod filesystem
+      setFinetuneStatus(`Syncing ${totalSamples} sample(s) to RunPod (${acordSamples.length} extraction${acordSamples.length !== 1 ? "s" : ""} + ${formFeedbackSamples.length} feedback)…`);
+      const syncResult = await syncFeedbacksToRunpod([
+        ...acordSamples.map((s) => ({
           prompt: s.prompt,
           original_response: s.original_response,
           corrected_response: s.corrected_response,
           form_type: s.form_type,
-        }))
-      );
+          run_id: s.run_id,
+        })),
+        ...formFeedbackSamples.map((f: any) => ({
+          prompt: f.prompt,
+          original_response: f.original_response,
+          corrected_response: f.corrected_response,
+          form_type: f.form_type || "25",
+        })),
+      ]);
 
       if (syncResult.failed > 0 && syncResult.synced === 0) {
         const msg = "Could not reach RunPod. Start the server on the pod:\ncd /workspace/ai-ml && python -m uvicorn server:app --host 0.0.0.0 --port 8000";
@@ -339,22 +527,25 @@ export default function Training() {
 
       // Step 3: Trigger fine-tuning on RunPod
       setFinetuneStatus("Starting fine-tuning job…");
-      const result = await startRunpodFinetune();
+      const result = await startRunpodFinetune({
+        acord_run_ids: acordSamples.map((s) => s.run_id).filter(Boolean),
+      });
       setFinetuneStatus(
         result.status === "queued"
-          ? `Fine-tuning queued with ${result.total_samples} sample(s). Running on RunPod GPU…`
+          ? `Fine-tuning queued with ${result.total_samples ?? totalSamples} sample(s). Running on RunPod GPU…`
           : result.message || result.status
       );
       toast({
         title: "Fine-tuning started on RunPod",
-        description: `${result.total_samples ?? samples.length} sample(s) sent for LoRA training.`,
+        description: `${result.total_samples ?? totalSamples} sample(s) sent for LoRA training.`,
       });
 
-      // Step 4: Mark samples as used in Supabase so they don't re-appear in count
-      const runIds = samples.map((s) => s.run_id);
-      await markAcordSamplesUsed(runIds).catch(() => {});
+      // Step 4: Mark acord_extraction_runs samples as approved so they don't re-appear
+      if (acordSamples.length > 0) {
+        await markAcordSamplesUsed(acordSamples.map((s) => s.run_id)).catch(() => {});
+      }
 
-      // Step 5: Record training job locally for history polling
+      // Step 5: Record training job — backend also marks training_feedback rows as is_used_for_training=true
       const runpodJobId = (result as any).job_id ?? null;
       if (runpodJobId) {
         setActiveRunpodJobId(runpodJobId);
@@ -363,7 +554,7 @@ export default function Training() {
       await createTrainingJob({
         model_id: "acord_form_understanding",
         training_type: "fine-tune",
-        config: { runpod_job_id: runpodJobId, sample_count: samples.length },
+        config: { runpod_job_id: runpodJobId, sample_count: totalSamples },
       }).catch(() => {});
 
       loadData();
@@ -409,6 +600,79 @@ export default function Training() {
       loadData();
     } catch (error: any) {
       toast({ title: "Error", description: error.message, variant: "destructive" });
+    }
+  };
+
+  const friendlyRunpodError = (msg: string): string => {
+    const m = msg.toLowerCase();
+    if (m.includes("404") || m.includes("econnrefused") || m.includes("fetch failed") || m.includes("failed to fetch") || m.includes("networkerror"))
+      return "RunPod pod is not reachable. Make sure the server is running on the pod.";
+    if (m.includes("502") || m.includes("bad gateway"))
+      return "RunPod gateway error. The pod may be starting up — try again in a moment.";
+    if (m.includes("503") || m.includes("unavailable"))
+      return "RunPod is temporarily unavailable. Try again shortly.";
+    return msg;
+  };
+
+  const handleShareGradients = async () => {
+    setIsShareGradientsRunning(true);
+    setShareGradientsStatus("Uploading weights to Azure Blob…");
+    setShareJobStatus(null);
+    try {
+      const result = await shareGradients();
+      if (result.status === "no_pending") {
+        setShareGradientsStatus("No pending weights found. Complete Local Training first.");
+        setIsShareGradientsRunning(false);
+        toast({ title: "No pending weights", description: "Run Local Training before sharing gradients.", variant: "destructive" });
+        return;
+      }
+      const shareJobId = result.job_id ?? null;
+      if (!shareJobId) {
+        setShareGradientsStatus(result.message || "Upload initiated — check RunPod logs for status.");
+        setIsShareGradientsRunning(false);
+        toast({ title: "Share Gradients initiated", description: result.message || "No job ID returned — check RunPod logs." });
+        return;
+      }
+      setActiveShareJobId(shareJobId);
+      setShareJobStatus({ status: "running", phase: "starting" });
+      setShareGradientsStatus("Upload started — sending weights to Azure Blob…");
+      toast({ title: "Share Gradients started", description: "Uploading locally trained weights to Fideon Weights." });
+    } catch (e: any) {
+      const msg = friendlyRunpodError(e?.message || "Failed to share gradients");
+      setShareGradientsStatus(msg);
+      setIsShareGradientsRunning(false);
+      toast({ title: "Share Gradients failed", description: msg, variant: "destructive" });
+    }
+  };
+
+  const handleStartFederated = async () => {
+    setIsFederatedRunning(true);
+    setFederatedStatus("Connecting to RunPod and checking Azure Blob for available weights…");
+    setFederatedJobStatus(null);
+    try {
+      const result = await startFederatedLearning();
+      if (result.status === "no_weights") {
+        setFederatedStatus("No weights found in Azure Blob. Complete Local Training and click 'Share Gradients' first.");
+        setIsFederatedRunning(false);
+        toast({ title: "No weights in Azure Blob", description: "Share Gradients must be clicked before Global Update can aggregate.", variant: "destructive" });
+        return;
+      }
+      const fedJobId = result.job_id ?? null;
+      if (!fedJobId) {
+        setFederatedStatus(result.message || "Aggregation initiated — check RunPod logs for status.");
+        setIsFederatedRunning(false);
+        toast({ title: "Federated Learning initiated", description: result.message || "No job ID returned — check RunPod logs." });
+        return;
+      }
+      setActiveFederatedJobId(fedJobId);
+      setFederatedJobStatus({ status: "running", phase: "starting" });
+      setFederatedStatus("Federated aggregation started — collecting weights from Azure Blob…");
+      toast({ title: "Federated Learning started", description: "FedAvg aggregation is running on the pod." });
+    } catch (e: any) {
+      const msg = friendlyRunpodError(e?.message || "Failed to start federated learning");
+      setFederatedStatus(msg);
+      setIsFederatedRunning(false);
+      toast({ title: "Global Update failed", description: msg, variant: "destructive" });
     }
   };
 
@@ -471,16 +735,6 @@ export default function Training() {
     }
   };
 
-  // 0=idle 1=local-training 2=uploading 3=aggregating 4=done
-  const getPipelineStep = (phase: string | undefined, status: string): number => {
-    if (status === "completed") return 4;
-    if (!phase) return 0;
-    if (["promoting"].includes(phase)) return 3;
-    if (["merging"].includes(phase)) return 2;
-    if (["starting", "loading_config", "building_dataset", "resolving_base_model",
-         "pending_registered", "training", "evaluating", "gate_checked"].includes(phase)) return 1;
-    return 0;
-  };
 
   if (!isElectronApp && !webMode) {
     return null;
@@ -503,11 +757,29 @@ export default function Training() {
   // Note: no early return for activatedModels.length === 0 —
   // the ACORD RunPod fine-tuning card must always be visible.
 
-  // Derived pipeline state — placed after early returns so TS sees them as read
-  const pipelineStep = getPipelineStep(runpodJobStatus?.phase, runpodJobStatus?.status ?? "");
-  const isJobRunning = !!activeRunpodJobId || runpodJobStatus?.status === "running";
-  const isJobDone = runpodJobStatus?.status === "completed";
-  const isJobFailed = runpodJobStatus?.status === "failed" || runpodJobStatus?.status === "gate_failed";
+  const getFederatedPhaseLabel = (phase: string | undefined): string => {
+    switch (phase) {
+      case "starting":             return "Initialising…";
+      case "discovering_versions": return "Discovering weight versions in Azure Blob…";
+      case "downloading_weights":  return "Downloading weights from Azure Blob…";
+      case "aggregating":          return "Running FedAvg aggregation…";
+      case "quantizing":           return "Quantizing model…";
+      case "uploading":            return "Uploading aggregated model to Azure Blob…";
+      case "done":                 return "Aggregation complete — new model version registered";
+      default:                     return phase ? `${phase}…` : "Processing…";
+    }
+  };
+
+  const getFederatedPipelineStep = (phase: string | undefined, status: string): number => {
+    if (status === "completed") return 2;
+    if (!phase) return 0;
+    if (["uploading", "done"].includes(phase)) return 2;
+    if (["starting", "discovering_versions", "downloading_weights", "aggregating", "quantizing"].includes(phase)) return 1;
+    return 0;
+  };
+
+  // Derived pipeline state
+  const fedPipelineStep = getFederatedPipelineStep(federatedJobStatus?.phase, federatedJobStatus?.status ?? "");
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
@@ -812,25 +1084,34 @@ export default function Training() {
                           </Button>
                         </div>
 
-                        {/* Expandable sample list — ACORD runs + form feedback, sorted latest first */}
-                        {showAcordSamples && (
-                          <div className="border rounded-lg overflow-hidden">
-                            <div className="px-4 py-2 bg-muted/50 border-b flex items-center justify-between">
-                              <span className="text-sm font-medium">Training Samples</span>
+                        {/* Training sample list — shown when the "N samples" badge is expanded */}
+                        {showAcordSamples && <div className="border rounded-lg overflow-hidden">
+                          <div className="px-4 py-2 bg-muted/50 border-b flex items-center justify-between">
+                            <span className="text-sm font-medium">Training Samples</span>
+                            <div className="flex items-center gap-2">
                               <span className="text-xs text-muted-foreground">
-                                {acordSampleList.length} sample{acordSampleList.length !== 1 ? "s" : ""} · latest first
+                                {acordSamplesLoading ? "Loading…" : `${acordSampleList.length + acordFormFeedback.length} sample${acordSampleList.length + acordFormFeedback.length !== 1 ? "s" : ""} · latest first`}
                               </span>
+                              <button onClick={refreshAcordSamples} className="text-xs text-muted-foreground hover:text-foreground underline">
+                                Refresh
+                              </button>
                             </div>
-                            {acordSamplesLoading ? (
-                              <div className="flex items-center justify-center py-6 gap-2 text-muted-foreground">
-                                <Loader2 className="h-4 w-4 animate-spin" />
-                                <span className="text-sm">Loading samples…</span>
-                              </div>
-                            ) : acordSampleList.length === 0 ? (
-                              <div className="py-6 text-center text-sm text-muted-foreground">
-                                No samples found
-                              </div>
-                            ) : (
+                          </div>
+                          {acordSamplesLoading ? (
+                            <div className="flex items-center justify-center py-6 gap-2 text-muted-foreground">
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              <span className="text-sm">Loading samples…</span>
+                            </div>
+                          ) : acordSamplesError ? (
+                            <div className="py-4 px-4 text-center space-y-2">
+                              <p className="text-sm text-destructive">{acordSamplesError}</p>
+                              <button onClick={refreshAcordSamples} className="text-xs underline text-muted-foreground">Retry</button>
+                            </div>
+                          ) : acordSampleList.length === 0 && acordFormFeedback.length === 0 ? (
+                            <div className="py-6 text-center text-sm text-muted-foreground">
+                              No samples found — save a correction from the ACORD Parser or submit feedback first
+                            </div>
+                          ) : (
                               <div className="divide-y">
                                 {acordSampleList.map((s, idx) => {
                                   const date = new Date(s.created_at);
@@ -843,10 +1124,9 @@ export default function Training() {
                                   const isSampleExpanded = expandedSampleId === s.run_id;
                                   return (
                                     <div key={s.run_id} className="overflow-hidden">
-                                      {/* Clickable summary row */}
                                       <button
                                         className="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted/40 transition-colors text-left"
-                                        onClick={() => setExpandedSampleId(isSampleExpanded ? null : s.run_id)}
+                                        onClick={() => handleExpandSample(s.run_id)}
                                       >
                                         <span className="text-xs text-muted-foreground w-5 shrink-0">
                                           {idx + 1}
@@ -877,7 +1157,6 @@ export default function Training() {
                                         )}
                                       </button>
 
-                                      {/* Expanded detail panel */}
                                       {isSampleExpanded && (
                                         <div className="border-t bg-muted/20 px-5 py-4 space-y-4">
                                           <div>
@@ -917,23 +1196,6 @@ export default function Training() {
                                     </div>
                                   );
                                 })}
-                              </div>
-                            )}
-                          </div>
-                        )}
-
-                        {/* Form-submitted feedback for ACORD — from training_feedback table */}
-                        {(() => {
-                          if (acordFormFeedback.length === 0) return null;
-                          return (
-                            <div className="border rounded-lg overflow-hidden">
-                              <div className="px-4 py-2 bg-muted/50 border-b flex items-center justify-between">
-                                <span className="text-sm font-medium">Form Feedback</span>
-                                <span className="text-xs text-muted-foreground">
-                                  {acordFormFeedback.length} item{acordFormFeedback.length !== 1 ? "s" : ""} · latest first
-                                </span>
-                              </div>
-                              <div className="divide-y">
                                 {acordFormFeedback.map((fb: any, idx: number) => {
                                   const isItemExpanded = expandedLocalItemId === fb.id;
                                   const date = new Date(fb.created_at);
@@ -945,7 +1207,7 @@ export default function Training() {
                                         className="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted/40 transition-colors text-left"
                                         onClick={() => setExpandedLocalItemId(isItemExpanded ? null : fb.id)}
                                       >
-                                        <span className="text-xs text-muted-foreground w-5 shrink-0">{idx + 1}</span>
+                                        <span className="text-xs text-muted-foreground w-5 shrink-0">{acordSampleList.length + idx + 1}</span>
                                         <MessageSquare className="h-4 w-4 text-muted-foreground shrink-0" />
                                         <div className="flex-1 min-w-0">
                                           <p className="text-sm font-medium truncate">{fb.prompt}</p>
@@ -987,9 +1249,8 @@ export default function Training() {
                                   );
                                 })}
                               </div>
-                            </div>
-                          );
-                        })()}
+                            )}
+                          </div>}
                       </div>
                     );
                   }
@@ -1167,13 +1428,123 @@ export default function Training() {
             </p>
           </div>
 
-          {/* Live Pipeline Status */}
-          {(isJobRunning || isJobDone || isJobFailed) && (() => {
-            const steps = [
-              { label: "Local Training",      desc: "QLoRA fine-tuning on GPU",                  icon: Cpu },
-              { label: "Upload Weights",       desc: "Merge adapter & push to SeaweedFS",         icon: Upload },
-              { label: "Global Aggregation",   desc: "FedAvg across participants",                icon: Globe },
-              { label: "Model Ready",          desc: "New version available for Electron download", icon: CheckCircle2 },
+          {/* Share Gradients — manual upload trigger */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Upload className="h-5 w-5" />
+                Share Gradients
+              </CardTitle>
+              <CardDescription>
+                Upload your locally trained weights to Azure Blob.
+                Encrypted weight deltas are sent — your raw data stays on this device.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <Button onClick={handleShareGradients} disabled={isShareGradientsRunning} className="gap-2">
+                {isShareGradientsRunning
+                  ? <><Loader2 className="h-4 w-4 animate-spin" />Uploading…</>
+                  : <><Upload className="h-4 w-4" />Share Gradients</>}
+              </Button>
+              {!shareGradientsStatus && !shareJobStatus && !isShareGradientsRunning && (
+                <div className="flex items-start gap-2 p-3 rounded-lg bg-muted/50 border text-sm text-muted-foreground">
+                  <Info className="h-4 w-4 shrink-0 mt-0.5 text-blue-500" />
+                  <span>
+                    {hasPendingShare
+                      ? pendingShareCount > 1
+                        ? `${pendingShareCount} training versions are pending upload. Click Share Gradients to upload all of them.`
+                        : "Locally trained weights are ready. Click Share Gradients to upload."
+                      : "No weights available to share. Complete Local Training first, then come back here."}
+                  </span>
+                </div>
+              )}
+              {isShareGradientsRunning && shareGradientsStatus && (
+                <div className="flex items-center gap-2 p-3 rounded-lg bg-blue-500/10 border border-blue-500/20 text-sm text-blue-600 dark:text-blue-400">
+                  <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                  {shareGradientsStatus}
+                </div>
+              )}
+              {shareGradientsStatus && !isShareGradientsRunning && shareJobStatus?.status !== "completed" && (
+                <div className={`flex items-start gap-2 p-3 rounded-lg border text-sm ${
+                  shareGradientsStatus.startsWith("No pending") || shareGradientsStatus.startsWith("No weights")
+                    ? "bg-amber-500/10 border-amber-500/20 text-amber-600 dark:text-amber-400"
+                    : "bg-red-500/10 border-red-500/20 text-red-600 dark:text-red-400"
+                }`}>
+                  {shareGradientsStatus.startsWith("No pending") || shareGradientsStatus.startsWith("No weights")
+                    ? <Info className="h-4 w-4 shrink-0 mt-0.5" />
+                    : <XCircle className="h-4 w-4 shrink-0 mt-0.5" />}
+                  <span>{shareGradientsStatus}</span>
+                </div>
+              )}
+              {shareJobStatus?.status === "completed" && (
+                <div className="flex items-center gap-2 p-3 rounded-lg bg-green-500/10 border border-green-500/20 text-sm text-green-600 dark:text-green-400">
+                  <CheckCircle2 className="h-4 w-4 shrink-0" />
+                  Weights uploaded to Fideon Weights — click Global Update below to aggregate.
+                </div>
+              )}
+              {shareJobStatus?.status === "failed" && (
+                <div className="flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-sm text-red-600 dark:text-red-400">
+                  <XCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <span>{shareJobStatus.error || "Upload failed. Check RunPod logs."}</span>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Global Update — FedAvg aggregation trigger */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Globe className="h-5 w-5" />
+                Global Update
+              </CardTitle>
+              <CardDescription>
+                Collect all weight versions from Azure Blob, run FedAvg aggregation,
+                quantize the result, and register a new global model version.
+                Run this after all participants have shared their gradients.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <Button onClick={handleStartFederated} disabled={isFederatedRunning} className="gap-2">
+                {isFederatedRunning
+                  ? <><Loader2 className="h-4 w-4 animate-spin" />Aggregating…</>
+                  : <><Globe className="h-4 w-4" />Global Update</>}
+              </Button>
+              {!federatedStatus && !federatedJobStatus && !isFederatedRunning && (
+                <div className="flex items-start gap-2 p-3 rounded-lg bg-muted/50 border text-sm text-muted-foreground">
+                  <Info className="h-4 w-4 shrink-0 mt-0.5 text-blue-500" />
+                  <span>No weights available for aggregation yet. Share Gradients first, then run Global Update.</span>
+                </div>
+              )}
+              {isFederatedRunning && federatedStatus && (
+                <div className="flex items-center gap-2 p-3 rounded-lg bg-blue-500/10 border border-blue-500/20 text-sm text-blue-600 dark:text-blue-400">
+                  <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                  {federatedStatus}
+                </div>
+              )}
+              {federatedStatus && !isFederatedRunning && !federatedJobStatus && (
+                <div className={`flex items-start gap-2 p-3 rounded-lg border text-sm ${
+                  federatedStatus.includes("No weights")
+                    ? "bg-amber-500/10 border-amber-500/20 text-amber-600 dark:text-amber-400"
+                    : "bg-red-500/10 border-red-500/20 text-red-600 dark:text-red-400"
+                }`}>
+                  {federatedStatus.includes("No weights")
+                    ? <Info className="h-4 w-4 shrink-0 mt-0.5" />
+                    : <XCircle className="h-4 w-4 shrink-0 mt-0.5" />}
+                  <span>{federatedStatus}</span>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Federated job pipeline status */}
+          {federatedJobStatus && (() => {
+            const isFedDone   = federatedJobStatus.status === "completed";
+            const isFedFailed = federatedJobStatus.status === "failed";
+            const isFedActive = !isFedDone && !isFedFailed;
+            const fedSteps = [
+              { label: "Collect & Aggregate", desc: "Download weights from Azure Blob and run FedAvg", icon: Globe },
+              { label: "New Model Ready",     desc: "Aggregated model pushed to Azure Blob",           icon: CheckCircle2 },
             ];
             return (
               <Card>
@@ -1181,47 +1552,38 @@ export default function Training() {
                   <CardTitle className="flex items-center gap-2">
                     <Globe className="h-5 w-5" />
                     Federated Learning — Pipeline Status
-                    {isJobRunning && <Loader2 className="h-4 w-4 ml-1 animate-spin text-blue-500" />}
-                    {isJobDone && <CheckCircle2 className="h-4 w-4 ml-1 text-green-500" />}
-                    {isJobFailed && <XCircle className="h-4 w-4 ml-1 text-red-500" />}
+                    {isFedActive  && <Loader2 className="h-4 w-4 ml-1 animate-spin text-blue-500" />}
+                    {isFedDone    && <CheckCircle2 className="h-4 w-4 ml-1 text-green-500" />}
+                    {isFedFailed  && <XCircle className="h-4 w-4 ml-1 text-red-500" />}
                   </CardTitle>
-                  {runpodJobStatus?.phase && (
+                  {federatedJobStatus.phase && (
                     <CardDescription className="flex items-center gap-1.5">
                       <span className="inline-block h-1.5 w-1.5 rounded-full bg-blue-500 animate-pulse" />
-                      {getPhaseLabel(runpodJobStatus.phase)}
+                      {getFederatedPhaseLabel(federatedJobStatus.phase)}
                     </CardDescription>
                   )}
                 </CardHeader>
                 <CardContent>
-                  {/* Step indicators */}
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
-                    {steps.map((s, i) => {
+                  <div className="grid grid-cols-2 gap-3 mb-4">
+                    {fedSteps.map((s, i) => {
                       const stepNum = i + 1;
-                      const done = isJobDone ? true : pipelineStep > stepNum;
-                      const active = !isJobFailed && pipelineStep === stepNum;
-                      const failed = isJobFailed && pipelineStep === stepNum;
+                      const done   = isFedDone ? true : fedPipelineStep > stepNum;
+                      const active = !isFedFailed && fedPipelineStep === stepNum;
+                      const failed = isFedFailed && fedPipelineStep === stepNum;
                       return (
-                        <div
-                          key={s.label}
-                          className={`relative flex flex-col items-center text-center p-3 rounded-lg border transition-colors ${
-                            done ? "border-green-500/40 bg-green-500/5" :
-                            active ? "border-blue-500/40 bg-blue-500/5" :
-                            failed ? "border-red-500/40 bg-red-500/5" :
-                            "border-border/40 bg-muted/20 opacity-50"
-                          }`}
-                        >
+                        <div key={s.label} className={`flex flex-col items-center text-center p-3 rounded-lg border transition-colors ${
+                          done ? "border-green-500/40 bg-green-500/5" :
+                          active ? "border-blue-500/40 bg-blue-500/5" :
+                          failed ? "border-red-500/40 bg-red-500/5" :
+                          "border-border/40 bg-muted/20 opacity-50"
+                        }`}>
                           <div className={`mb-2 h-9 w-9 rounded-full flex items-center justify-center ${
                             done ? "bg-green-500/15" : active ? "bg-blue-500/15" : failed ? "bg-red-500/15" : "bg-muted"
                           }`}>
-                            {done ? (
-                              <CheckCircle2 className="h-5 w-5 text-green-500" />
-                            ) : active ? (
-                              <Loader2 className="h-5 w-5 text-blue-500 animate-spin" />
-                            ) : failed ? (
-                              <XCircle className="h-5 w-5 text-red-500" />
-                            ) : (
-                              <s.icon className="h-5 w-5 text-muted-foreground" />
-                            )}
+                            {done   ? <CheckCircle2 className="h-5 w-5 text-green-500" /> :
+                             active ? <Loader2 className="h-5 w-5 text-blue-500 animate-spin" /> :
+                             failed ? <XCircle className="h-5 w-5 text-red-500" /> :
+                             <s.icon className="h-5 w-5 text-muted-foreground" />}
                           </div>
                           <span className={`text-[10px] font-bold uppercase tracking-wide mb-0.5 ${
                             done ? "text-green-500" : active ? "text-blue-500" : failed ? "text-red-500" : "text-muted-foreground"
@@ -1232,21 +1594,24 @@ export default function Training() {
                       );
                     })}
                   </div>
-
-                  {/* Overall progress bar */}
-                  <Progress value={isJobDone ? 100 : isJobFailed ? (pipelineStep / 4) * 100 : ((pipelineStep - 0.5) / 4) * 100} className="h-1.5 mb-3" />
-
-                  {/* Terminal state messages */}
-                  {isJobDone && (
-                    <div className="flex items-center gap-2 p-3 rounded-lg bg-green-500/10 border border-green-500/20 text-sm text-green-600 dark:text-green-400">
-                      <CheckCircle2 className="h-4 w-4 shrink-0" />
-                      Model {runpodJobStatus?.version ? `v${runpodJobStatus.version}` : ""} registered successfully — available for Electron download.
+                  <Progress value={isFedDone ? 100 : isFedFailed ? (fedPipelineStep / 2) * 100 : ((fedPipelineStep - 0.5) / 2) * 100} className="h-1.5 mb-3" />
+                  {isFedDone && (
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 p-3 rounded-lg bg-green-500/10 border border-green-500/20 text-sm text-green-600 dark:text-green-400">
+                        <CheckCircle2 className="h-4 w-4 shrink-0" />
+                        Federated model{federatedJobStatus.version ? ` v${federatedJobStatus.version}` : ""} registered in Fideon Weights — available for Electron download.
+                      </div>
+                      {(federatedJobStatus.versions_aggregated?.length ?? 0) > 0 && (
+                        <p className="text-xs text-muted-foreground px-1">
+                          Aggregated from versions: {federatedJobStatus.versions_aggregated!.map(v => `v${v}`).join(", ")}
+                        </p>
+                      )}
                     </div>
                   )}
-                  {isJobFailed && (
+                  {isFedFailed && (
                     <div className="flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-sm text-red-600 dark:text-red-400">
                       <XCircle className="h-4 w-4 shrink-0 mt-0.5" />
-                      <span>{runpodJobStatus?.error || "Training failed. Check RunPod logs for details."}</span>
+                      <span>{federatedJobStatus.error || "Aggregation failed. Check RunPod logs."}</span>
                     </div>
                   )}
                 </CardContent>
@@ -1254,8 +1619,8 @@ export default function Training() {
             );
           })()}
 
-          {/* No job running and no recent result — show idle state with existing rounds or info */}
-          {!isJobRunning && !isJobDone && !isJobFailed && (
+          {/* Existing federated rounds from device-token API */}
+          {rounds.length > 0 && (
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
@@ -1264,54 +1629,43 @@ export default function Training() {
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                {rounds.length === 0 ? (
-                  <div className="text-center py-8">
-                    <Globe className="h-12 w-12 mx-auto mb-3 text-muted-foreground opacity-40" />
-                    <h3 className="font-medium mb-1">No Active Rounds</h3>
-                    <p className="text-sm text-muted-foreground max-w-sm mx-auto">
-                      Start local training above to kick off the pipeline. After weights are uploaded
-                      to SeaweedFS the global aggregation runs automatically.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="space-y-4">
-                    {rounds.map((round: any) => {
-                      const contributed = hasContributed(round);
-                      const progress = (round.current_participants / round.min_participants) * 100;
-                      return (
-                        <div key={round.id} className="p-4 border rounded-lg space-y-3">
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                              <h4 className="font-medium capitalize">{round.model_id.replace(/_/g, " ")}</h4>
-                              <Badge variant="outline">Round {round.round_number}</Badge>
-                              <Badge variant={getRoundBadgeVariant(round.status)}>{round.status}</Badge>
-                            </div>
-                            {contributed && (
-                              <Badge className="bg-green-500 text-white">
-                                <CheckCircle2 className="h-3 w-3 mr-1" />Contributed
-                              </Badge>
-                            )}
+                <div className="space-y-4">
+                  {rounds.map((round: any) => {
+                    const contributed = hasContributed(round);
+                    const progress = (round.current_participants / round.min_participants) * 100;
+                    return (
+                      <div key={round.id} className="p-4 border rounded-lg space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <h4 className="font-medium capitalize">{round.model_id.replace(/_/g, " ")}</h4>
+                            <Badge variant="outline">Round {round.round_number}</Badge>
+                            <Badge variant={getRoundBadgeVariant(round.status)}>{round.status}</Badge>
                           </div>
-                          <div className="space-y-1">
-                            <div className="flex justify-between text-sm">
-                              <span className="text-muted-foreground flex items-center gap-1">
-                                <Users className="h-3 w-3" />
-                                {round.current_participants}/{round.min_participants} participants
-                              </span>
-                              <span className="text-muted-foreground">{round.aggregation_method}</span>
-                            </div>
-                            <Progress value={Math.min(progress, 100)} />
-                          </div>
-                          {!contributed && round.status === "collecting" && (
-                            <Button size="sm" onClick={() => handleContribute(round)}>
-                              <Upload className="h-4 w-4 mr-2" />Contribute Gradient Update
-                            </Button>
+                          {contributed && (
+                            <Badge className="bg-green-500 text-white">
+                              <CheckCircle2 className="h-3 w-3 mr-1" />Contributed
+                            </Badge>
                           )}
                         </div>
-                      );
-                    })}
-                  </div>
-                )}
+                        <div className="space-y-1">
+                          <div className="flex justify-between text-sm">
+                            <span className="text-muted-foreground flex items-center gap-1">
+                              <Users className="h-3 w-3" />
+                              {round.current_participants}/{round.min_participants} participants
+                            </span>
+                            <span className="text-muted-foreground">{round.aggregation_method}</span>
+                          </div>
+                          <Progress value={Math.min(progress, 100)} />
+                        </div>
+                        {!contributed && round.status === "collecting" && (
+                          <Button size="sm" onClick={() => handleContribute(round)}>
+                            <Upload className="h-4 w-4 mr-2" />Contribute Gradient Update
+                          </Button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               </CardContent>
             </Card>
           )}
@@ -1327,10 +1681,10 @@ export default function Training() {
             <CardContent>
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                 {[
-                  { step: "1", title: "Collect Feedback", desc: "Rate and correct AI outputs during normal use", icon: MessageSquare },
-                  { step: "2", title: "Train Locally", desc: "Fine-tune the model on RunPod GPU using LoRA adapters", icon: Cpu },
-                  { step: "3", title: "Upload & Aggregate", desc: "Weights pushed to SeaweedFS; FedAvg runs automatically", icon: Globe },
-                  { step: "4", title: "Model Updated", desc: "New version registered and distributed to Electron devices", icon: CheckCircle2 },
+                  { step: "1", title: "Collect Feedback",    desc: "Rate and correct AI outputs during normal use",                                 icon: MessageSquare },
+                  { step: "2", title: "Train Locally",       desc: "Fine-tune the model on RunPod GPU using LoRA adapters",                         icon: Cpu },
+                  { step: "3", title: "Share Gradients",     desc: "Encrypted weight deltas sent (not your data)",                                  icon: Upload },
+                  { step: "4", title: "Global Update",       desc: "FedAvg aggregation + quantization — new global model registered in Azure Blob",  icon: Globe },
                 ].map((item: any) => (
                   <div key={item.step} className="text-center p-4 border rounded-lg">
                     <div className="mx-auto mb-2 h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center">

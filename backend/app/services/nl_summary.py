@@ -2,7 +2,7 @@
 Natural language summary generation for ACORD extraction results.
 
 Enabled via ACORD_NL_SUMMARY_ENABLED=true.
-Uses whichever LLM endpoint is configured (OFFLINE_LLM_GENERATE_URL → chat endpoint fallback).
+Uses whichever LLM endpoint is configured (RUNPOD_GENERATE_URL → chat endpoint fallback).
 All failures are silently swallowed — the summary is always optional.
 """
 from __future__ import annotations
@@ -17,25 +17,69 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _PROMPT_TEMPLATE = """\
-You are a senior insurance document analyst. You have been given the structured fields extracted from an ACORD insurance form and the raw document text. Write a thorough, professional natural language summary that a claims adjuster or broker could use to understand the document at a glance.
+You are an insurance document analyst. Write a professional summary of this ACORD insurance form in plain prose paragraphs.
 
-STRICT RULES:
-- Write in flowing paragraphs only — no bullet points, no numbered lists, no headings, no JSON, no markdown
-- Cover every section that has data: named insured and address, producer/agent, insurers, policy numbers, effective and expiration dates, each coverage type with its exact limits and deductibles, additional insureds, certificate holders, special conditions, and cancellation provisions
-- Use exact dollar figures as written on the form (e.g. "$1,000,000" or "$2,000,000 aggregate")
-- If a field is truly blank or absent, omit it — never write "not provided" or "N/A"
-- Do NOT reproduce raw OCR text verbatim — synthesise the information into professional prose
-- Write at least 5 paragraphs: (1) parties and purpose, (2) general liability coverage, (3) auto and workers comp / employers liability, (4) umbrella / excess and any other coverages, (5) certificate holder, additional insured status, and special provisions
-- If a coverage section has no data, skip that paragraph entirely
-- Tone: factual, precise, professional
+RULES (follow exactly):
+- Write 3 to 5 paragraphs of plain prose — no bullet points, no numbered lists, no headings
+- Use the exact names, dates, policy numbers, phone numbers, and addresses from the document
+- Cover each topic only once: who the applicant is and what form this is; premises and locations; business operations; prior carriers, premiums, loss history; contacts and agency details
+- Skip any topic that has no data
+- Stop writing immediately after the final paragraph
 
-EXTRACTED FIELDS (JSON):
-{fields_json}
+DOCUMENT FIELDS:
+{fields_text}
 
-RAW DOCUMENT TEXT (use for any detail not in the fields):
-{raw_text}
+Write the summary now:"""
 
-Write the detailed natural language summary now:"""
+_GARBAGE_VALUES = {"$", "</b>", "<b>", "", "-", "none", "n/a", "n/a.", "null", "undefined"}
+_SKIP_KEY_PREFIXES = ("applicable_in_",)
+
+
+def _to_label(key: str) -> str:
+    return key.replace("_", " ").title()
+
+
+def _fields_to_readable_text(extracted: dict[str, Any]) -> str:
+    """
+    Flatten nested extracted JSON into simple "Label: value" lines.
+    This prevents the LLM from seeing JSON structure and defaulting to
+    bullet-point enumeration of each key.
+    """
+    lines: list[str] = []
+
+    def _emit(value: Any, prefix: str) -> None:
+        if value is None or value == "":
+            return
+        if isinstance(value, dict):
+            for k, v in value.items():
+                if k.startswith("_"):
+                    continue
+                child_label = f"{prefix} - {_to_label(k)}" if prefix else _to_label(k)
+                _emit(v, child_label)
+        elif isinstance(value, list):
+            if not value:
+                return
+            all_primitive = all(not isinstance(item, (dict, list)) for item in value)
+            if all_primitive:
+                joined = ", ".join(str(v) for v in value if v is not None)
+                if joined.strip():
+                    lines.append(f"{prefix}: {joined}")
+            else:
+                for idx, item in enumerate(value, 1):
+                    _emit(item, f"{prefix} {idx}")
+        else:
+            s = str(value).strip()
+            if s and s.lower() not in _GARBAGE_VALUES:
+                lines.append(f"{prefix}: {s}")
+
+    for key, value in extracted.items():
+        if any(key.startswith(p) for p in _SKIP_KEY_PREFIXES):
+            continue
+        if isinstance(value, str) and value.strip().lower() in _GARBAGE_VALUES:
+            continue
+        _emit(value, _to_label(key))
+
+    return "\n".join(lines)
 
 
 async def generate_nl_summary(extracted: dict[str, Any], raw_text: str) -> Optional[str]:
@@ -49,13 +93,11 @@ async def generate_nl_summary(extracted: dict[str, Any], raw_text: str) -> Optio
     if not enabled:
         return None
 
-    fields_json = json.dumps(extracted, indent=2, ensure_ascii=False)[:8000]
-    raw_snippet = (raw_text or "")[:5000]
-    prompt = _PROMPT_TEMPLATE.format(fields_json=fields_json, raw_text=raw_snippet)
+    fields_text = _fields_to_readable_text(extracted)
+    # Cap so prompt stays within model context; raw text is secondary reference
+    fields_snippet = fields_text[:6000]
+    prompt = _PROMPT_TEMPLATE.format(fields_text=fields_snippet)
 
-    # Prefer the external RunPod generate URL; fall back to the local offline URL.
-    # OFFLINE_LLM_GENERATE_URL is often set to localhost (co-located vLLM) which is
-    # unreachable when the LLM is running on a remote RunPod pod.
     offline_url = (os.getenv("RUNPOD_GENERATE_URL") or os.getenv("OFFLINE_LLM_GENERATE_URL") or "").strip()
     chat_url = (os.getenv("RUNPOD_OPENAI_COMPAT_URL") or os.getenv("OPENAI_CHAT_COMPLETIONS_URL") or "").strip()
     token = (os.getenv("OFFLINE_LLM_AUTH_TOKEN") or os.getenv("OPENAI_API_KEY") or "").strip()
@@ -78,8 +120,8 @@ async def generate_nl_summary(extracted: dict[str, Any], raw_text: str) -> Optio
                     json={
                         "prompt": prompt,
                         "model": model or "default",
-                        "max_new_tokens": 2048,
-                        "temperature": 0.3,
+                        "max_new_tokens": 900,
+                        "temperature": 0.1,
                         "raw": True,
                     },
                 )
@@ -101,8 +143,8 @@ async def generate_nl_summary(extracted: dict[str, Any], raw_text: str) -> Optio
                             {"role": "system", "content": "You are a senior insurance document analyst."},
                             {"role": "user", "content": prompt},
                         ],
-                        "max_tokens": 2048,
-                        "temperature": 0.3,
+                        "max_tokens": 900,
+                        "temperature": 0.1,
                     },
                 )
                 resp.raise_for_status()

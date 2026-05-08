@@ -181,6 +181,30 @@ export async function extractAcord(
   throw new Error("Extraction timed out while waiting for async job");
 }
 
+export async function compareAcordPolicies(
+  fileA: File,
+  fileB: File,
+  deviationThresholdPercent = 10,
+  lob?: string,
+): Promise<any> {
+  console.debug(`${LOG} compareAcordPolicies: fileA=${fileA.name} fileB=${fileB.name} threshold=${deviationThresholdPercent} lob=${lob ?? "none"}`);
+  const headers = await authHeader();
+  const formData = new FormData();
+  formData.append("file_a", fileA);
+  formData.append("file_b", fileB);
+
+  const params = new URLSearchParams({ deviation_threshold_percent: String(deviationThresholdPercent) });
+  if (lob) params.set("lob", lob);
+  const url = apiUrl(`/api/policy-comparison/compare?${params.toString()}`);
+  const resp = await fetch(url, { method: "POST", headers, body: formData });
+  if (!resp.ok) {
+    const body = await resp.text();
+    if (resp.status === 401) throw new Error("Session expired — please sign out and sign back in.");
+    throw new Error(body || `Policy comparison failed (${resp.status})`);
+  }
+  return await resp.json();
+}
+
 export async function listUserRuns(
   page = 1,
   limit = 20,

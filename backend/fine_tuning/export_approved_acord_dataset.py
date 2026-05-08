@@ -69,25 +69,46 @@ def _headers() -> dict[str, str]:
     }
 
 
-def fetch_approved_runs(*, limit: int = 1000, run_id: str | None = None) -> List[Dict[str, Any]]:
+def fetch_approved_runs(*, limit: int = 99999, run_id: str | None = None) -> List[Dict[str, Any]]:
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not configured")
 
     base_select = "select=id,created_at,source_filename,form_type_detected,raw_text,extracted_json,overall_confidence,status"
+
     if run_id:
         rid = quote(run_id, safe="")
-        # Must match bulk export: only approved runs (rejected/draft must not train).
         query = f"{base_select}&id=eq.{rid}&status=eq.approved&limit=1"
+        url = f"{SUPABASE_URL}/rest/v1/acord_extraction_runs?{query}"
+        with httpx.Client(timeout=60) as client:
+            resp = client.get(url, headers=_headers())
+        if resp.status_code >= 400:
+            raise RuntimeError(resp.text)
+        rows = resp.json() if isinstance(resp.json(), list) else []
     else:
-        query = f"{base_select}&status=eq.approved&limit={limit}&order=created_at.asc"
-    url = f"{SUPABASE_URL}/rest/v1/acord_extraction_runs?{query}"
-    with httpx.Client(timeout=60) as client:
-        resp = client.get(url, headers=_headers())
-    if resp.status_code >= 400:
-        raise RuntimeError(resp.text)
-    rows = resp.json()
-    if not isinstance(rows, list):
-        rows = []
+        # Paginate so every approved run is fetched regardless of total count.
+        PAGE = 1000
+        rows: List[Dict[str, Any]] = []
+        offset = 0
+        with httpx.Client(timeout=60) as client:
+            while len(rows) < limit:
+                batch_size = min(PAGE, limit - len(rows))
+                query = (
+                    f"{base_select}&status=eq.approved"
+                    f"&order=created_at.asc&limit={batch_size}&offset={offset}"
+                )
+                url = f"{SUPABASE_URL}/rest/v1/acord_extraction_runs?{query}"
+                resp = client.get(url, headers=_headers())
+                if resp.status_code >= 400:
+                    raise RuntimeError(resp.text)
+                batch = resp.json()
+                if not isinstance(batch, list) or len(batch) == 0:
+                    break
+                rows.extend(batch)
+                if len(batch) < batch_size:
+                    break
+                offset += batch_size
+        print(f"[export] fetched {len(rows)} approved run(s) across paginated queries", flush=True)
+
     before = len(rows)
     rows = [r for r in rows if str(r.get("status") or "").strip().lower() == "approved"]
     skipped = before - len(rows)

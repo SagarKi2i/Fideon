@@ -12,47 +12,57 @@ log "Starting Fideon AI-ML Server..."
 mkdir -p /workspace/.cache/datalab
 export DATALAB_CACHE_PATH=/workspace/.cache/datalab
 
-# ── Python venv: create once on volume, reuse forever ─────────────────────────
-# Use "python -m pip" throughout — bin/pip script is not reliably created by
-# ensurepip on all base images, but the pip module is always present.
-VENV=/workspace/venv
-PY="$VENV/bin/python"
-# Redirect pip tmp dir to /workspace so large package extraction does not
-# fill the 5 GB container overlay disk
+# ── Python: use system Python (Docker pre-baked) or workspace venv ────────────
+# Redirect pip tmp dir to /workspace so large extractions don't fill container disk
 mkdir -p /workspace/tmp
 export TMPDIR=/workspace/tmp
 
-if [ ! -f "$VENV/bin/activate" ]; then
-    log "First boot: creating venv at $VENV (~5-10 min)..."
+VENV=/workspace/venv
+PY="$VENV/bin/python"
+UVICORN_BIN="$VENV/bin/uvicorn"
+
+if python3 -c "import torch, uvicorn, surya, transformers" 2>/dev/null; then
+    # Fast path: packages baked into the Docker image — no pip install needed
+    log "Docker pre-installed packages detected — using system Python"
+    PY="python3"
+    UVICORN_BIN="$(command -v uvicorn)"
+elif [ ! -f "$VENV/bin/activate" ]; then
+    log "First boot: creating venv at $VENV (~10 min)..."
     python3 -m venv "$VENV"
-    # Bootstrap pip module if the venv was created without it
     "$PY" -m ensurepip --upgrade 2>>"$LOG" || \
         curl -sS https://bootstrap.pypa.io/get-pip.py | "$PY" 2>>"$LOG"
     "$PY" -m pip install --upgrade pip --quiet --no-cache-dir 2>>"$LOG"
-    if "$PY" -m pip install -r /app/requirements.txt --quiet --no-cache-dir 2>>"$LOG"; then
+    if "$PY" -m pip install -r /app/requirements.txt --quiet --no-cache-dir \
+            --extra-index-url https://download.pytorch.org/whl/cu128 2>>"$LOG"; then
         log "Packages installed to venv"
     else
         log_err "pip install failed — some packages may be missing (check $LOG)"
     fi
+    source "$VENV/bin/activate"
 else
     log "venv exists — syncing packages..."
-    # Ensure pip module is present (some base images omit it)
     "$PY" -m ensurepip --upgrade 2>>"$LOG" || true
-    if ! "$PY" -m pip install -q --no-cache-dir -r /app/requirements.txt 2>>"$LOG"; then
+    if ! "$PY" -m pip install -q --no-cache-dir -r /app/requirements.txt \
+            --extra-index-url https://download.pytorch.org/whl/cu128 2>>"$LOG"; then
         log_err "pip sync failed — continuing with existing packages (check $LOG)"
     fi
+    source "$VENV/bin/activate"
 fi
 
-source "$VENV/bin/activate"
+# ── Qwen model check ──────────────────────────────────────────────────────────
+QWEN_PATH="${QWEN_MODEL_ID:-/workspace/models/qwen2-vl-7b}"
+if [ ! -d "$QWEN_PATH" ]; then
+    log_err "Qwen model not found at $QWEN_PATH"
+    log_err "Download it with: hf download Qwen/Qwen2-VL-7B --local-dir $QWEN_PATH --token <HF_TOKEN>"
+else
+    log "Qwen model found at $QWEN_PATH"
+fi
 
 # ── llama.cpp: compile once on GPU pod, reuse forever ─────────────────────────
 LLAMA_BIN="/workspace/llama.cpp/build/bin/llama-quantize"
 if [ ! -f "$LLAMA_BIN" ]; then
     log "First boot: compiling llama.cpp with CUDA (~40 min)..."
-    # Use || true so that a SIGTERM at the very end (e.g. the cp step) does not
-    # cause startup.sh to skip the binary-exists check below.
     bash /app/setup.sh --skip-pip --skip-verify 2>>"$LOG" || true
-    # Trust the binary on disk, not setup.sh's exit code
     if [ -f "$LLAMA_BIN" ]; then
         cp "$LLAMA_BIN" /usr/local/bin/llama-quantize 2>>"$LOG" || true
         [ -f /workspace/llama.cpp/requirements.txt ] && \
@@ -76,7 +86,7 @@ fi
 # ── Start FastAPI ──────────────────────────────────────────────────────────────
 _start_fastapi() {
     cd /app
-    "$VENV/bin/uvicorn" server:app \
+    "$UVICORN_BIN" server:app \
         --host 0.0.0.0 \
         --port 8000 \
         --timeout-keep-alive 600 \
@@ -95,7 +105,6 @@ for i in $(seq 1 60); do
         tail -20 "$LOG" | while IFS= read -r line; do log_err "  $line"; done
         break
     fi
-    # Accept any HTTP response (even 404) — connection refused returns code 000
     HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/ 2>/dev/null)
     if [ "$HTTP_CODE" != "000" ] && [ -n "$HTTP_CODE" ]; then
         READY=1
@@ -106,7 +115,7 @@ for i in $(seq 1 60); do
 done
 
 if [ $READY -eq 0 ] && kill -0 $UVICORN_PID 2>/dev/null; then
-    log "Warning: FastAPI health check timed out after 60s — proceeding anyway (server may still be loading)"
+    log "Warning: FastAPI health check timed out after 60s — proceeding anyway"
 fi
 
 # ── Start FileBrowser (port 8080) ─────────────────────────────────────────────
@@ -127,7 +136,7 @@ fi
 # ── Start ComfyUI (port 8188) ─────────────────────────────────────────────────
 if [ -d /workspace/ComfyUI ]; then
     log "Starting ComfyUI on port 8188..."
-    "$VENV/bin/python" /workspace/ComfyUI/main.py \
+    "$PY" /workspace/ComfyUI/main.py \
         --listen 0.0.0.0 \
         --port 8188 >> "$LOG" 2>&1 &
     log "ComfyUI started"
@@ -137,7 +146,8 @@ fi
 
 # ── Start JupyterLab (port 8888) ──────────────────────────────────────────────
 JUPYTER_BIN="$VENV/bin/jupyter"
-if [ -f "$JUPYTER_BIN" ]; then
+[ "$PY" = "python3" ] && JUPYTER_BIN="$(command -v jupyter 2>/dev/null || echo '')"
+if [ -n "$JUPYTER_BIN" ] && [ -f "$JUPYTER_BIN" ]; then
     log "Starting JupyterLab on port 8888..."
     "$JUPYTER_BIN" lab \
         --ip=0.0.0.0 \
@@ -149,7 +159,7 @@ if [ -f "$JUPYTER_BIN" ]; then
         --ServerApp.root_dir=/workspace >> "$LOG" 2>&1 &
     log "JupyterLab started"
 else
-    log "jupyter not found in venv — skipping port 8888"
+    log "jupyter not found — skipping port 8888"
 fi
 
 # ── Start Cloudflare tunnel ────────────────────────────────────────────────────
@@ -157,8 +167,6 @@ if [ -z "${CLOUDFLARE_TUNNEL_TOKEN}" ]; then
     log_err "CLOUDFLARE_TUNNEL_TOKEN not set — tunnel skipped (set it in RunPod pod env vars)"
 else
     log "Starting Cloudflare tunnel..."
-    # --no-autoupdate prevents cloudflared from trying to self-update inside the container
-    # tee -a makes tunnel output visible in RunPod container logs AND the log file
     cloudflared tunnel --no-autoupdate \
         --proxy-connection-timeout 600s \
         --proxy-expect-continue-timeout 600s \
@@ -184,9 +192,6 @@ log "Logs:         /workspace/logs/startup.log"
 log "========================================"
 
 # ── Keep container alive, auto-restart FastAPI on crash ───────────────────────
-# Exits only after MAX_RESTARTS *consecutive* failures. Counter resets after
-# STABLE_THRESHOLD healthy cycles (10 × 30s = 5 min) so transient crashes on
-# a long-running pod don't accumulate to a permanent shutdown.
 MAX_RESTARTS=5
 RESTART_COUNT=0
 STABLE_CYCLES=0

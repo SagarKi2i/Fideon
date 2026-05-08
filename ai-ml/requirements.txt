@@ -4,7 +4,7 @@
 # =============================================================================
 # PyTorch CUDA wheels — must come from PyTorch index, not PyPI
 --extra-index-url https://download.pytorch.org/whl/cu124
-
+ 
 # -----------------------------------------------------------------------------
 # Web server
 # -----------------------------------------------------------------------------
@@ -13,51 +13,58 @@ uvicorn[standard]==0.45.0
 python-multipart>=0.0.9
 aiofiles>=23.2.1
 httpx>=0.27.0
-
+ 
 # -----------------------------------------------------------------------------
 # PDF → image conversion
 # -----------------------------------------------------------------------------
 PyMuPDF==1.27.2.3
-Pillow>=10.2.0,<11.0.0
-numpy==2.4.4
-
+pdfplumber>=0.11.0
+Pillow>=10.2.0
+numpy>=2.0.0,<3.0.0
+ 
 # -----------------------------------------------------------------------------
 # Surya OCR — text detection + recognition
 # 0.17.x requires torch>=2.7.0 and transformers>=4.56.1
 # -----------------------------------------------------------------------------
 surya-ocr==0.17.1
-
+ 
 # -----------------------------------------------------------------------------
 # Qwen2-VL — vision-language field extraction + fine-tuning base model
 # torch 2.7.0 is the minimum required by surya-ocr==0.17.1
 # torchvision must match torch major.minor (2.7 → 0.22)
 # transformers 4.56.2 satisfies surya-ocr (>=4.56.1) and trl (>=4.56.2)
+# NOTE: RunPod image runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04 ships torch 2.4.0.
+# surya-ocr==0.17.1 forces an upgrade to 2.7.0 on pip install — this is expected and correct.
+# If install time is critical, switch to runpod/pytorch:2.7.0-py3.11-cuda12.4.1-devel-ubuntu22.04.
 # -----------------------------------------------------------------------------
 torch==2.7.0
 torchvision==0.22.0
 transformers==4.56.2
 accelerate==1.13.0
 qwen-vl-utils==0.0.14
-
+ 
 # -----------------------------------------------------------------------------
 # QLoRA fine-tuning
 # -----------------------------------------------------------------------------
 # 4-bit quantization (NF4 / double quant) — requires torch>=2.3 (satisfied by 2.7.0)
 bitsandbytes==0.49.2
-
+ 
 # LoRA adapter training (PEFT)
 peft==0.19.1
-
+ 
 # Supervised fine-tuning trainer (SFTTrainer / DataCollatorForLanguageModeling)
 # trl 1.3.0 requires transformers>=4.56.2 and datasets>=4.7.0 (both satisfied)
 trl==1.3.0
-
+ 
 # Efficient weight serialization
 safetensors==0.7.0
-
+ 
 # HuggingFace datasets
 datasets==4.8.5
-
+ 
+# HuggingFace Hub — model card push, weight upload
+huggingface-hub>=0.24.0
+ 
 # -----------------------------------------------------------------------------
 # Docling — document structure parser (layout + tables + KV for scanned PDFs)
 # Runs in parallel with Surya OCR as Arm B of the extraction pipeline.
@@ -65,24 +72,39 @@ datasets==4.8.5
 # -----------------------------------------------------------------------------
 docling==2.92.0
 pypdfium2==4.30.0
-
+ 
 # -----------------------------------------------------------------------------
 # Config parsing
 # -----------------------------------------------------------------------------
 pyyaml>=6.0
-
+ 
 # -----------------------------------------------------------------------------
-# Optional: SeaweedFS / S3 weight upload
+# Storage — SeaweedFS / S3-compatible + Azure Blob
+# botocore is a direct import in seaweedfs_client.py (botocore.config.Config)
+# azure-storage-blob is a direct import in azure_blob_client.py
 # -----------------------------------------------------------------------------
 boto3>=1.34.0
-
+botocore>=1.34.0
+azure-storage-blob>=12.19.0
+ 
+# -----------------------------------------------------------------------------
+# HTTP client — used in training_orchestrator.py and observability/alerting.py
+# (already declared above via httpx; requests is used only in test files)
+# -----------------------------------------------------------------------------
+requests>=2.31.0
+ 
+# -----------------------------------------------------------------------------
+# Tests
+# -----------------------------------------------------------------------------
+pytest>=8.0.0
+ 
 # -----------------------------------------------------------------------------
 # JupyterLab (port 8888)
 # -----------------------------------------------------------------------------
 jupyterlab>=4.0.0
-
+ 
 # -----------------------------------------------------------------------------
-# Optional: DeepEval LLM-judge metrics
+# Optional: DeepEval LLM-judge metrics (fine_tuning/evaluation/deepeval_runner.py)
 # Install manually if needed:  pip install deepeval
 # -----------------------------------------------------------------------------
 # deepeval>=0.21.0

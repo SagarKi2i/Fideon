@@ -68,12 +68,7 @@ const quoteGenerationLogs = [
   { date: "2026-02-06", type: "Property", carrier: "Nationwide", premium: "$22,100", status: "completed" },
 ];
 
-const policyComparisonLogs = [
-  { date: "2026-02-08", policies: "Travelers vs Chubb", coverage: "Commercial Auto", differences: 12, recommendation: "Travelers" },
-  { date: "2026-02-07", policies: "Hartford vs Liberty", coverage: "BOP", differences: 8, recommendation: "Hartford" },
-  { date: "2026-02-07", policies: "Progressive vs Nationwide", coverage: "Property", differences: 15, recommendation: "Nationwide" },
-  { date: "2026-02-06", policies: "Chubb vs AIG", coverage: "Umbrella", differences: 5, recommendation: "AIG" },
-];
+// Policy comparison logs are now dynamically fetched
 
 const claimsFnolLogs = [
   { date: "2026-02-08", claimId: "CLM-2026-1234", type: "Auto Collision", carrier: "Travelers", status: "submitted" },
@@ -128,15 +123,24 @@ const getPodIcon = (modelId: string) => {
   }
 };
 
-const getPodStats = (modelId: string) => {
+const isAcordPod = (id: string) => id === "acord-parser" || id === "acord_form_understanding";
+
+const getPodStats = (modelId: string, realLogs: any[] = []) => {
   switch (modelId) {
+    case "acord-parser":
+    case "acord_form_understanding": {
+      const succeeded = realLogs.filter(r => r.status === "approved" || r.status === "draft").length;
+      const failed = realLogs.filter(r => r.status === "failed").length;
+      return { total: realLogs.length, success: succeeded, errors: failed, label: "Forms Extracted" };
+    }
     case "document-retrieval":
     case "document-search":
       return { total: 55, success: 52, errors: 3, label: "Documents Retrieved" };
     case "quote-generation":
       return { total: 156, success: 142, errors: 14, label: "Quotes Generated" };
-    case "policy-comparison":
-      return { total: 89, success: 89, errors: 0, label: "Comparisons Made" };
+    case "policy-comparison": {
+      return { total: realLogs.length, success: realLogs.length, errors: 0, label: "Comparisons Made" };
+    }
     case "claims-fnol":
       return { total: 234, success: 228, errors: 6, label: "Claims Processed" };
     case "multi-document":
@@ -146,11 +150,11 @@ const getPodStats = (modelId: string) => {
     case "carrier-claims-adjudication":
       return { total: 89, success: 82, errors: 3, label: "Claims Adjudicated" };
     default:
-      return { total: 100, success: 95, errors: 5, label: "Operations" };
+      return { total: realLogs.length, success: realLogs.length, errors: 0, label: "Operations" };
   }
 };
 
-function PodSpecificTable({ modelId }: Readonly<{ modelId: string }>) {
+function PodSpecificTable({ modelId, realLogs }: Readonly<{ modelId: string; realLogs?: any[] }>) {
   const statusClassForDocRetrieval = (status: string): string => {
     if (status === "success") return "text-green-600 border-green-600";
     if (status === "warning") return "text-amber-600 border-amber-600";
@@ -282,6 +286,15 @@ function PodSpecificTable({ modelId }: Readonly<{ modelId: string }>) {
       );
 
     case "policy-comparison":
+      const logsToRender = Array.isArray(realLogs) ? realLogs : [];
+      if (logsToRender.length === 0) {
+        return (
+          <div className="text-center py-8 text-muted-foreground border rounded-lg border-dashed">
+            <Scale className="h-12 w-12 mx-auto mb-4 opacity-50" />
+            <p>No comparisons made yet.</p>
+          </div>
+        );
+      }
       return (
         <Table>
           <TableHeader>
@@ -294,18 +307,18 @@ function PodSpecificTable({ modelId }: Readonly<{ modelId: string }>) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {policyComparisonLogs.map((log: any) => (
-              <TableRow key={`${log.date}-${log.policies}`}>
-                <TableCell className="font-medium">{log.date}</TableCell>
+            {logsToRender.map((log: any, idx: number) => (
+              <TableRow key={log.id || idx}>
+                <TableCell className="font-medium">{new Date(log.created_at).toLocaleDateString()}</TableCell>
                 <TableCell>
                   <div className="flex items-center gap-2">
                     <Scale className="h-4 w-4 text-muted-foreground" />
-                    {log.policies}
+                    {log.policy_a_name} vs {log.policy_b_name}
                   </div>
                 </TableCell>
-                <TableCell>{log.coverage}</TableCell>
+                <TableCell>{log.lob}</TableCell>
                 <TableCell>
-                  <Badge variant="secondary">{log.differences} items</Badge>
+                  <Badge variant="secondary">{log.differences_count} items</Badge>
                 </TableCell>
                 <TableCell className="font-semibold text-primary">{log.recommendation}</TableCell>
               </TableRow>
@@ -498,6 +511,63 @@ function PodSpecificTable({ modelId }: Readonly<{ modelId: string }>) {
         </Table>
       );
 
+    case "acord-parser":
+    case "acord_form_understanding": {
+      const acordLogs = Array.isArray(realLogs) ? realLogs : [];
+      if (acordLogs.length === 0) {
+        return (
+          <div className="text-center py-8 text-muted-foreground border rounded-lg border-dashed">
+            <Brain className="h-12 w-12 mx-auto mb-4 opacity-50" />
+            <p>No extractions yet.</p>
+          </div>
+        );
+      }
+      return (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Date</TableHead>
+              <TableHead>Document</TableHead>
+              <TableHead>Form Type</TableHead>
+              <TableHead>Confidence</TableHead>
+              <TableHead>Status</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {acordLogs.map((log: any, idx: number) => {
+              const statusClass = log.status === "approved" ? "text-green-600 border-green-600" : log.status === "failed" ? "text-destructive border-destructive" : "text-amber-600 border-amber-600";
+              const confPct = log.overall_confidence ? `${Math.round(log.overall_confidence * 100)}%` : "—";
+              return (
+                <TableRow key={log.id || idx}>
+                  <TableCell className="font-medium">{new Date(log.created_at).toLocaleDateString()}</TableCell>
+                  <TableCell>
+                    <div className="flex items-center gap-2">
+                      <FileText className="h-4 w-4 text-muted-foreground" />
+                      <span className="truncate max-w-[180px]">{log.source_filename || "—"}</span>
+                    </div>
+                  </TableCell>
+                  <TableCell className="uppercase text-xs font-mono">{log.form_type_detected || "—"}</TableCell>
+                  <TableCell>
+                    <span className={log.overall_confidence >= 0.8 ? "text-green-600 font-semibold" : log.overall_confidence >= 0.6 ? "text-amber-600 font-semibold" : "text-muted-foreground"}>
+                      {confPct}
+                    </span>
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="outline" className={statusClass}>
+                      {log.status === "approved" && <CheckCircle2 className="h-3 w-3 mr-1" />}
+                      {log.status === "failed" && <XCircle className="h-3 w-3 mr-1" />}
+                      {log.status === "draft" && <Clock className="h-3 w-3 mr-1" />}
+                      {log.status}
+                    </Badge>
+                  </TableCell>
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
+      );
+    }
+
     default:
       return (
         <div className="text-center py-8 text-muted-foreground">
@@ -516,8 +586,46 @@ export default function PodDashboard() {
   const [loading, setLoading] = useState(true);
   const [deactivating, setDeactivating] = useState(false);
 
+  const [realLogs, setRealLogs] = useState<any[]>([]);
+  const [logsRefreshedAt, setLogsRefreshedAt] = useState<Date | null>(null);
+
+  const loadRealLogs = async () => {
+    if (!podId) return;
+    try {
+      if (podId === "policy-comparison") {
+        const { data } = await (supabase as any)
+          .from("policy_comparison_logs")
+          .select("*")
+          .order("created_at", { ascending: false });
+        if (data) { setRealLogs(data); setLogsRefreshedAt(new Date()); }
+      } else if (isAcordPod(podId)) {
+        const { data } = await (supabase as any)
+          .from("acord_extraction_runs")
+          .select("id, created_at, source_filename, form_type_detected, overall_confidence, status")
+          .order("created_at", { ascending: false })
+          .limit(50);
+        if (data) { setRealLogs(data); setLogsRefreshedAt(new Date()); }
+      }
+    } catch (e) {
+      console.error("Error loading real logs:", e);
+    }
+  };
+
   useEffect(() => {
     loadPodData();
+    loadRealLogs();
+  }, [podId]);
+
+  // Real-time subscription for ACORD extraction runs
+  useEffect(() => {
+    if (!podId || !isAcordPod(podId)) return;
+    const channel = supabase
+      .channel(`acord_runs_${podId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "acord_extraction_runs" }, () => {
+        loadRealLogs();
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
   }, [podId]);
 
   const loadPodData = async () => {
@@ -602,7 +710,7 @@ export default function PodDashboard() {
   }
 
   const PodIcon = getPodIcon(pod.model_id);
-  const stats = getPodStats(pod.model_id);
+  const stats = getPodStats(pod.model_id, realLogs);
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
@@ -718,7 +826,17 @@ export default function PodDashboard() {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-muted-foreground">Last Activity</p>
-                <p className="text-2xl font-bold text-foreground">2m ago</p>
+                <p className="text-2xl font-bold text-foreground">
+                  {(() => {
+                    const latest = realLogs[0]?.created_at;
+                    if (!latest) return "—";
+                    const diff = Math.floor((Date.now() - new Date(latest).getTime()) / 1000);
+                    if (diff < 60) return `${diff}s ago`;
+                    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+                    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+                    return `${Math.floor(diff / 86400)}d ago`;
+                  })()}
+                </p>
               </div>
               <div className="h-10 w-10 rounded-full bg-accent/10 flex items-center justify-center">
                 <Clock className="h-5 w-5 text-accent" />
@@ -731,11 +849,27 @@ export default function PodDashboard() {
       {/* Pod-Specific Activity Log */}
       <Card className="bg-card border-border">
         <CardHeader>
-          <CardTitle className="text-lg">Activity Log</CardTitle>
-          <CardDescription>Recent operations for this pod</CardDescription>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-lg">Activity Log</CardTitle>
+              <CardDescription>
+                Recent operations for this pod
+                {logsRefreshedAt && (
+                  <span className="ml-2 text-xs text-muted-foreground/60">
+                    · updated {Math.floor((Date.now() - logsRefreshedAt.getTime()) / 1000)}s ago
+                  </span>
+                )}
+              </CardDescription>
+            </div>
+            {isAcordPod(pod.model_id) && (
+              <Button variant="ghost" size="icon" onClick={loadRealLogs} title="Refresh">
+                <RefreshCw className="h-4 w-4" />
+              </Button>
+            )}
+          </div>
         </CardHeader>
         <CardContent>
-          <PodSpecificTable modelId={pod.model_id} />
+          <PodSpecificTable modelId={pod.model_id} realLogs={realLogs} />
         </CardContent>
       </Card>
     </div>
