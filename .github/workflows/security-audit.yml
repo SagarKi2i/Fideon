@@ -1,0 +1,157 @@
+name: Security & Dependency Audit
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+jobs:
+  # ══════════════════════════════════════════════════════════════
+  # NPM AUDIT
+  # ══════════════════════════════════════════════════════════════
+  npm-audit:
+    name: npm audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci --prefer-offline
+
+      - name: npm audit (fail on high+)
+        working-directory: frontend
+        run: npm audit --audit-level=high --json > npm-audit.json || true
+
+      - name: Parse and display findings
+        working-directory: frontend
+        run: |
+          node -e "
+            const r = require('./npm-audit.json');
+            const vulns = r.vulnerabilities || {};
+            const high = Object.values(vulns).filter(v => ['high','critical'].includes(v.severity));
+            if (high.length) {
+              console.log('HIGH/CRITICAL vulnerabilities:');
+              high.forEach(v => console.log(\`  - \${v.name}: \${v.severity}\`));
+              process.exit(1);
+            } else {
+              console.log('No high/critical vulnerabilities found.');
+            }
+          "
+
+      - name: Upload npm audit report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: npm-audit-report
+          path: frontend/npm-audit.json
+          retention-days: 30
+
+  # ══════════════════════════════════════════════════════════════
+  # PIP AUDIT (backend)
+  # ══════════════════════════════════════════════════════════════
+  pip-audit:
+    name: pip audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pip-audit
+
+      - name: Run pip audit
+        working-directory: backend
+        run: pip-audit --desc --fix --dry-run || true
+
+  # ══════════════════════════════════════════════════════════════
+  # CODEQL ANALYSIS
+  # ══════════════════════════════════════════════════════════════
+  codeql:
+    name: CodeQL Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript, python
+          queries: security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+
+  # ══════════════════════════════════════════════════════════════
+  # DEPENDENCY REVIEW (PRs only)
+  # ══════════════════════════════════════════════════════════════
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'pull_request'
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          deny-licenses: GPL-3.0, LGPL-3.0, AGPL-3.0
+
+  # ══════════════════════════════════════════════════════════════
+  # NOTIFY ON FINDINGS
+  # ══════════════════════════════════════════════════════════════
+  notify:
+    name: Notify security findings
+    runs-on: ubuntu-latest
+    needs: [npm-audit, pip-audit, codeql]
+    if: failure() && github.event_name != 'pull_request'
+
+    steps:
+      - name: Slack alert
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "Security audit found issues",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Weekly Security Audit — Issues Found*\n*npm audit:* ${{ needs.npm-audit.result }}\n*pip audit:* ${{ needs.pip-audit.result }}\n*CodeQL:* ${{ needs.codeql.result }}\n*<${{ github.server_url }}/${{ github.repository }}/security/code-scanning|View code scanning results>*\n*<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>*"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL:  ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

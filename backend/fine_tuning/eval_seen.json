@@ -1,0 +1,42 @@
+[
+  {
+    "instruction": "What is ACORD Form 125?",
+    "input": "",
+    "output": "{\"in_scope\": true, \"extracted_text\": \"ACORD Form 125 is a commercial insurance application used to collect general applicant information such as business details, contact information, and requested insurance coverage.\"}"
+  },
+  {
+    "instruction": "What is ACORD Form 126 used for?",
+    "input": "",
+    "output": "{\"in_scope\": true, \"extracted_text\": \"ACORD Form 126 collects information related to commercial general liability exposure and coverage requirements.\"}"
+  },
+  {
+    "instruction": "What is ACORD Form 127?",
+    "input": "",
+    "output": "{\"in_scope\": true, \"extracted_text\": \"ACORD Form 127 is used for commercial automobile insurance applications and collects vehicle and driver information.\"}"
+  },
+  {
+    "instruction": "What is insurance underwriting?",
+    "input": "",
+    "output": "{\"in_scope\": true, \"extracted_text\": \"Insurance underwriting is the process of evaluating risk and determining appropriate insurance coverage and pricing.\"}"
+  },
+  {
+    "instruction": "What is a deductible in insurance?",
+    "input": "",
+    "output": "{\"in_scope\": true, \"extracted_text\": \"A deductible is the amount the policyholder must pay out of pocket before the insurer pays a claim.\"}"
+  },
+  {
+    "instruction": "What is liability insurance?",
+    "input": "",
+    "output": "{\"in_scope\": true, \"extracted_text\": \"Liability insurance protects policyholders against claims resulting from injuries or damages to other people or property.\"}"
+  },
+  {
+    "instruction": "What is a certificate of insurance?",
+    "input": "",
+    "output": "{\"in_scope\": true, \"extracted_text\": \"A certificate of insurance is a document that provides evidence of insurance coverage.\"}"
+  },
+  {
+    "instruction": "What is an insurance agent?",
+    "input": "",
+    "output": "{\"in_scope\": true, \"extracted_text\": \"An insurance agent sells insurance policies on behalf of an insurance company.\"}"
+  }
+]
