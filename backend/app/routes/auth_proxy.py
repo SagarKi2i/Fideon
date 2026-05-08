@@ -257,6 +257,26 @@ async def signup(request: Request):
         except Exception:
             pass  # Non-blocking: if lookup fails, let the DB trigger enforce it
 
+    # ── Global-admin pre-flight check ────────────────────────────────────────
+    # Non-global_admin signups are blocked until at least one global_admin exists.
+    # This prevents tenants/users being created on a fresh system with no administrator.
+    requested_role = str(data_meta.get("requested_role") or "").strip().lower()
+    if requested_role != "global_admin":
+        try:
+            ga_rows = await postgrest_get(
+                "user_roles",
+                "select=user_id&role=eq.global_admin&limit=1",
+            )
+            if not ga_rows:
+                raise HTTPException(
+                    status_code=403,
+                    detail="No Global Admin exists yet. A Global Admin must be created before tenant or user registration is allowed.",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # Non-blocking: if lookup fails, allow signup
+
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             f"{SUPABASE_URL}/auth/v1/signup",
