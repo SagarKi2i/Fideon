@@ -16,6 +16,7 @@ from app.core.limiter import limiter
 from app.core.supabase import (
     get_device_by_token,
     insert_audit_log,
+    postgrest_delete,
     postgrest_get,
     postgrest_insert,
     postgrest_patch,
@@ -810,6 +811,19 @@ async def link_device_v1(request: Request, authorization: Optional[str] = Header
     )
     log.info("device.linked", device_id=device_id, user_id=user["id"], tenant_id=requester_tenant_id)
     await _sync_user_models_to_device(str(user["id"]), device_id)
+
+    # Remove never_checked_in placeholder devices for this user (created during signup/QR pairing).
+    # Now that a real Electron device is linked, these orphans are no longer needed.
+    orphan_rows = await postgrest_get(
+        "devices",
+        f"select=id&registered_by=eq.{quote(str(user['id']), safe='')}&status=eq.never_checked_in&id=neq.{quote(device_id, safe='')}",
+    )
+    for orphan in orphan_rows:
+        try:
+            await postgrest_delete("devices", f"id=eq.{quote(str(orphan['id']), safe='')}")
+        except Exception:
+            pass
+
     return {"success": True, "device_id": device_id}
 
 
