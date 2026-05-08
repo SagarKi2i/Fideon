@@ -570,7 +570,6 @@ export default function Activity() {
   return (
     <div className="space-y-4">
       <AuthEventsTab />
-      <SystemEventsTab />
     </div>
   );
 }
