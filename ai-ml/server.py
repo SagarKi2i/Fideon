@@ -1051,7 +1051,7 @@ def _run_federated_job(job_id: str) -> None:
             for v in versions_available:
                 local_dir = str(tmp_dir / f"v{v}")
                 try:
-                    seaweed.download_finetuned_model(v, local_dir)
+                    seaweed.download_finetuned_model(v, local_dir, progress_callback=_progress_cb)
                     model_dirs.append(local_dir)
                     downloaded_versions.append(v)
                     print(f"[federated] v{v} downloaded ✓")
@@ -1129,11 +1129,11 @@ def _run_federated_job(job_id: str) -> None:
 
             _update_fed_job(job_id, "uploading")
             new_version = latest + 1
-            seaweed.upload_hf_model(agg_dir, new_version)
+            seaweed.upload_hf_model(agg_dir, new_version, progress_callback=_up_progress)
             gguf_s3_keys: List[str] = []
             if quant_results:
                 try:
-                    gguf_s3_keys = seaweed.upload_quantized(gguf_dir, new_version)
+                    gguf_s3_keys = seaweed.upload_quantized(gguf_dir, new_version, progress_callback=_up_progress)
                     print(f"[federated] GGUF(s) uploaded for v{new_version}")
                 except Exception as exc:
                     print(f"[federated] GGUF upload failed (non-fatal): {exc}")
@@ -1233,6 +1233,7 @@ def _run_share_job(job_id: str, pending_entries: List[tuple]) -> None:
                     eval_scores=pending.get("eval_scores", {}),
                     training_meta=pending.get("training_meta", {}),
                     base_model=pending.get("base_model", ""),
+                    progress_callback=_progress_cb,
                 )
                 # Delete pending-share manifest only after confirmed upload success
                 file_path.unlink(missing_ok=True)
