@@ -20,17 +20,19 @@ from typing import Any, Dict, List, Optional
 
 # ── Dataset formatting ────────────────────────────────────────────────────────
 
-def _format_chat_row(row: Dict[str, Any], processor: Any) -> Optional[str]:
+def _format_chat_row(row: Dict[str, Any], tokenizer: Any) -> Optional[str]:
     """Apply Qwen2-VL chat template to one row. Returns None on failure."""
     msgs = row.get("messages")
     if not isinstance(msgs, list):
+        print(f"[train] Skipping row — 'messages' is {type(msgs).__name__}, not list. Keys: {list(row.keys())}")
         return None
     try:
-        text = processor.apply_chat_template(
+        text = tokenizer.apply_chat_template(
             msgs, tokenize=False, add_generation_prompt=False
         )
         return text
-    except Exception:
+    except Exception as e:
+        print(f"[train] apply_chat_template failed: {e}. messages={msgs!r}")
         return None
 
 
@@ -62,13 +64,13 @@ def run_training(
 
     Returns the adapter output directory path.
     """
-    import torch
     from datasets import Dataset
     from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
+    import torch
+    from torch.nn.utils.rnn import pad_sequence
     from transformers import (
         AutoProcessor,
         BitsAndBytesConfig,
-        DataCollatorForLanguageModeling,
         Qwen2VLForConditionalGeneration,
         TrainingArguments,
         Trainer,
@@ -144,11 +146,17 @@ def run_training(
 
     texts = []
     for row in rows:
-        t = _format_chat_row(row, processor)
+        t = _format_chat_row(row, tokenizer)
         if t:
             texts.append(t)
 
     print(f"[train] Tokenising {len(texts)} examples (max_seq={max_seq}) …")
+    if not texts:
+        raise ValueError(
+            f"[train] 0 examples after chat-template formatting. "
+            f"Loaded {len(rows)} rows from {dataset_path}. "
+            "Check that each row has a 'messages' list with valid role/content dicts."
+        )
 
     # Qwen2-VL chat template wraps the assistant turn with <|im_start|>assistant\n
     # We mask all non-assistant tokens to -100 so the loss is only computed on
@@ -204,14 +212,32 @@ def run_training(
         report_to="none",
         run_name=f"fideon-acord-{job_id}",
         dataloader_num_workers=0,
+        remove_unused_columns=False,
     )
 
-    collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    pad_id = tokenizer.pad_token_id
+
+    def _collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Pad pre-tokenised examples, preserving the assistant-masked labels."""
+        input_ids = pad_sequence(
+            [torch.tensor(b["input_ids"], dtype=torch.long) for b in batch],
+            batch_first=True, padding_value=pad_id,
+        )
+        attention_mask = pad_sequence(
+            [torch.tensor(b["attention_mask"], dtype=torch.long) for b in batch],
+            batch_first=True, padding_value=0,
+        )
+        labels = pad_sequence(
+            [torch.tensor(b["labels"], dtype=torch.long) for b in batch],
+            batch_first=True, padding_value=-100,
+        )
+        return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+
     trainer  = Trainer(
         model=model,
         args=training_args,
         train_dataset=tokenised,
-        data_collator=collator,
+        data_collator=_collate_fn,
     )
 
     print("[train] Starting training …")

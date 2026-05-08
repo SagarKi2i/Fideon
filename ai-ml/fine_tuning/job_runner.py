@@ -277,7 +277,6 @@ def run_cycle(
     from fine_tuning.evaluation.deepeval_runner import run_deepeval
     from fine_tuning.evaluation.forgetting_eval import ForgettingEvaluator
     from fine_tuning.evaluation.eval_gate import run_eval_gate
-    from fine_tuning.training_orchestrator import promote_adapter
 
     started_at = _utc_now()
     cycle_id   = str(uuid.uuid4())[:12]
@@ -434,25 +433,37 @@ def run_cycle(
                 version=new_version,
             )
 
-            # ── 9. Promote (registry + SeaweedFS + model card + alert) ────────
-            _update("promoting")
+            # ── 9. Write pending-share manifest (Share Gradients uploads later) ─
+            # Do NOT upload to storage here — let the user click Share Gradients
+            # so they control when weights leave the pod.
+            _update("pending_share")
             training_meta = {
-                "backend":       "qlora_hf",
-                "fingerprint":   build_result.fingerprint,
-                "job_id":        job_id,
-                "base_model":    base_model,
+                "backend":         "qlora_hf",
+                "fingerprint":     build_result.fingerprint,
+                "job_id":          job_id,
+                "base_model":      base_model,
                 "replay_fraction": replay_fraction,
             }
-            promote_adapter(
-                adapter_id=job_id,
-                registry_path=reg_path,
-                version=new_version,
-                merged_model_path=merge_result.output_path,
-                adapter_path=adapter_path,
-                eval_scores=gate.scores,
-                training_meta=training_meta,
-                base_model=base_model,
+            pending_share_dir = Path(
+                os.getenv("PENDING_SHARE_DIR", "/workspace/fine_tuning/pending_shares")
             )
+            pending_share_dir.mkdir(parents=True, exist_ok=True)
+            share_manifest = {
+                "job_id":             job_id,
+                "registry_path":      reg_path,
+                "version":            new_version,
+                "merged_model_path":  merge_result.output_path,
+                "adapter_path":       adapter_path,
+                "eval_scores":        gate.scores,
+                "training_meta":      training_meta,
+                "base_model":         base_model,
+                "created_at":         _utc_now(),
+            }
+            share_file = pending_share_dir / f"v{new_version}.json"
+            share_file.write_text(
+                json.dumps(share_manifest, indent=2), encoding="utf-8"
+            )
+            print(f"[job_runner] Pending share written → {share_file}")
 
         # ── Done ──────────────────────────────────────────────────────────────
         finished_at = _utc_now()

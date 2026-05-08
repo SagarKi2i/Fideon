@@ -122,6 +122,12 @@ class SeaweedFSClient:
         print(f"[seaweedfs] HF model uploaded. Latest → v{version}")
         return prefix
 
+    def probe(self) -> None:
+        """Check connectivity — raises on failure."""
+        if not self._configured:
+            raise RuntimeError("SEAWEEDFS_ENDPOINT not configured")
+        self._boto_client().head_bucket(Bucket=self._bucket)
+
     def get_latest_finetuned_version(self) -> Optional[int]:
         """Return the latest fine-tuned version number from SeaweedFS, or None."""
         if not self._configured:

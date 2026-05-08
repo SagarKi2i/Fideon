@@ -97,6 +97,9 @@ export default function Training() {
   // Which non-ACORD model's feedback list is open (map modelId -> bool)
   const [showModelFeedback, setShowModelFeedback] = useState<Record<string, boolean>>({});
 
+  // Run IDs waiting to be marked approved — only cleared after job status = "completed"
+  const [pendingAcordRunIds, setPendingAcordRunIds] = useState<string[]>([]);
+
   // Live RunPod job polling
   const [activeRunpodJobId, setActiveRunpodJobId] = useState<string | null>(null);
   const [runpodJobStatus, setRunpodJobStatus] = useState<{
@@ -209,12 +212,15 @@ export default function Training() {
       } catch {
         // RunPod unreachable — leave hasPendingShare = false
       }
-      // If there are submitted samples but at least one completed training job exists,
-      // those samples were already trained — mark them approved now.
-      // This fixes the case where the browser was closed before the polling callback fired.
+      // Recovery: if the browser was closed while a job was running and it actually
+      // completed, mark those samples approved now — but ONLY if the most recent job
+      // is "completed". If the most recent job failed, leave samples untouched.
       (() => {
-        const completedJobs = getLocalJobs().filter((j: any) => j.status === "completed");
-        if (completedJobs.length > 0) {
+        const allJobs = getLocalJobs().sort(
+          (a: any, b: any) => new Date(b.created_at ?? 0).getTime() - new Date(a.created_at ?? 0).getTime()
+        );
+        const mostRecentJob = allJobs[0];
+        if (mostRecentJob?.status === "completed") {
           getAcordTrainingSamples().then((pending) => {
             if (pending.length > 0) {
               markAcordSamplesUsed(pending.map((s) => s.run_id)).catch(() => {});
@@ -291,6 +297,14 @@ export default function Training() {
           );
           localStorage.setItem("local_training_jobs", JSON.stringify(updated));
           setActiveRunpodJobId(null);
+
+          // Only mark samples as used when training actually succeeded.
+          // On failure/gate_failed they remain in Training Samples for retry.
+          if (rpStatus.status === "completed" && pendingAcordRunIds.length > 0) {
+            markAcordSamplesUsed(pendingAcordRunIds).catch(() => {});
+            setPendingAcordRunIds([]);
+          }
+
           loadData();
         }
       } catch {
@@ -540,9 +554,10 @@ export default function Training() {
         description: `${result.total_samples ?? totalSamples} sample(s) sent for LoRA training.`,
       });
 
-      // Step 4: Mark acord_extraction_runs samples as approved so they don't re-appear
+      // Step 4: Store run IDs — they will be marked approved only if job completes successfully.
+      // If training fails they stay in Training Samples so the user can retry.
       if (acordSamples.length > 0) {
-        await markAcordSamplesUsed(acordSamples.map((s) => s.run_id)).catch(() => {});
+        setPendingAcordRunIds(acordSamples.map((s) => s.run_id));
       }
 
       // Step 5: Record training job — backend also marks training_feedback rows as is_used_for_training=true

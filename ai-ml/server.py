@@ -712,15 +712,12 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
     from fine_tuning.continuous_learning.version_store import append_training_sample
     from fine_tuning.job_runner import launch_cycle_background
 
-    # Mark the Supabase acord_extraction_runs rows as approved immediately — before
-    # training even starts. This is the most reliable path: the frontend passes the
-    # exact run IDs it fetched, and we mark them here using the service role key.
-    # This removes the dependency on the browser staying open until job completion.
+    # acord_run_ids are passed by the frontend for reference only.
+    # Runs are marked approved AFTER training completes (not here) so that
+    # samples remain visible in Training Samples if the job fails.
     explicit_run_ids: List[str] = [
         str(rid) for rid in (body.get("acord_run_ids") or []) if rid
     ]
-    if explicit_run_ids:
-        _mark_acord_runs_approved(explicit_run_ids)
 
     samples = [s for s in _load_training_samples() if s.get("status") == "pending"]
     if not samples:
@@ -814,14 +811,6 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
         "\n".join(json.dumps(s) for s in updated_samples) + "\n",
         encoding="utf-8",
     )
-
-    # ── Mark Supabase acord_extraction_runs as approved ──────────────────────
-    supabase_run_ids = [
-        s.get("run_id")
-        for s in all_samples
-        if s.get("sample_id") in used_ids and s.get("run_id")
-    ]
-    _mark_acord_runs_approved(supabase_run_ids)
 
     # ── Launch cycle in background thread ─────────────────────────────────────
     job_id = str(uuid.uuid4())
@@ -1244,7 +1233,7 @@ def _run_share_job(job_id: str, pending_entries: List[tuple]) -> None:
                     eval_scores=pending.get("eval_scores", {}),
                     training_meta=pending.get("training_meta", {}),
                     base_model=pending.get("base_model", ""),
-                    progress_callback=_progress_cb
+                    progress_callback=_progress_cb,
                 )
                 # Delete pending-share manifest only after confirmed upload success
                 file_path.unlink(missing_ok=True)
