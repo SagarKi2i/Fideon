@@ -1,9 +1,10 @@
 # =============================================================================
 # Fideon RunPod Server — Python dependencies
-# Python 3.11  |  RunPod GPU environment (CUDA 12.4 / H100)
+# Python 3.11  |  RunPod GPU environment (CUDA 12.8 / A100 or L40S)
+# RunPod image: runpod/pytorch:2.7.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
 # =============================================================================
 # PyTorch CUDA wheels — must come from PyTorch index, not PyPI
---extra-index-url https://download.pytorch.org/whl/cu124
+--extra-index-url https://download.pytorch.org/whl/cu128
 
 # -----------------------------------------------------------------------------
 # Web server
@@ -32,14 +33,13 @@ surya-ocr==0.17.1
 # Qwen2-VL — vision-language field extraction + fine-tuning base model
 # torch 2.7.0 is the minimum required by surya-ocr==0.17.1
 # torchvision must match torch major.minor (2.7 → 0.22)
-# transformers 4.56.2 satisfies surya-ocr (>=4.56.1) and trl (>=4.56.2)
-# NOTE: RunPod image runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04 ships torch 2.4.0.
-# surya-ocr==0.17.1 forces an upgrade to 2.7.0 on pip install — this is expected and correct.
-# If install time is critical, switch to runpod/pytorch:2.7.0-py3.11-cuda12.4.1-devel-ubuntu22.04.
+# transformers 4.57.6 = latest stable 4.x; satisfies all three:
+#   surya-ocr>=4.56.1 | docling >=4.42,!=5.x | Qwen2-VL >=4.45
+# Do NOT upgrade to 5.x — docling 2.92 excludes transformers 5.0–5.3
 # -----------------------------------------------------------------------------
 torch==2.7.0
 torchvision==0.22.0
-transformers==4.56.2
+transformers==4.57.6
 accelerate==1.13.0
 qwen-vl-utils==0.0.14
 
@@ -55,6 +55,17 @@ peft==0.19.1
 # Supervised fine-tuning trainer (SFTTrainer / DataCollatorForLanguageModeling)
 # trl 1.3.0 requires transformers>=4.56.2 and datasets>=4.7.0 (both satisfied)
 trl==1.3.0
+
+# Multi-GPU full SFT training — ZeRO-3 partitioning across 2× A100 SXM
+# Install BEFORE flash-attn. For 2-GPU full SFT run:
+#   deepspeed --num_gpus=2 fine_tuning/train.py --deepspeed ds_z3_config.json
+deepspeed>=0.16.0
+
+# Flash Attention 2 — halves activation VRAM on A100 (sm_80); required for
+# full SFT without OOM. Install with --no-build-isolation AFTER torch:
+#   pip install flash-attn>=2.7.0 --no-build-isolation
+# Skip on L40S inference-only pods if flash-attn build fails.
+flash-attn>=2.7.0
 
 # Efficient weight serialization
 safetensors==0.7.0

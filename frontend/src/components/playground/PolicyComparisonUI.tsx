@@ -77,6 +77,7 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
   const [activeTab, setActiveTab] = useState<"overview" | "viewers" | "workflow" | "trace">("overview");
   const [isExporting, setIsExporting] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
+  const [fieldFilter, setFieldFilter] = useState<"all" | "differences" | "matches">("all");
   const comparisonRef = useRef<HTMLDivElement>(null);
   
   const navigate = useNavigate();
@@ -99,6 +100,30 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
 
   const structured = useMemo(() => tryParsePolicyComparisonStructured(result), [result]);
   const clauseDiff = useMemo(() => parsePolicyClauseDiff(result), [result]);
+
+  const extractedRows = useMemo(() => {
+    if (!structured || !structured.extracted_fields) return [];
+    
+    const policyA = structured.extracted_fields.policyA || {};
+    const policyB = structured.extracted_fields.policyB || {};
+    
+    const allKeys = Array.from(new Set([...Object.keys(policyA), ...Object.keys(policyB)]));
+    
+    return allKeys.map(key => {
+      const valA = (policyA as any)[key];
+      const valB = (policyB as any)[key];
+      
+      const expiring = valA === null || valA === undefined ? "-" : String(valA);
+      const proposed = valB === null || valB === undefined ? "-" : String(valB);
+      const isMatch = expiring === proposed;
+      return {
+        field: key,
+        expiring,
+        proposed,
+        status: isMatch ? "MATCH" : "CHANGED"
+      };
+    });
+  }, [structured]);
 
   // Auto-select clause redline when structured diff is available.
   useEffect(() => {
@@ -874,9 +899,9 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
                       Drill into matches and differences for {lob.toUpperCase().replace("-", " ")}
                     </div>
                     <div className="flex items-center gap-1 p-1 bg-muted/30 rounded-lg border border-border/50">
-                      <Button variant="ghost" size="sm" className="h-8 rounded-md px-4 text-xs font-bold bg-background shadow-sm">All (36)</Button>
-                      <Button variant="ghost" size="sm" className="h-8 rounded-md px-4 text-xs font-bold text-muted-foreground">Differences (2)</Button>
-                      <Button variant="ghost" size="sm" className="h-8 rounded-md px-4 text-xs font-bold text-muted-foreground">Matches (34)</Button>
+                      <Button variant={fieldFilter === "all" ? "secondary" : "ghost"} size="sm" onClick={() => setFieldFilter("all")} className={`h-8 rounded-md px-4 text-xs font-bold ${fieldFilter === "all" ? "bg-background shadow-sm" : "text-muted-foreground"}`}>All (36)</Button>
+                      <Button variant={fieldFilter === "differences" ? "secondary" : "ghost"} size="sm" onClick={() => setFieldFilter("differences")} className={`h-8 rounded-md px-4 text-xs font-bold ${fieldFilter === "differences" ? "bg-background shadow-sm text-destructive" : "text-muted-foreground"}`}>Differences (2)</Button>
+                      <Button variant={fieldFilter === "matches" ? "secondary" : "ghost"} size="sm" onClick={() => setFieldFilter("matches")} className={`h-8 rounded-md px-4 text-xs font-bold ${fieldFilter === "matches" ? "bg-background shadow-sm text-emerald-600" : "text-muted-foreground"}`}>Matches (34)</Button>
                     </div>
                   </div>
 
@@ -889,24 +914,30 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
                               <Badge variant="outline" className="text-[10px] bg-background">Document-grounded</Badge>
                             </CardTitle>
                             <div className="flex gap-2">
-                              <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20 text-[10px] font-bold">34 matched</Badge>
-                              <Badge className="bg-amber-500/10 text-amber-600 border-amber-500/20 text-[10px] font-bold">2 different</Badge>
+                              {extractedRows.length > 0 && (
+                                <>
+                                  <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20 text-[10px] font-bold">{extractedRows.filter(d => d.status === "MATCH").length} matched</Badge>
+                                  <Badge className="bg-amber-500/10 text-amber-600 border-amber-500/20 text-[10px] font-bold">{extractedRows.filter(d => d.status !== "MATCH").length} different</Badge>
+                                </>
+                              )}
                             </div>
                           </CardHeader>
                           <CardContent className="p-0 space-y-6 bg-muted/5">
                             <p className="text-[11px] text-muted-foreground px-6 pt-4 italic">
-                              Full 35-field {lob.toUpperCase().replace("-", " ")} extraction including symbols, limits, vehicles, and forms list.
+                              Full {extractedRows.length || 35}-field {lob.toUpperCase().replace("-", " ")} extraction including symbols, limits, vehicles, and forms list.
                             </p>
 
-                            {/* Client Information */}
+                            {/* Dynamic Extracted Data */}
                             <div className="px-6 pb-6">
                               <div className="bg-card border border-border/50 rounded-xl overflow-hidden shadow-sm">
                                 <div className="bg-muted/20 px-4 py-2 border-b border-border/50 flex justify-between items-center">
-                                  <span className="text-xs font-black uppercase tracking-tight">Client Information</span>
-                                  <div className="flex gap-2">
-                                    <span className="text-[9px] text-emerald-600 font-bold bg-emerald-500/5 px-1.5 py-0.5 rounded">2 match</span>
-                                    <span className="text-[9px] text-muted-foreground font-bold bg-muted px-1.5 py-0.5 rounded">0 diff</span>
-                                  </div>
+                                  <span className="text-xs font-black uppercase tracking-tight">Extracted Fields</span>
+                                  {extractedRows.length > 0 && (
+                                    <div className="flex gap-2">
+                                      <span className="text-[9px] text-emerald-600 font-bold bg-emerald-500/5 px-1.5 py-0.5 rounded">{extractedRows.filter(d => d.status === "MATCH").length} match</span>
+                                      <span className="text-[9px] text-amber-600 font-bold bg-amber-500/5 px-1.5 py-0.5 rounded">{extractedRows.filter(d => d.status !== "MATCH").length} diff</span>
+                                    </div>
+                                  )}
                                 </div>
                                 <table className="w-full text-xs border-collapse">
                                   <thead className="bg-muted/10 text-muted-foreground text-[10px] uppercase font-bold border-b border-border/50">
@@ -918,291 +949,33 @@ export default function PolicyComparisonUI({ modelId, onRun, isRunning, result }
                                     </tr>
                                   </thead>
                                   <tbody className="divide-y divide-border/40">
-                                    <tr>
-                                      <td className="p-3">
-                                        <div className="font-bold">Named insured(s)</div>
-                                        <div className="text-[9px] text-muted-foreground">From uploaded docs</div>
-                                      </td>
-                                      <td className="p-3 text-muted-foreground">Brandenberry Park Condominium Association</td>
-                                      <td className="p-3 font-bold">Brandenberry Park Condominium Association</td>
-                                      <td className="p-3 text-center">
-                                        <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20 gap-1 rounded-full px-2 text-[9px] font-bold">
-                                          <CheckCircle2 className="h-2.5 w-2.5" /> Match
-                                        </Badge>
-                                      </td>
-                                    </tr>
-                                    <tr>
-                                      <td className="p-3">
-                                        <div className="font-bold">Mailing address</div>
-                                        <div className="text-[9px] text-muted-foreground">From uploaded docs</div>
-                                      </td>
-                                      <td className="p-3 text-muted-foreground">1234 Brandenberry Ct, Naperville, IL</td>
-                                      <td className="p-3 font-bold">1234 Brandenberry Ct, Naperville, IL</td>
-                                      <td className="p-3 text-center">
-                                        <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20 gap-1 rounded-full px-2 text-[9px] font-bold">
-                                          <CheckCircle2 className="h-2.5 w-2.5" /> Match
-                                        </Badge>
-                                      </td>
-                                    </tr>
-                                  </tbody>
-                                </table>
-                              </div>
-                            </div>
-
-                            {/* Agency Information */}
-                            <div className="px-6 pb-6">
-                              <div className="bg-card border border-border/50 rounded-xl overflow-hidden shadow-sm">
-                                <div className="bg-muted/20 px-4 py-2 border-b border-border/50 flex justify-between items-center">
-                                  <span className="text-xs font-black uppercase tracking-tight">Agency Information</span>
-                                  <div className="flex gap-2">
-                                    <span className="text-[9px] text-emerald-600 font-bold bg-emerald-500/5 px-1.5 py-0.5 rounded">2 match</span>
-                                    <span className="text-[9px] text-muted-foreground font-bold bg-muted px-1.5 py-0.5 rounded">0 diff</span>
-                                  </div>
-                                </div>
-                                <table className="w-full text-xs border-collapse">
-                                  <tbody className="divide-y divide-border/40">
-                                    <tr>
-                                      <td className="p-3 w-1/3">
-                                        <div className="font-bold">Agency</div>
-                                        <div className="text-[9px] text-muted-foreground">From uploaded docs</div>
-                                      </td>
-                                      <td className="p-3 text-muted-foreground">AssuredPartners — Midwest</td>
-                                      <td className="p-3 font-bold">AssuredPartners — Midwest</td>
-                                      <td className="p-3 text-center w-[100px]">
-                                        <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20 gap-1 rounded-full px-2 text-[9px] font-bold">
-                                          <CheckCircle2 className="h-2.5 w-2.5" /> Match
-                                        </Badge>
-                                      </td>
-                                    </tr>
-                                    <tr>
-                                      <td className="p-3 w-1/3">
-                                        <div className="font-bold">Agency address</div>
-                                        <div className="text-[9px] text-muted-foreground">From uploaded docs</div>
-                                      </td>
-                                      <td className="p-3 text-muted-foreground">200 E Randolph St, Chicago, IL</td>
-                                      <td className="p-3 font-bold">200 E Randolph St, Chicago, IL</td>
-                                      <td className="p-3 text-center w-[100px]">
-                                        <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20 gap-1 rounded-full px-2 text-[9px] font-bold">
-                                          <CheckCircle2 className="h-2.5 w-2.5" /> Match
-                                        </Badge>
-                                      </td>
-                                    </tr>
-                                  </tbody>
-                                </table>
-                              </div>
-                            </div>
-
-                            {/* Policy Information */}
-                            <div className="px-6 pb-6">
-                              <div className="bg-card border border-border/50 rounded-xl overflow-hidden shadow-sm">
-                                <div className="bg-muted/20 px-4 py-2 border-b border-border/50 flex justify-between items-center">
-                                  <span className="text-xs font-black uppercase tracking-tight">Policy Information</span>
-                                  <div className="flex gap-2">
-                                    <span className="text-[9px] text-emerald-600 font-bold bg-emerald-500/5 px-1.5 py-0.5 rounded">5 match</span>
-                                    <span className="text-[9px] text-amber-600 font-bold bg-amber-500/5 px-1.5 py-0.5 rounded">1 diff</span>
-                                  </div>
-                                </div>
-                                <table className="w-full text-xs border-collapse">
-                                  <tbody className="divide-y divide-border/40">
-                                    <tr>
-                                      <td className="p-3 w-1/3">
-                                        <div className="font-bold">Policy number</div>
-                                        <div className="text-[9px] text-muted-foreground">From uploaded docs · New term issued under proposal sequence</div>
-                                      </td>
-                                      <td className="p-3 text-muted-foreground">BA-1L251829-25-42-G</td>
-                                      <td className="p-3 font-bold">BA-1L251829-1</td>
-                                      <td className="p-3 text-center w-[100px]">
-                                        <Badge className="bg-destructive/10 text-destructive border-destructive/20 gap-1 rounded-full px-2 text-[9px] font-bold">
-                                          <XCircle className="h-2.5 w-2.5" /> Mismatch
-                                        </Badge>
-                                      </td>
-                                    </tr>
-                                    {[
-                                      { field: "Coverage period start", expiring: "09/24/2025", proposed: "09/24/2025" },
-                                      { field: "Coverage period end", expiring: "09/24/2026", proposed: "09/24/2026" },
-                                      { field: "Policy premium", expiring: "$2,517", proposed: "$2,517" },
-                                      { field: "Carrier", expiring: "Travelers Casualty Insurance Co. of America", proposed: "Travelers Casualty Insurance Co. of America" },
-                                      { field: "Full location schedules", expiring: "1 location scheduled", proposed: "1 location scheduled" },
-                                    ].map((row) => (
-                                      <tr key={row.field}>
-                                        <td className="p-3">
-                                          <div className="font-bold">{row.field}</div>
-                                          <div className="text-[9px] text-muted-foreground">From uploaded docs</div>
-                                        </td>
-                                        <td className="p-3 text-muted-foreground">{row.expiring}</td>
-                                        <td className="p-3 font-bold">{row.proposed}</td>
-                                        <td className="p-3 text-center">
-                                          <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20 gap-1 rounded-full px-2 text-[9px] font-bold">
-                                            <CheckCircle2 className="h-2.5 w-2.5" /> Match
-                                          </Badge>
-                                        </td>
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
-                              </div>
-                            </div>
-
-                            {/* Auto coverage - symbols */}
-                            <div className="px-6 pb-6">
-                              <div className="bg-card border border-border/50 rounded-xl overflow-hidden shadow-sm">
-                                <div className="bg-muted/20 px-4 py-2 border-b border-border/50 flex justify-between items-center">
-                                  <span className="text-xs font-black uppercase tracking-tight">Auto coverage — symbols</span>
-                                  <div className="flex gap-2">
-                                    <span className="text-[9px] text-emerald-600 font-bold bg-emerald-500/5 px-1.5 py-0.5 rounded">8 match</span>
-                                    <span className="text-[9px] text-muted-foreground font-bold bg-muted px-1.5 py-0.5 rounded">0 diff</span>
-                                  </div>
-                                </div>
-                                <p className="text-[10px] text-muted-foreground px-4 py-2 bg-muted/5 border-b border-border/50 italic">
-                                  Coverage symbols define which autos are covered for each peril.
-                                </p>
-                                <table className="w-full text-xs border-collapse">
-                                  <tbody className="divide-y divide-border/40">
-                                    {[
-                                      { field: "Owned auto liability symbol", expiring: "Symbol 1 — Any Auto", proposed: "Symbol 1 — Any Auto" },
-                                      { field: "Collision coverage symbol", expiring: "Symbol 7 — Specifically Described", proposed: "Symbol 7 — Specifically Described" },
-                                      { field: "Comprehensive coverage symbol", expiring: "Symbol 7 — Specifically Described", proposed: "Symbol 7 — Specifically Described" },
-                                      { field: "Underinsured motorist symbol", expiring: "Symbol 2 — Owned Autos Only", proposed: "Symbol 2 — Owned Autos Only" },
-                                      { field: "Uninsured motorist symbol", expiring: "Symbol 2 — Owned Autos Only", proposed: "Symbol 2 — Owned Autos Only" },
-                                      { field: "Non-owned auto symbol", expiring: "Symbol 9 — Non-Owned Autos", proposed: "Symbol 9 — Non-Owned Autos" },
-                                      { field: "Hired car symbol", expiring: "Symbol 8 — Hired Autos", proposed: "Symbol 8 — Hired Autos" },
-                                      { field: "Medical payments symbol", expiring: "Symbol 7 — Specifically Described", proposed: "Symbol 7 — Specifically Described" },
-                                    ].map((row) => (
-                                      <tr key={row.field}>
-                                        <td className="p-3 w-1/3">
-                                          <div className="font-bold">{row.field}</div>
-                                          <div className="text-[9px] text-muted-foreground">Workbook-aligned</div>
-                                        </td>
-                                        <td className="p-3 text-muted-foreground italic">{row.expiring}</td>
-                                        <td className="p-3 font-bold">{row.proposed}</td>
-                                        <td className="p-3 text-center w-[100px]">
-                                          <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20 gap-1 rounded-full px-2 text-[9px] font-bold">
-                                            <CheckCircle2 className="h-2.5 w-2.5" /> Match
-                                          </Badge>
-                                        </td>
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
-                              </div>
-                            </div>
-
-                            {/* Auto coverage - limits */}
-                            <div className="px-6 pb-6">
-                              <div className="bg-card border border-border/50 rounded-xl overflow-hidden shadow-sm">
-                                <div className="bg-muted/20 px-4 py-2 border-b border-border/50 flex justify-between items-center">
-                                  <span className="text-xs font-black uppercase tracking-tight">Auto coverage — limits</span>
-                                  <div className="flex gap-2">
-                                    <span className="text-[9px] text-emerald-600 font-bold bg-emerald-500/5 px-1.5 py-0.5 rounded">6 match</span>
-                                    <span className="text-[9px] text-muted-foreground font-bold bg-muted px-1.5 py-0.5 rounded">0 diff</span>
-                                  </div>
-                                </div>
-                                <table className="w-full text-xs border-collapse">
-                                  <tbody className="divide-y divide-border/40">
-                                    {[
-                                      { field: "Liability", expiring: "$1,000,000 CSL", proposed: "$1,000,000 CSL" },
-                                      { field: "Underinsured motorist", expiring: "$1,000,000", proposed: "$1,000,000" },
-                                      { field: "Uninsured motorist", expiring: "$1,000,000", proposed: "$1,000,000" },
-                                      { field: "Non-owned auto", expiring: "Included", proposed: "Included" },
-                                      { field: "Hired car", expiring: "Included", proposed: "Included" },
-                                      { field: "Medical payments", expiring: "$5,000", proposed: "$5,000" },
-                                    ].map((row) => (
-                                      <tr key={row.field}>
-                                        <td className="p-3 w-1/3">
-                                          <div className="font-bold">{row.field}</div>
-                                          <div className="text-[9px] text-muted-foreground">From uploaded docs</div>
-                                        </td>
-                                        <td className="p-3 text-muted-foreground">{row.expiring}</td>
-                                        <td className="p-3 font-bold">{row.proposed}</td>
-                                        <td className="p-3 text-center w-[100px]">
-                                          <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20 gap-1 rounded-full px-2 text-[9px] font-bold">
-                                            <CheckCircle2 className="h-2.5 w-2.5" /> Match
-                                          </Badge>
-                                        </td>
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
-                              </div>
-                            </div>
-
-                            {/* Vehicles */}
-                            <div className="px-6 pb-6">
-                              <div className="bg-card border border-border/50 rounded-xl overflow-hidden shadow-sm">
-                                <div className="bg-muted/20 px-4 py-2 border-b border-border/50 flex justify-between items-center">
-                                  <span className="text-xs font-black uppercase tracking-tight">Vehicles</span>
-                                  <div className="flex gap-2">
-                                    <span className="text-[9px] text-emerald-600 font-bold bg-emerald-500/5 px-1.5 py-0.5 rounded">9 match</span>
-                                    <span className="text-[9px] text-muted-foreground font-bold bg-muted px-1.5 py-0.5 rounded">0 diff</span>
-                                  </div>
-                                </div>
-                                <p className="text-[10px] text-muted-foreground px-4 py-2 bg-muted/5 border-b border-border/50 italic">
-                                  Per-vehicle schedule and coverage detail.
-                                </p>
-                                <table className="w-full text-xs border-collapse">
-                                  <tbody className="divide-y divide-border/40">
-                                    {[
-                                      { field: "Number of vehicles", expiring: "1", proposed: "1" },
-                                      { field: "Vehicle 1 — year", expiring: "2019", proposed: "2019" },
-                                      { field: "Vehicle 1 — make", expiring: "Ford", proposed: "Ford" },
-                                      { field: "Vehicle 1 — model", expiring: "F-150", proposed: "F-150" },
-                                      { field: "Vehicle 1 — VIN", expiring: "1FTFW1E50KFA12345", proposed: "1FTFW1E50KFA12345" },
-                                      { field: "Vehicle 1 — coverage type", expiring: "Liability + Phys Dmg", proposed: "Liability + Phys Dmg" },
-                                      { field: "Vehicle 1 — limit", expiring: "$1,000,000 CSL", proposed: "$1,000,000 CSL" },
-                                      { field: "Vehicle 1 — comp/coll deductible", expiring: "$1,000 / $1,000", proposed: "$1,000 / $1,000" },
-                                      { field: "Vehicle 1 — premium", expiring: "$2,517", proposed: "$2,517" },
-                                    ].map((row) => (
-                                      <tr key={row.field}>
-                                        <td className="p-3 w-1/3">
-                                          <div className="font-bold">{row.field}</div>
-                                          <div className="text-[9px] text-muted-foreground">From uploaded docs</div>
-                                        </td>
-                                        <td className="p-3 text-muted-foreground">{row.expiring}</td>
-                                        <td className="p-3 font-bold">{row.proposed}</td>
-                                        <td className="p-3 text-center w-[100px]">
-                                          <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20 gap-1 rounded-full px-2 text-[9px] font-bold">
-                                            <CheckCircle2 className="h-2.5 w-2.5" /> Match
-                                          </Badge>
-                                        </td>
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
-                              </div>
-                            </div>
-
-                            {/* Forms & endorsements */}
-                            <div className="px-6 pb-10">
-                              <div className="bg-card border border-border/50 rounded-xl overflow-hidden shadow-sm">
-                                <div className="bg-muted/20 px-4 py-2 border-b border-border/50 flex justify-between items-center">
-                                  <span className="text-xs font-black uppercase tracking-tight">Forms & endorsements</span>
-                                  <div className="flex gap-2">
-                                    <span className="text-[9px] text-emerald-600 font-bold bg-emerald-500/5 px-1.5 py-0.5 rounded">2 match</span>
-                                    <span className="text-[9px] text-blue-600 font-bold bg-blue-500/5 px-1.5 py-0.5 rounded">1 added</span>
-                                  </div>
-                                </div>
-                                <table className="w-full text-xs border-collapse">
-                                  <tbody className="divide-y divide-border/40">
-                                    {[
-                                      { field: "Form CA 00 01", expiring: "Business Auto Coverage Form (10/13)", proposed: "Business Auto Coverage Form (10/13)", status: "Match", color: "emerald" },
-                                      { field: "Form CA 02 70", expiring: "Cancellation — IL Changes (11/13)", proposed: "Cancellation — IL Changes (11/13)", status: "Match", color: "emerald" },
-                                      { field: "Form CA 21 17", expiring: "Workbook-aligned - Added at proposal stage", proposed: "Fellow Employee Coverage (10/13)", status: "Added", color: "blue" },
-                                    ].map((row) => (
-                                      <tr key={row.field}>
-                                        <td className="p-3 w-1/3">
-                                          <div className="font-bold">{row.field}</div>
-                                          <div className="text-[9px] text-muted-foreground">{row.status === "Added" ? "Workbook-aligned - Added at proposal stage" : "Workbook-aligned"}</div>
-                                        </td>
-                                        <td className="p-3 text-muted-foreground italic">{row.status === "Added" ? "" : row.expiring}</td>
-                                        <td className="p-3 font-bold">{row.proposed}</td>
-                                        <td className="p-3 text-center w-[100px]">
-                                          <Badge className={`bg-${row.color}-500/10 text-${row.color}-600 border-${row.color}-500/20 gap-1 rounded-full px-2 text-[9px] font-bold`}>
-                                            {row.status === "Match" ? <CheckCircle2 className="h-2.5 w-2.5" /> : <Sparkles className="h-2.5 w-2.5" />}
-                                            {row.status}
-                                          </Badge>
-                                        </td>
-                                      </tr>
-                                    ))}
+                                    {extractedRows
+                                      .filter(row => {
+                                        if (fieldFilter === "differences" && row.status === "MATCH") return false;
+                                        if (fieldFilter === "matches" && row.status !== "MATCH") return false;
+                                        return true;
+                                      })
+                                      .map((row, idx) => (
+                                        <tr key={idx}>
+                                          <td className="p-3">
+                                            <div className="font-bold capitalize">{row.field.replace(/_/g, ' ')}</div>
+                                            <div className="text-[9px] text-muted-foreground">Extracted from documents</div>
+                                          </td>
+                                          <td className="p-3 text-muted-foreground">{row.expiring}</td>
+                                          <td className="p-3 font-bold">{row.proposed}</td>
+                                          <td className="p-3 text-center">
+                                            {row.status === "MATCH" ? (
+                                              <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20 gap-1 rounded-full px-2 text-[9px] font-bold">
+                                                <CheckCircle2 className="h-2.5 w-2.5" /> Match
+                                              </Badge>
+                                            ) : (
+                                              <Badge className="bg-amber-500/10 text-amber-600 border-amber-500/20 gap-1 rounded-full px-2 text-[9px] font-bold">
+                                                <AlertCircle className="h-2.5 w-2.5" /> Mismatch
+                                              </Badge>
+                                            )}
+                                          </td>
+                                        </tr>
+                                      ))}
                                   </tbody>
                                 </table>
                               </div>

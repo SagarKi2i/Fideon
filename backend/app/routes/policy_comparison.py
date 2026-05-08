@@ -19,7 +19,7 @@ from app.core.config import (
 )
 import logging
 
-from app.core.supabase import verify_user
+from app.core.supabase import postgrest_insert, verify_user
 from Models.acord_form_understanding import AcordFormSummary
 
 from app.routes.acord import _extract_summary_from_file, _ensure_runpod_ready_for_acord
@@ -42,7 +42,7 @@ _LOB_FIELDS: dict[str, list[str]] = {
         "number_of_vehicles", "vehicle_1_year", "vehicle_1_make", "vehicle_1_model",
         "vehicle_1_vin", "vehicle_1_coverage_type", "vehicle_1_limit",
         "vehicle_1_comp_coll_deductible", "vehicle_1_premium",
-        "form_CA_00_01", "form_CA_02_70", "form_CA_21_17"
+        "form_CA_00_01", "form_CA_02_70"
     ],
     "crime": [
         "named_insured", "policy_number", "carrier", "coverage_effective_date",
@@ -372,4 +372,22 @@ async def compare_policies(
     logger.info("[REPORT] Formatting final JSON response...")
     logger.info("[SUCCESS] Comparison workflow complete.")
     logger.info("PolicyComparison[compare] done: file_a=%s file_b=%s lob=%s user_id=%s", name_a, name_b, lob, user_id)
+
+    # Insert log into policy_comparison_logs
+    try:
+        diff_clauses = result.get("clause_diff", {}).get("clauses", [])
+        diff_count = len([c for c in diff_clauses if c.get("status") != "MATCH"])
+        rec = result.get("recommendation", {}).get("recommended_policy", "NEITHER")
+        
+        await postgrest_insert("policy_comparison_logs", {
+            "user_id": user_id,
+            "policy_a_name": name_a,
+            "policy_b_name": name_b,
+            "lob": lob or "Unknown",
+            "differences_count": diff_count,
+            "recommendation": rec
+        })
+    except Exception as exc:
+        logger.warning("Failed to insert policy_comparison_log (table might not exist yet): %s", exc)
+
     return result
