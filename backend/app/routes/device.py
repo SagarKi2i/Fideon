@@ -16,6 +16,7 @@ from app.core.limiter import limiter
 from app.core.supabase import (
     get_device_by_token,
     insert_audit_log,
+    postgrest_delete,
     postgrest_get,
     postgrest_insert,
     postgrest_patch,
@@ -810,6 +811,19 @@ async def link_device_v1(request: Request, authorization: Optional[str] = Header
     )
     log.info("device.linked", device_id=device_id, user_id=user["id"], tenant_id=requester_tenant_id)
     await _sync_user_models_to_device(str(user["id"]), device_id)
+
+    # Remove never_checked_in placeholder devices for this user (created during signup/QR pairing).
+    # Now that a real Electron device is linked, these orphans are no longer needed.
+    orphan_rows = await postgrest_get(
+        "devices",
+        f"select=id&registered_by=eq.{quote(str(user['id']), safe='')}&status=eq.never_checked_in&id=neq.{quote(device_id, safe='')}",
+    )
+    for orphan in orphan_rows:
+        try:
+            await postgrest_delete("devices", f"id=eq.{quote(str(orphan['id']), safe='')}")
+        except Exception:
+            pass
+
     return {"success": True, "device_id": device_id}
 
 
@@ -1085,29 +1099,55 @@ async def confirm_device_pairing(request: Request):
     os_type = body.get("os_type") or confirmed_profile.get("os_name")
     app_version = body.get("app_version") or confirmed_profile.get("app_version")
 
-    device_token = secrets.token_urlsafe(32)
-    inserted_devices = await postgrest_insert(
+    # Reuse an existing never_checked_in device for this user instead of creating a duplicate.
+    existing_pending = await postgrest_get(
         "devices",
-        {
-            "device_name": device_name,
-            "device_token": device_token,
-            "registered_by": pairing["user_id"],
-            "status": "online",
-            "os_type": os_type,
-            "app_version": app_version,
-            "last_seen_at": now.isoformat(),
-            "jwt_issued_after": now.isoformat(),
-            "metadata": {
-                "linked_from_pairing": True,
-                "pairing_id": pairing_id,
-                "requested_device_profile": pairing.get("requested_device_profile") or {},
-                "confirmed_device_profile": confirmed_profile,
-            },
-        },
+        f"select=*&registered_by=eq.{quote(str(pairing['user_id']), safe='')}&status=eq.never_checked_in&order=created_at.desc&limit=1",
     )
-    if not inserted_devices:
-        raise HTTPException(status_code=500, detail="Failed to create linked device")
-    linked_device = inserted_devices[0]
+
+    device_token = secrets.token_urlsafe(32)
+    pairing_metadata = {
+        "linked_from_pairing": True,
+        "pairing_id": pairing_id,
+        "requested_device_profile": pairing.get("requested_device_profile") or {},
+        "confirmed_device_profile": confirmed_profile,
+    }
+
+    if existing_pending:
+        existing_device = existing_pending[0]
+        updated = await postgrest_patch(
+            "devices",
+            f"id=eq.{quote(str(existing_device['id']), safe='')}",
+            {
+                "device_name": device_name,
+                "device_token": device_token,
+                "status": "online",
+                "os_type": os_type,
+                "app_version": app_version,
+                "last_seen_at": now.isoformat(),
+                "jwt_issued_after": now.isoformat(),
+                "metadata": pairing_metadata,
+            },
+        )
+        linked_device = updated[0] if updated else {**existing_device, "device_token": device_token}
+    else:
+        inserted_devices = await postgrest_insert(
+            "devices",
+            {
+                "device_name": device_name,
+                "device_token": device_token,
+                "registered_by": pairing["user_id"],
+                "status": "online",
+                "os_type": os_type,
+                "app_version": app_version,
+                "last_seen_at": now.isoformat(),
+                "jwt_issued_after": now.isoformat(),
+                "metadata": pairing_metadata,
+            },
+        )
+        if not inserted_devices:
+            raise HTTPException(status_code=500, detail="Failed to create linked device")
+        linked_device = inserted_devices[0]
 
     await _sync_user_models_to_device(str(pairing["user_id"]), str(linked_device["id"]))
 
