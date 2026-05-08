@@ -257,25 +257,44 @@ async def signup(request: Request):
         except Exception:
             pass  # Non-blocking: if lookup fails, let the DB trigger enforce it
 
-    # ── Global-admin pre-flight check ────────────────────────────────────────
-    # Non-global_admin signups are blocked until at least one global_admin exists.
-    # This prevents tenants/users being created on a fresh system with no administrator.
+    # ── Tenant existence + global-admin pre-flight check ─────────────────────
+    # Rules:
+    #   1. If no global_admin exists in the system at all → only allow global_admin signup (first setup).
+    #   2. If a global_admin exists but the requested tenant does NOT exist → block signup.
+    #      New tenants must be pre-created by a global_admin via POST /api/v1/tenants.
+    #   3. If the tenant already exists → allow signup (joining an existing tenant).
     requested_role = str(data_meta.get("requested_role") or "").strip().lower()
-    if requested_role != "global_admin":
-        try:
-            ga_rows = await postgrest_get(
-                "user_roles",
-                "select=user_id&role=eq.global_admin&limit=1",
-            )
-            if not ga_rows:
+    try:
+        ga_rows = await postgrest_get(
+            "user_roles",
+            "select=user_id&role=eq.global_admin&limit=1",
+        )
+        system_has_global_admin = bool(ga_rows)
+
+        if not system_has_global_admin:
+            # Fresh system — only the first global_admin may sign up.
+            if requested_role != "global_admin":
                 raise HTTPException(
                     status_code=403,
                     detail="No Global Admin exists yet. A Global Admin must be created before tenant or user registration is allowed.",
                 )
-        except HTTPException:
-            raise
-        except Exception:
-            pass  # Non-blocking: if lookup fails, allow signup
+        else:
+            # System is initialised — new tenant names are not allowed via self-service signup.
+            # Users must join a tenant that was already created by a global_admin.
+            if tenant_name_meta:
+                tenant_exists_rows = await postgrest_get(
+                    "tenants",
+                    f"select=id&is_active=eq.true&name=eq.{quote(tenant_name_meta, safe='')}&limit=1",
+                )
+                if not tenant_exists_rows:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Tenant '{tenant_name_meta}' does not exist. A Global Admin must create the tenant before users can register.",
+                    )
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # Non-blocking: if lookup fails, allow signup
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
