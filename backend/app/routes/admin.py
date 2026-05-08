@@ -957,6 +957,11 @@ async def admin_set_user_role(request: Request, authorization: Optional[str] = H
     role = body.get("role")
     if not user_id or role not in VALID_ROLES:
         raise HTTPException(status_code=400, detail="Valid user_id and role are required")
+
+    # Global Admin cannot change their own role.
+    if str(user_id) == str(requester["id"]):
+        raise HTTPException(status_code=403, detail="Global Admin cannot change their own role.")
+
     target_profiles = await postgrest_get(
         "app_users",
         f"select=tenant_id&user_id=eq.{quote(user_id, safe='')}&limit=1",
@@ -969,6 +974,10 @@ async def admin_set_user_role(request: Request, authorization: Optional[str] = H
         "user_roles", f"select=role&user_id=eq.{quote(user_id, safe='')}&limit=1"
     )
     old_role = current_roles[0].get("role") if current_roles else None
+
+    # Prevent demoting another Global Admin.
+    if old_role == "global_admin" and role != "global_admin":
+        raise HTTPException(status_code=403, detail="Cannot demote a Global Admin account.")
 
     headers = service_headers()
     headers["Prefer"] = "resolution=merge-duplicates,return=representation"
