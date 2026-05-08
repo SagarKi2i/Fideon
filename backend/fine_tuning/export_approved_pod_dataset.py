@@ -53,7 +53,7 @@ async def _fetch_one_pod_agent(pod_id: str) -> Optional[Dict[str, Any]]:
 
 async def fetch_approved_runs(
     *,
-    limit: int = 1000,
+    limit: int = 99999,
     pod_id: str | None = None,
     run_id: str | None = None,
 ) -> List[Dict[str, Any]]:
@@ -66,20 +66,42 @@ async def fetch_approved_runs(
 
     if run_id:
         rid = quote(str(run_id), safe="")
-        query = f"{base_select}&id=eq.{rid}&limit=1"
-    else:
-        if not pod_id:
-            raise RuntimeError("--pod-id is required when --run-id is not provided")
-        pid = quote(str(pod_id), safe="")
-        query = f"{base_select}&pod_id=eq.{pid}&status=eq.approved&limit={limit}&order=created_at.asc"
+        url = f"{SUPABASE_URL}/rest/v1/pod_extraction_runs?{base_select}&id=eq.{rid}&limit=1"
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.get(url, headers=_headers())
+        if resp.status_code >= 400:
+            raise RuntimeError(resp.text)
+        return resp.json() or []
 
-    url = f"{SUPABASE_URL}/rest/v1/pod_extraction_runs?{query}"
+    if not pod_id:
+        raise RuntimeError("--pod-id is required when --run-id is not provided")
+
+    pid = quote(str(pod_id), safe="")
+    # Paginate so every approved run is fetched regardless of total count.
+    PAGE = 1000
+    rows: List[Dict[str, Any]] = []
+    offset = 0
     async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.get(url, headers=_headers())
-    if resp.status_code >= 400:
-        raise RuntimeError(resp.text)
+        while len(rows) < limit:
+            batch_size = min(PAGE, limit - len(rows))
+            query = (
+                f"{base_select}&pod_id=eq.{pid}&status=eq.approved"
+                f"&order=created_at.asc&limit={batch_size}&offset={offset}"
+            )
+            url = f"{SUPABASE_URL}/rest/v1/pod_extraction_runs?{query}"
+            resp = await client.get(url, headers=_headers())
+            if resp.status_code >= 400:
+                raise RuntimeError(resp.text)
+            batch = resp.json() or []
+            if not batch:
+                break
+            rows.extend(batch)
+            if len(batch) < batch_size:
+                break
+            offset += batch_size
 
-    return resp.json() or []
+    print(f"[export] fetched {len(rows)} approved pod run(s) across paginated queries", flush=True)
+    return rows
 
 
 def _default_instruction(pod_id: str) -> str:

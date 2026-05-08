@@ -1,265 +1,110 @@
 # =============================================================================
-# Fideon RunPod Server — fully frozen from working A100 pod
-# Python 3.11  |  torch 2.7.0 (cu124)  |  CUDA 12.8 host
-# Base image: runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
-# Frozen from: pip list on pod 4e8e01aa5e6d (confirmed working)
+# Fideon RunPod Server — Python dependencies
+# Python 3.11  |  RunPod GPU environment (CUDA 12.4 / H100)
 # =============================================================================
+# PyTorch CUDA wheels — must come from PyTorch index, not PyPI
 --extra-index-url https://download.pytorch.org/whl/cu124
-
-# Core ML
+ 
+# -----------------------------------------------------------------------------
+# Web server
+# -----------------------------------------------------------------------------
+fastapi==0.136.0
+uvicorn[standard]==0.45.0
+python-multipart>=0.0.9
+aiofiles>=23.2.1
+httpx>=0.27.0
+ 
+# -----------------------------------------------------------------------------
+# PDF → image conversion
+# -----------------------------------------------------------------------------
+PyMuPDF==1.27.2.3
+pdfplumber>=0.11.0
+Pillow>=10.2.0
+numpy>=2.0.0,<3.0.0
+ 
+# -----------------------------------------------------------------------------
+# Surya OCR — text detection + recognition
+# 0.17.x requires torch>=2.7.0 and transformers>=4.56.1
+# -----------------------------------------------------------------------------
+surya-ocr==0.17.1
+ 
+# -----------------------------------------------------------------------------
+# Qwen2-VL — vision-language field extraction + fine-tuning base model
+# torch 2.7.0 is the minimum required by surya-ocr==0.17.1
+# torchvision must match torch major.minor (2.7 → 0.22)
+# transformers 4.56.2 satisfies surya-ocr (>=4.56.1) and trl (>=4.56.2)
+# NOTE: RunPod image runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04 ships torch 2.4.0.
+# surya-ocr==0.17.1 forces an upgrade to 2.7.0 on pip install — this is expected and correct.
+# If install time is critical, switch to runpod/pytorch:2.7.0-py3.11-cuda12.4.1-devel-ubuntu22.04.
+# -----------------------------------------------------------------------------
 torch==2.7.0
 torchvision==0.22.0
-triton==3.3.0
 transformers==4.56.2
-tokenizers==0.22.2
 accelerate==1.13.0
-safetensors==0.7.0
-peft==0.19.1
-trl==1.3.0
-bitsandbytes==0.49.2
-datasets==4.8.5
-huggingface-hub==0.36.2
-hf-xet==1.5.0
 qwen-vl-utils==0.0.14
-surya-ocr==0.17.1
-
-# NVIDIA CUDA wheels (pinned to match torch 2.7.0 cu124 build)
-nvidia-cublas-cu12==12.6.4.1
-nvidia-cuda-cupti-cu12==12.6.80
-nvidia-cuda-nvrtc-cu12==12.6.77
-nvidia-cuda-runtime-cu12==12.6.77
-nvidia-cudnn-cu12==9.5.1.17
-nvidia-cufft-cu12==11.3.0.4
-nvidia-cufile-cu12==1.11.1.6
-nvidia-curand-cu12==10.3.7.77
-nvidia-cusolver-cu12==11.7.1.2
-nvidia-cusparse-cu12==12.5.4.2
-nvidia-cusparselt-cu12==0.6.3
-nvidia-nccl-cu12==2.26.2
-nvidia-nvjitlink-cu12==12.6.85
-nvidia-nvtx-cu12==12.6.77
-
-# Web server
-fastapi==0.136.0
-starlette==1.0.0
-uvicorn==0.45.0
-uvloop==0.22.1
-httptools==0.7.1
-watchfiles==1.1.1
-python-multipart==0.0.27
-aiofiles==25.1.0
-httpx==0.28.1
-httpcore==1.0.9
-h11==0.16.0
-anyio==4.13.0
-
-# PDF / OCR
-PyMuPDF==1.27.2.3
-pdfplumber==0.11.9
-pdfminer.six==20251230
-pypdfium2==4.30.0
-Pillow==10.4.0
-numpy==2.4.4
-
-# Docling
+ 
+# -----------------------------------------------------------------------------
+# QLoRA fine-tuning
+# -----------------------------------------------------------------------------
+# 4-bit quantization (NF4 / double quant) — requires torch>=2.3 (satisfied by 2.7.0)
+bitsandbytes==0.49.2
+ 
+# LoRA adapter training (PEFT)
+peft==0.19.1
+ 
+# Supervised fine-tuning trainer (SFTTrainer / DataCollatorForLanguageModeling)
+# trl 1.3.0 requires transformers>=4.56.2 and datasets>=4.7.0 (both satisfied)
+trl==1.3.0
+ 
+# Efficient weight serialization
+safetensors==0.7.0
+ 
+# HuggingFace datasets
+datasets==4.8.5
+ 
+# HuggingFace Hub — model card push, weight upload
+huggingface-hub>=0.24.0
+ 
+# -----------------------------------------------------------------------------
+# Docling — document structure parser (layout + tables + KV for scanned PDFs)
+# Runs in parallel with Surya OCR as Arm B of the extraction pipeline.
+# pypdfium2==4.30.0 satisfies both surya-ocr==0.17.1 (exact pin) and docling
+# -----------------------------------------------------------------------------
 docling==2.92.0
-docling-core==2.74.1
-docling-ibm-models==3.13.2
-docling-parse==5.10.1
-docling-slim==2.92.0
-rapidocr==3.8.1
-opencv-python==4.13.0.92
-opencv-python-headless==4.11.0.86
-lxml==6.1.0
-rtree==1.4.1
-scipy==1.17.1
-shapely==2.1.2
-pyclipper==1.4.0
-omegaconf==2.3.0
-antlr4-python3-runtime==4.9.3
-einops==0.8.2
-filetype==1.2.0
-colorlog==6.10.1
-
-# Storage
-boto3==1.43.5
-botocore==1.43.5
-s3transfer==0.17.0
-jmespath==1.1.0
-azure-storage-blob==12.28.0
-azure-core==1.40.0
-isodate==0.7.2
-
-# Config / utils
-PyYAML==6.0.3
-requests==2.33.1
-urllib3==2.6.3
-charset-normalizer==3.4.7
-idna==3.13
-certifi==2026.4.22
-python-dotenv==1.2.2
-packaging==26.2
-typing_extensions==4.15.0
-typing-inspection==0.4.2
-pydantic==2.13.4
-pydantic_core==2.46.4
-pydantic-settings==2.14.0
-annotated-types==0.7.0
-
-# JupyterLab
-jupyterlab==4.5.7
-jupyter_server==2.18.2
-jupyter_client==8.8.0
-jupyter_core==5.9.1
-jupyter-events==0.12.1
-jupyter-lsp==2.3.1
-jupyter_server_terminals==0.5.4
-jupyterlab_server==2.28.0
-jupyterlab_pygments==0.3.0
-notebook_shim==0.2.4
-ipykernel==7.2.0
-ipython==9.13.0
-ipython_pygments_lexers==1.1.1
-comm==0.2.3
-debugpy==1.8.20
-tornado==6.5.5
-pyzmq==27.1.0
-traitlets==5.15.0
-nbformat==5.10.4
-nbclient==0.10.4
-nbconvert==7.17.1
-terminado==0.18.1
-Send2Trash==2.1.0
-prometheus_client==0.25.0
-overrides==7.7.0
-websocket-client==1.9.0
-argon2-cffi==25.1.0
-argon2-cffi-bindings==25.1.0
-async-lru==2.3.0
-babel==2.18.0
-json5==0.14.0
-
-# Misc dependencies
-aiohttp==3.13.5
-aiohappyeyeballs==2.6.1
-aiosignal==1.4.0
-frozenlist==1.8.0
-multidict==6.7.1
-yarl==1.23.0
-propcache==0.4.1
-async-timeout==5.0.1
-fsspec==2026.2.0
-filelock==3.29.0
-networkx==3.6.1
-sympy==1.14.0
-mpmath==1.3.0
-regex==2026.4.4
-tqdm==4.67.3
-Jinja2==3.1.6
-MarkupSafe==3.0.3
-click==8.3.3
-rich==15.0.0
-markdown-it-py==4.1.0
-mdurl==0.1.2
-Pygments==2.20.0
-platformdirs==4.9.6
-pyarrow==24.0.0
-pandas==3.0.2
-python-dateutil==2.9.0.post0
-tzdata==2026.2
-dill==0.4.1
-multiprocess==0.70.19
-xxhash==3.7.0
-av==17.0.1
-
-# Docling extras
-latex2mathml==3.81.0
-marko==2.2.2
-beautifulsoup4==4.14.3
-soupsieve==2.8.3
-defusedxml==0.7.1
-openpyxl==3.1.5
-et-xmlfile==2.0.0
-python-docx==1.2.0
-python-pptx==1.0.2
-xlsxwriter==3.2.9
-pylatexenc==2.10
-tabulate==0.10.0
-jsonlines==4.0.0
-jsonref==1.1.0
-jsonschema==4.26.0
-jsonschema-specifications==2025.9.1
-referencing==0.37.0
-rpds-py==0.30.0
-jsonpointer==3.1.1
-annotated-doc==0.0.4
-pluggy==1.6.0
-polyfactory==3.3.0
-Faker==40.15.0
-semchunk==3.2.5
-mpire==2.10.2
-tree-sitter==0.25.2
-tree-sitter-c==0.24.2
-tree-sitter-javascript==0.25.0
-tree-sitter-python==0.25.0
-tree-sitter-typescript==0.23.2
-websockets==16.0
-
-# Jupyter / IPython extras
-jedi==0.20.0
-parso==0.8.7
-matplotlib-inline==0.2.1
-nest-asyncio==1.6.0
-comm==0.2.3
-executing==2.2.1
-asttokens==3.0.1
-stack-data==0.6.3
-pure_eval==0.2.3
-pexpect==4.9.0
-ptyprocess==0.7.0
-prompt_toolkit==3.0.52
-wcwidth==0.7.0
-decorator==5.2.1
-mistune==3.2.1
-pandocfilters==1.5.1
-nbformat==5.10.4
-fastjsonschema==2.21.2
-bleach==6.3.0
-webencodings==0.5.1
-tinycss2==1.4.0
-
-# Schema / validation extras
-arrow==1.4.0
-isoduration==20.11.0
-fqdn==1.5.1
-uri-template==1.3.0
-rfc3339-validator==0.1.4
-rfc3986-validator==0.1.1
-rfc3987-syntax==1.1.0
-lark==1.3.1
-webcolors==25.10.0
-
-# Dev tools
-pytest==9.0.3
-iniconfig==2.3.0
-pre-commit==4.6.0
-cfgv==3.5.0
-identify==2.6.19
-nodeenv==1.10.0
-virtualenv==21.3.1
-distlib==0.4.0
-python-discovery==1.3.0
-
-# Crypto / auth
-cryptography==48.0.0
-cffi==2.0.0
-pycparser==3.0
-
-# Other
-six==1.17.0
-attrs==26.1.0
-psutil==7.2.2
-shellingham==1.5.4
-typer==0.21.2
-python-json-logger==4.1.0
-python-pptx==1.0.2
+pypdfium2==4.30.0
+ 
+# -----------------------------------------------------------------------------
+# Config parsing
+# -----------------------------------------------------------------------------
+pyyaml>=6.0
+ 
+# -----------------------------------------------------------------------------
+# Storage — SeaweedFS / S3-compatible + Azure Blob
+# botocore is a direct import in seaweedfs_client.py (botocore.config.Config)
+# azure-storage-blob is a direct import in azure_blob_client.py
+# -----------------------------------------------------------------------------
+boto3>=1.34.0
+botocore>=1.34.0
+azure-storage-blob>=12.19.0
+ 
+# -----------------------------------------------------------------------------
+# HTTP client — used in training_orchestrator.py and observability/alerting.py
+# (already declared above via httpx; requests is used only in test files)
+# -----------------------------------------------------------------------------
+requests>=2.31.0
+ 
+# -----------------------------------------------------------------------------
+# Tests
+# -----------------------------------------------------------------------------
+pytest>=8.0.0
+ 
+# -----------------------------------------------------------------------------
+# JupyterLab (port 8888)
+# -----------------------------------------------------------------------------
+jupyterlab>=4.0.0
+ 
+# -----------------------------------------------------------------------------
+# Optional: DeepEval LLM-judge metrics (fine_tuning/evaluation/deepeval_runner.py)
+# Install manually if needed:  pip install deepeval
+# -----------------------------------------------------------------------------
+# deepeval>=0.21.0

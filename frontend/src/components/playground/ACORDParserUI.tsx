@@ -236,6 +236,102 @@ function parseMarkdownTableToJson(markdown: string): Record<string, string> {
   return result;
 }
 
+/** snake_case / camelCase → Title Case label */
+function toLabel(key: string): string {
+  return key
+    .replace(/([A-Z])/g, " $1")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .trim();
+}
+
+/**
+ * Build display sections purely from the extracted JSON — no hardcoded fields.
+ * - Top-level plain objects   → one section with flattened field rows
+ * - Top-level arrays of objects → one numbered section per item
+ * - Top-level arrays of primitives / primitives → flat field row
+ * - Null / empty / "_"-prefixed keys are skipped everywhere
+ */
+function buildDynamicSections(extracted: any): {
+  flatFields: Array<{ label: string; value: string }>;
+  sections: Array<{ key: string; title: string; fields: Array<{ key: string; label: string; value: string }> }>;
+} {
+  const flatFields: Array<{ label: string; value: string }> = [];
+  const sections: Array<{ key: string; title: string; fields: Array<{ key: string; label: string; value: string }> }> = [];
+
+  if (!extracted || typeof extracted !== "object") return { flatFields, sections };
+
+  // Recursively collect {label, value} rows from a plain object, flattening one level of nesting
+  function collectFields(obj: Record<string, any>): Array<{ key: string; label: string; value: string }> {
+    const rows: Array<{ key: string; label: string; value: string }> = [];
+    for (const [k, v] of Object.entries(obj)) {
+      if (k.startsWith("_") || v === null || v === undefined) continue;
+      if (typeof v === "object" && !Array.isArray(v)) {
+        // Nested object → flatten one level with "Parent - Child" label
+        for (const [nk, nv] of Object.entries(v as Record<string, any>)) {
+          if (nk.startsWith("_") || nv === null || nv === undefined) continue;
+          const s = typeof nv === "object" ? JSON.stringify(nv) : String(nv).trim();
+          if (s) rows.push({ key: `${k}.${nk}`, label: `${toLabel(k)} - ${toLabel(nk)}`, value: s });
+        }
+      } else if (Array.isArray(v)) {
+        // Array of primitives → join; array of objects → stringify (handled at top level if needed)
+        const s = v.every(item => typeof item !== "object" || item === null)
+          ? v.filter(item => item !== null && item !== undefined).map(String).join(", ")
+          : JSON.stringify(v);
+        if (s && s.trim()) rows.push({ key: k, label: toLabel(k), value: s });
+      } else {
+        const s = String(v).trim();
+        if (s) rows.push({ key: k, label: toLabel(k), value: s });
+      }
+    }
+    return rows;
+  }
+
+  for (const [key, value] of Object.entries(extracted)) {
+    if (key.startsWith("_") || value === null || value === undefined) continue;
+
+    if (Array.isArray(value)) {
+      if (value.length === 0) continue;
+      const allPrimitive = value.every(item => typeof item !== "object" || item === null);
+      if (allPrimitive) {
+        // Simple array → single flat field
+        const s = value.filter(item => item !== null && item !== undefined).map(String).join(", ");
+        if (s.trim()) flatFields.push({ label: toLabel(key), value: s });
+      } else {
+        // Array of objects → one numbered section per item
+        value.forEach((item, idx) => {
+          if (!item || typeof item !== "object" || Array.isArray(item)) return;
+          const fields = collectFields(item as Record<string, any>);
+          if (fields.length) sections.push({ key: `${key}_${idx}`, title: `${toLabel(key)} ${idx + 1}`, fields });
+        });
+      }
+    } else if (typeof value === "object") {
+      // Plain object → single section
+      const fields = collectFields(value as Record<string, any>);
+      if (fields.length) sections.push({ key, title: toLabel(key), fields });
+    } else {
+      // Primitive → flat field
+      const s = String(value).trim();
+      if (s) flatFields.push({ label: toLabel(key), value: s });
+    }
+  }
+
+  return { flatFields, sections };
+}
+
+function computeConfidenceLabel(extracted: any): string | null {
+  if (!extracted || typeof extracted !== "object") return null;
+  const { flatFields, sections } = buildDynamicSections(extracted);
+  const total = flatFields.length + sections.reduce((s, sec) => s + sec.fields.length, 0);
+  if (!total) return null;
+  const pct = Math.round((total / Math.max(total, 1)) * 100);
+  // Confidence based on how many fields were extracted vs a reasonable baseline (30 fields = 100%)
+  const baseline = 30;
+  const score = Math.min(Math.round((total / baseline) * 100), 100);
+  const level = score >= 75 ? "High" : score >= 40 ? "Medium" : "Low";
+  return `${level} ${score}%`;
+}
+
 export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunning, result }: ACORDParserUIProps) {
   const navigate = useNavigate();
   const [file, setFile] = useState<File | null>(null);
@@ -245,7 +341,7 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
   const [editError, setEditError] = useState<string | null>(null);
   const [trainSubmitted, setTrainSubmitted] = useState(false);
   const [activeTab, setActiveTab] = useState<"json" | "fields" | "edit" | "changes" | "split">("json");
-  const [ocrTab, setOcrTab] = useState<"fields" | "rawtext" | "markdown">("fields");
+  const [ocrTab, setOcrTab] = useState<"json" | "fields" | "changes" | "rawtext" | "markdown">("fields");
   const [markdownEditText, setMarkdownEditText] = useState<string>("");
   const [trainSubmittedRunpod, setTrainSubmittedRunpod] = useState(false);
   const [isSubmittingTrain, setIsSubmittingTrain] = useState(false);
@@ -273,6 +369,7 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
     setTrainSubmittedRunpod(false);
     setMarkdownEditText("");
     setOcrTab("fields");
+
   }, [file]);
 
   // Single entry point — handles detect → digital(Claude) or scanned(RunPod) automatically
@@ -320,13 +417,18 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
         extracted_json: result.extracted_json ?? result.extracted_fields ?? result.fields ?? {},
       })
         .then((id) => setRunId(id))
-        .catch(() =>
+        .catch((err: any) => {
+          const msg: string = err?.message || String(err) || "Unknown error";
+          const isAuthErr = /not authenticated|session expired|unauthorized|jwt/i.test(msg);
+          console.error("[ACORD] createAcordRun failed:", msg);
           toast({
             title: "Warning: run not saved",
-            description: "Extraction succeeded but could not save to database. Save & Train will be unavailable.",
+            description: isAuthErr
+              ? "Your session expired during extraction. Please sign in again — the extraction results are still visible above."
+              : `Could not save to database: ${msg}. Save & Train will be unavailable.`,
             variant: "destructive",
-          })
-        );
+          });
+        });
 
       toast({
         title: `${smartResult.pdf_type === "digital" ? "Digital" : "Scanned"} PDF extracted`,
@@ -615,38 +717,51 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
         </CardContent>
       </Card>
 
-      {/* ── ACORD Extraction Results ────────────────────────────────────── */}
+      {/* ── Extracted Fields Card ────────────────────────────────────── */}
       {extractionState.phase === "completed" && (() => {
-        const extractedFields = flattenAcordFields(extractionState.result);
-        const rawText = extractionState.result.raw_text || extractionState.result.full_text || "";
-        const formTypeDetected = extractionState.result.form_type_detected || "";
-        const pdfType = extractionState.result.pdf_type || "";
-        const nlSummary = extractionState.result.natural_language_summary || null;
+        const r = extractionState.result;
+        const formTypeDetected = r.form_type_detected || formType;
+        const pdfType = r.pdf_type || "";
+        const nlSummary = r.natural_language_summary || null;
+        const extractedJson = r.extracted_json ?? r.extracted_fields ?? r.fields ?? {};
+        const confidenceLabel = computeConfidenceLabel(extractedJson);
+        const formTypeLabel = `ACORD ${String(formTypeDetected).replace(/^acord\s*/i, "").toUpperCase()}`;
+
         return (
           <Card className="bg-card border-border animate-fade-in">
-            <CardHeader className="bg-gradient-to-r from-violet-600/10 to-transparent">
-              <CardTitle className="text-card-foreground flex items-center gap-2 flex-wrap">
-                <CheckCircle2 className="h-5 w-5 text-violet-400" />
-                ACORD Extraction Results
-                <div className="ml-auto flex gap-2">
-                  {formTypeDetected && (
-                    <Badge variant="outline" className="border-violet-500 text-violet-400 text-xs">
-                      {formTypeDetected.toUpperCase()}
-                    </Badge>
-                  )}
-                  {pdfType && (
-                    <Badge variant="outline" className="border-blue-500 text-blue-400 text-xs">
-                      {pdfType === "scanned" ? "Scanned PDF" : pdfType === "digital" ? "Digital PDF" : pdfType}
-                    </Badge>
-                  )}
-                  <Badge variant="outline" className="border-violet-500 text-violet-400 text-xs">
-                    {extractedFields.length} field{extractedFields.length !== 1 ? "s" : ""}
+            <CardHeader className="pb-3">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <CardTitle className="text-card-foreground flex items-center gap-2">
+                  <FileText className="h-5 w-5 text-primary" />
+                  Extracted Fields
+                </CardTitle>
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline" className="border-violet-500 text-violet-400 text-xs font-semibold">
+                    {formTypeLabel}
                   </Badge>
+                  {pdfType && (
+                    <Badge variant="outline" className="border-blue-500/60 text-blue-400 text-xs">
+                      {pdfType === "scanned" ? "Scanned" : pdfType === "digital" ? "Digital" : pdfType}
+                    </Badge>
+                  )}
+                  {confidenceLabel && (() => {
+                    const level = confidenceLabel.split(" ")[0];
+                    const cls =
+                      level === "High" ? "bg-green-500/15 text-green-700 border-green-500/30" :
+                      level === "Medium" ? "bg-amber-500/15 text-amber-800 border-amber-500/30" :
+                      "bg-red-500/15 text-red-700 border-red-500/30";
+                    return (
+                      <Badge className={`text-xs font-semibold border ${cls}`}>
+                        {confidenceLabel}
+                      </Badge>
+                    );
+                  })()}
                 </div>
-              </CardTitle>
+              </div>
             </CardHeader>
-            <CardContent className="pt-4 space-y-4">
-              {/* Natural Language Summary — always visible; content depends on SLM availability */}
+
+            <CardContent className="pt-2 space-y-4">
+              {/* Natural Language Summary */}
               <div className={`rounded-lg border p-4 space-y-2 ${nlSummary ? "border-violet-500/30 bg-violet-500/5" : "border-border/60 bg-muted/30"}`}>
                 <div className="flex items-center gap-2 mb-1">
                   <FileText className={`h-4 w-4 shrink-0 ${nlSummary ? "text-violet-400" : "text-muted-foreground"}`} />
@@ -661,66 +776,107 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
                   </Badge>
                 </div>
                 {nlSummary ? (
-                  <p className="text-sm text-foreground/90 leading-relaxed whitespace-pre-line">
-                    {nlSummary}
-                  </p>
+                  <p className="text-sm text-foreground/90 leading-relaxed whitespace-pre-line">{nlSummary}</p>
                 ) : (
                   <div className="space-y-1.5">
                     <p className="text-sm text-muted-foreground leading-relaxed">
                       A natural language narrative of this document is currently unavailable. The language model (SLM) is not active or the RunPod endpoint is unreachable.
                     </p>
                     <p className="text-xs text-muted-foreground/70">
-                      To enable: set <code className="bg-muted px-1 py-0.5 rounded text-xs">ACORD_NL_SUMMARY_ENABLED=true</code> in the backend environment and ensure the RunPod inference endpoint is running.
+                      To enable: set <code className="bg-muted px-1 py-0.5 rounded text-xs">ACORD_NL_SUMMARY_ENABLED=true</code> in the backend and ensure the RunPod endpoint is running.
                     </p>
                   </div>
                 )}
               </div>
-              <Tabs value={ocrTab} onValueChange={(v) => setOcrTab(v as "fields" | "rawtext")}>
+
+              {/* Tabs */}
+              <Tabs value={ocrTab} onValueChange={(v) => setOcrTab(v as "json" | "fields" | "changes" | "rawtext" | "markdown")}>
                 <TabsList>
+                  <TabsTrigger value="json">
+                    <span className="mr-1.5 text-[10px] font-mono font-bold">{"{}"}</span>JSON
+                  </TabsTrigger>
                   <TabsTrigger value="fields">
-                    Extracted Fields
-                    {extractedFields.length > 0 && (
-                      <span className="ml-1.5 text-[10px] bg-violet-500/20 text-violet-300 rounded px-1">{extractedFields.length}</span>
-                    )}
+                    <FileCheck className="h-3.5 w-3.5 mr-1.5" />Fields
                   </TabsTrigger>
                   <TabsTrigger value="rawtext">Raw Text</TabsTrigger>
                   <TabsTrigger value="markdown">Markdown</TabsTrigger>
+                  <TabsTrigger value="changes">
+                    <RefreshCw className="h-3.5 w-3.5 mr-1.5" />Changes
+                  </TabsTrigger>
                 </TabsList>
 
-                <TabsContent value="fields" className="mt-3">
-                  {extractedFields.length === 0 ? (
-                    <p className="text-xs text-muted-foreground italic">No fields extracted. Check Raw Text tab for OCR output.</p>
-                  ) : (
-                    <div className="rounded-md border border-border/60 overflow-hidden">
-                      <table className="w-full text-xs">
-                        <thead>
-                          <tr className="bg-muted/40 border-b border-border/60">
-                            <th className="text-left px-3 py-2 font-medium text-muted-foreground w-[45%]">Field</th>
-                            <th className="text-left px-3 py-2 font-medium text-muted-foreground">Value</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {extractedFields.map((f, i) => (
-                            <tr key={i} className={`border-b border-border/30 ${i % 2 === 0 ? "" : "bg-muted/20"}`}>
-                              <td className="px-3 py-1.5 text-muted-foreground font-medium">{f.key}</td>
-                              <td className="px-3 py-1.5 text-foreground">{f.value}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </TabsContent>
-
-                <TabsContent value="rawtext" className="mt-3">
+                {/* JSON Tab */}
+                <TabsContent value="json" className="mt-3">
                   <pre className="rounded-lg border border-border/70 bg-[#0b1020] p-3 overflow-auto max-h-[380px] text-xs font-mono leading-5 whitespace-pre-wrap text-muted-foreground">
-                    {rawText || "(no raw text available)"}
+                    {JSON.stringify(extractedJson, null, 2) || "(no data)"}
                   </pre>
                 </TabsContent>
 
-                <TabsContent value="markdown" className="mt-3 space-y-3">
+                {/* Fields Tab — dynamic, only extracted fields */}
+                <TabsContent value="fields" className="mt-3">
+                  {(() => {
+                    const { flatFields, sections: dynSections } = buildDynamicSections(extractedJson);
+                    const hasAny = flatFields.length > 0 || dynSections.length > 0;
+                    if (!hasAny) {
+                      return <p className="text-xs text-muted-foreground italic">No fields extracted. Check the JSON tab for raw output.</p>;
+                    }
+                    return (
+                      <div className="space-y-6 max-h-[560px] overflow-y-auto pr-1">
+                        {/* Flat top-level fields (no section header) */}
+                        {flatFields.length > 0 && (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            {flatFields.map((f) => (
+                              <div key={f.label} className="space-y-1">
+                                <p className="text-xs text-muted-foreground">{f.label}</p>
+                                <div className="rounded-md border border-border/60 bg-background px-3 py-2 text-sm text-foreground min-h-[36px] flex items-center">
+                                  <span className="break-words leading-snug">{f.value}</span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {/* Nested object sections */}
+                        {dynSections.map((section) => (
+                          <div key={section.key}>
+                            <div className="flex items-center gap-2 mb-3">
+                              <span className="h-2.5 w-2.5 rounded-full bg-green-500 shrink-0" />
+                              <span className="text-sm font-semibold text-foreground">{section.title}</span>
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                              {section.fields.map((f) => (
+                                <div key={f.key} className="space-y-1">
+                                  <p className="text-xs text-muted-foreground">{f.label}</p>
+                                  <div className="rounded-md border border-border/60 bg-background px-3 py-2 text-sm text-foreground min-h-[36px] flex items-center">
+                                    <span className="break-words leading-snug">{f.value}</span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </TabsContent>
+
+                {/* Raw Text Tab */}
+                <TabsContent value="rawtext" className="mt-3">
+                  <pre className="rounded-lg border border-border/70 bg-[#0b1020] p-3 overflow-auto max-h-[480px] text-xs font-mono leading-5 whitespace-pre-wrap text-muted-foreground">
+                    {(r.full_text || r.raw_text || "").trim() || "(no raw text available)"}
+                  </pre>
+                </TabsContent>
+
+                {/* Markdown Tab */}
+                <TabsContent value="markdown" className="mt-3">
+                  <pre className="rounded-lg border border-border/70 bg-[#0b1020] p-3 overflow-auto max-h-[480px] text-xs font-mono leading-5 whitespace-pre-wrap text-muted-foreground">
+                    {(r.markdown || "").trim() || "(no markdown available)"}
+                  </pre>
+                </TabsContent>
+
+                {/* Changes Tab — edit & submit for training */}
+                <TabsContent value="changes" className="mt-3 space-y-3">
                   <p className="text-xs text-muted-foreground">
-                    Edit the fields below — correct any wrong values — then click <strong>Submit &amp; Train</strong>.
+                    Edit the fields below — correct any wrong values — then click <strong>Save &amp; Train</strong>.
                   </p>
                   <Textarea
                     value={markdownEditText}

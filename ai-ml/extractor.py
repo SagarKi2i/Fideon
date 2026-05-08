@@ -74,31 +74,132 @@ _qwen_loaded = False
 QWEN_MODEL_ID = os.getenv("QWEN_MODEL_ID", "/workspace/models/qwen2-vl-7b")
 
 
-# ── Fast native extraction for digital PDFs (RunPod-local, no Surya/Qwen) ────
-_ACORD_REGEX_PATTERNS: Dict[str, str] = {
-    "policy_number": r"(?:Policy(?:\s+No\.?|\s+Number)?)\s*[:\-]\s*([A-Z0-9\-]{4,40})",
-    "effective_date": r"(?:Effective|Eff\.?\s*Date)\s*[:\-]\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})",
-    "expiration_date": r"(?:Expiration|Exp(?:iry)?\.?\s*Date)\s*[:\-]\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})",
-    "named_insured": r"(?:NAMED\s+INSURED|Name\s+of\s+Insured)\s*[:\-]?\s*(.{3,80})",
-    "mailing_address": r"(?:Mailing\s+Address|Address)\s*[:\-]\s*(.{5,100})",
-    "producer_name": r"(?:PRODUCER|Producer|Agency Name)\s*[:\-]\s*(.{3,80})",
-    "producer_contact": r"(?:Contact\s+Name|Contact)\s*[:\-]\s*(.{3,60})",
-    "producer_phone": r"(?:Phone|Ph\.?)\s*[:\-]\s*([\d\s\(\)\-\+\.]{7,20})",
-    "producer_fax": r"(?:Fax)\s*[:\-]\s*([\d\s\(\)\-\+\.]{7,20})",
-    "producer_email": r"(?:E-?Mail|Email)\s*[:\-]\s*([\w\.\+\-]+@[\w\.\-]+\.\w{2,})",
-    "insurer_a": r"INSURER\s+A\s*[:\-]\s*(.{3,80})",
-    "insurer_b": r"INSURER\s+B\s*[:\-]\s*(.{3,80})",
-    "insurer_c": r"INSURER\s+C\s*[:\-]\s*(.{3,80})",
-    "naic_code": r"NAIC\s*#?\s*[:\-]?\s*(\d{5})",
-    "certificate_number": r"(?:Certificate\s+(?:No\.?|Number))\s*[:\-]\s*([A-Z0-9\-]{4,30})",
-    "description_of_ops": r"(?:DESCRIPTION\s+OF\s+OPERATIONS)[^\n]*\n(.{10,500})",
-    "certificate_holder": r"(?:CERTIFICATE\s+HOLDER)\s*[:\-]?\s*(.{5,200})",
-    "gl_each_occurrence": r"(?:Each\s+Occurrence)\s*\$?\s*([\d,]+)",
-    "gl_general_aggregate": r"(?:General\s+Aggregate)\s*\$?\s*([\d,]+)",
-    "auto_combined_limit": r"(?:Combined\s+Single\s+Limit)\s*\$?\s*([\d,]+)",
-    "umbrella_each_occ": r"(?:UMBRELLA|EXCESS).*?Each\s+Occurrence\s*\$?\s*([\d,]+)",
-    "wc_el_each_accident": r"E\.L\.\s+Each\s+Accident\s*\$?\s*([\d,]+)",
-}
+
+
+def _extract_kv_from_ocr_text(text: str) -> Dict[str, str]:
+    """
+    Extract key-value pairs from Surya OCR text.
+    No hardcoded field names — labels read verbatim from OCR output.
+
+    Handles three layouts Surya produces on ACORD forms:
+      1. Colon-separated on same line:     "PHONE: +91-800585843"
+      2. Single label then single value:   "POLICY NUMBER\\nPOLICY987654321"
+      3. N-label block then N-value block: "NAIC CODE\\nCARRIER\\n34214\\nAgency Name"
+    """
+    kv: Dict[str, str] = {}
+
+    # Common checkbox/boolean values that look like labels but aren't
+    _VALUE_WORDS = {"YES", "NO", "Y", "N", "NA", "NONE", "TRUE", "FALSE", "X", "XX", "N/A"}
+
+    def _to_key(raw: str) -> str:
+        return re.sub(r'[^a-z0-9]+', '_', raw.lower()).strip('_')
+
+    def _is_label_line(line: str) -> bool:
+        """True when the line looks like an ACORD field label (ALL CAPS, no digits)."""
+        s = line.strip()
+        if not s or len(s) < 4 or len(s) > 65:
+            return False
+        if s.upper() in _VALUE_WORDS:
+            return False
+        upper_chars = sum(1 for c in s if c.isupper())
+        alpha_chars = sum(1 for c in s if c.isalpha())
+        if alpha_chars == 0:
+            return False
+        # Labels are ≥ 80% uppercase letters (e.g. "NAIC CODE", "POLICY NUMBER")
+        if upper_chars / alpha_chars < 0.80:
+            return False
+        # Values often contain digits; labels on ACORD forms never do
+        if re.search(r'\d', s):
+            return False
+        if re.match(r'^[-=_\s]{2,}$', s):
+            return False
+        return True
+
+    def _is_value_line(line: str) -> bool:
+        s = line.strip()
+        return bool(s) and not re.match(r'^[-=_\s]{2,}$', s)
+
+    def _add(label: str, value: str) -> None:
+        key = _to_key(label)
+        val = value.strip()[:300]
+        if key and val and len(key) >= 2 and key not in kv:
+            kv[key] = val
+
+    lines = text.splitlines()
+
+    # ── Strategy 1: colon-separated pairs (same line / inline multi-column) ───
+    for line in lines:
+        line_s = line.strip()
+        if not line_s or ":" not in line_s:
+            continue
+        # Surya sometimes writes multi-column pairs on one line with 3+ spaces
+        segments = re.split(r'\s{3,}', line_s)
+        for seg in segments:
+            seg = seg.strip()
+            if ":" not in seg:
+                continue
+            colon_idx = seg.index(":")
+            key_raw = seg[:colon_idx].strip()
+            value = seg[colon_idx + 1:].strip()
+            if not key_raw or not value:
+                continue
+            if len(key_raw) < 2 or len(key_raw) > 65:
+                continue
+            if re.match(r'^[\d\s\-\.\(\)\/\+]+$', key_raw):
+                continue
+            if re.match(r'^[-=_\s]{2,}$', value):
+                continue
+            _add(key_raw, value)
+
+    # ── Strategies 2 & 3: label-then-value consecutive-line layout ────────────
+    # Scan for runs of ALL-CAPS label lines, then collect the value lines that
+    # immediately follow. When counts match (N labels → N values), pair positionally.
+    i = 0
+    n = len(lines)
+    while i < n:
+        stripped = lines[i].strip()
+        if not stripped:
+            i += 1
+            continue
+
+        if _is_label_line(stripped):
+            # Collect consecutive label-only lines (blank line breaks the block)
+            label_block = [stripped]
+            j = i + 1
+            while j < n and _is_label_line(lines[j].strip()):
+                label_block.append(lines[j].strip())
+                j += 1
+
+            # Allow exactly one blank line between label block and value block
+            if j < n and not lines[j].strip():
+                j += 1
+
+            # Collect consecutive value lines (stop at blank line or next label)
+            value_block: List[str] = []
+            while j < n:
+                vs = lines[j].strip()
+                if not vs:
+                    break
+                if _is_label_line(vs):
+                    break
+                if _is_value_line(vs):
+                    value_block.append(vs)
+                j += 1
+
+            if len(label_block) == len(value_block):
+                # N labels → N values: pair positionally
+                for lbl, val in zip(label_block, value_block):
+                    _add(lbl, val)
+            elif len(label_block) == 1 and value_block:
+                # Single label → join first 3 value lines
+                _add(label_block[0], " ".join(value_block[:3]))
+            # Mismatched multi-label block → skip to avoid wrong pairings
+
+            i = j
+        else:
+            i += 1
+
+    return kv
 
 
 def _extract_kv_from_ocr_text(text: str) -> Dict[str, str]:
@@ -190,17 +291,11 @@ def _extract_digital_native(pdf_path: str, preextracted_text: str = "") -> tuple
     except Exception:
         pass
 
-    # Layer 4: regex enrich
+    # Layer 4: generic KV extraction — no hardcoded field names
     if raw_text:
-        for field_key, pattern in _ACORD_REGEX_PATTERNS.items():
-            if field_key in fields:
-                continue
-            m = re.search(pattern, raw_text, re.IGNORECASE | re.DOTALL)
-            if not m:
-                continue
-            value = (m.group(1) or "").strip().split("\n")[0].strip()
-            if value:
-                fields[field_key] = value
+        for k, v in _extract_kv_from_ocr_text(raw_text).items():
+            if k not in fields:
+                fields[k] = v
 
     return fields, raw_text
 

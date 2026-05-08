@@ -502,8 +502,8 @@ def main() -> None:
 
     if pod_mode:
         # Train on a broader approved corpus for the pod, not only the triggering run.
-        # This reduces overfitting/hallucination from single-run fine-tunes.
-        pod_dataset_limit = int(os.getenv("POD_TRAINING_APPROVED_LIMIT", "500"))
+        # Default 99999 = effectively unlimited; override with POD_TRAINING_APPROVED_LIMIT.
+        pod_dataset_limit = int(os.getenv("POD_TRAINING_APPROVED_LIMIT", "99999"))
         export_cmd = [
             py,
             "-m",
@@ -516,7 +516,8 @@ def main() -> None:
             str(dataset_path),
         ]
     else:
-        acord_dataset_limit = int(os.getenv("ACORD_TRAINING_APPROVED_LIMIT", "500"))
+        # Default 99999 = effectively unlimited; override with ACORD_TRAINING_APPROVED_LIMIT.
+        acord_dataset_limit = int(os.getenv("ACORD_TRAINING_APPROVED_LIMIT", "99999"))
         export_cmd = [
             py,
             "-m",

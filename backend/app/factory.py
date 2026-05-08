@@ -157,6 +157,7 @@ def _include_routers(app: FastAPI) -> None:
         user_data,
         webhooks,
         workflow_ai,
+        policy_comparison,
     )
 
     routers: Iterable = (
@@ -191,6 +192,8 @@ def _include_routers(app: FastAPI) -> None:
     )
     for r in routers:
         app.include_router(r)
+        
+    app.include_router(policy_comparison.router, prefix="/api/policy-comparison", tags=["Policy Comparison"])
 
     if ENABLE_LOCAL_GENERATE:
         from app.routes import local_generate
