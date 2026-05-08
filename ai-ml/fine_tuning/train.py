@@ -20,8 +20,24 @@ from typing import Any, Dict, List, Optional
 
 # ── Dataset formatting ────────────────────────────────────────────────────────
 
+def _build_qwen_chat(msgs: List[Dict[str, Any]]) -> str:
+    """Manually construct Qwen ChatML string — reliable fallback for any tokenizer version."""
+    parts = []
+    for m in msgs:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        if isinstance(content, list):
+            # Multimodal list-of-dicts → extract text parts only
+            content = " ".join(
+                c.get("text", "") for c in content
+                if isinstance(c, dict) and c.get("type") == "text"
+            )
+        parts.append(f"<|im_start|>{role}\n{content}<|im_end|>")
+    return "\n".join(parts) + "\n"
+
+
 def _format_chat_row(row: Dict[str, Any], tokenizer: Any) -> Optional[str]:
-    """Apply Qwen2-VL chat template to one row. Returns None on failure."""
+    """Apply Qwen2-VL chat template to one row, with manual fallback."""
     msgs = row.get("messages")
     if not isinstance(msgs, list):
         print(f"[train] Skipping row — 'messages' is {type(msgs).__name__}, not list. Keys: {list(row.keys())}")
@@ -30,9 +46,16 @@ def _format_chat_row(row: Dict[str, Any], tokenizer: Any) -> Optional[str]:
         text = tokenizer.apply_chat_template(
             msgs, tokenize=False, add_generation_prompt=False
         )
-        return text
+        if text:
+            return text
+        # apply_chat_template returned empty/None — use manual template
+        print("[train] apply_chat_template returned empty — using manual Qwen ChatML template")
     except Exception as e:
-        print(f"[train] apply_chat_template failed: {e}. messages={msgs!r}")
+        print(f"[train] apply_chat_template failed ({e}) — using manual Qwen ChatML template")
+    try:
+        return _build_qwen_chat(msgs)
+    except Exception as e2:
+        print(f"[train] Manual template also failed: {e2}. messages={msgs!r}")
         return None
 
 
