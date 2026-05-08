@@ -1121,6 +1121,7 @@ async def confirm_device_pairing(request: Request):
             {
                 "device_name": device_name,
                 "device_token": device_token,
+                "status": "online",
                 "os_type": os_type,
                 "app_version": app_version,
                 "last_seen_at": now.isoformat(),
