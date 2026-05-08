@@ -20,17 +20,19 @@ from typing import Any, Dict, List, Optional
 
 # ── Dataset formatting ────────────────────────────────────────────────────────
 
-def _format_chat_row(row: Dict[str, Any], processor: Any) -> Optional[str]:
+def _format_chat_row(row: Dict[str, Any], tokenizer: Any) -> Optional[str]:
     """Apply Qwen2-VL chat template to one row. Returns None on failure."""
     msgs = row.get("messages")
     if not isinstance(msgs, list):
+        print(f"[train] Skipping row — 'messages' is {type(msgs).__name__}, not list. Keys: {list(row.keys())}")
         return None
     try:
-        text = processor.apply_chat_template(
+        text = tokenizer.apply_chat_template(
             msgs, tokenize=False, add_generation_prompt=False
         )
         return text
-    except Exception:
+    except Exception as e:
+        print(f"[train] apply_chat_template failed: {e}. messages={msgs!r}")
         return None
 
 
@@ -144,11 +146,17 @@ def run_training(
 
     texts = []
     for row in rows:
-        t = _format_chat_row(row, processor)
+        t = _format_chat_row(row, tokenizer)
         if t:
             texts.append(t)
 
     print(f"[train] Tokenising {len(texts)} examples (max_seq={max_seq}) …")
+    if not texts:
+        raise ValueError(
+            f"[train] 0 examples after chat-template formatting. "
+            f"Loaded {len(rows)} rows from {dataset_path}. "
+            "Check that each row has a 'messages' list with valid role/content dicts."
+        )
 
     # Qwen2-VL chat template wraps the assistant turn with <|im_start|>assistant\n
     # We mask all non-assistant tokens to -100 so the loss is only computed on
@@ -204,6 +212,7 @@ def run_training(
         report_to="none",
         run_name=f"fideon-acord-{job_id}",
         dataloader_num_workers=0,
+        remove_unused_columns=False,
     )
 
     collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
