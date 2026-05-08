@@ -10,10 +10,17 @@ Routes:
   POST /api/v1/pdf/extract/{upload_id}/submit-training     — store corrected sample for fine-tuning
   GET  /api/v1/pdf/training-samples                        — list stored training samples / count
   POST /api/v1/pdf/finetune/start                          — trigger RunPod fine-tuning job
+  GET  /api/v1/pdf/finetune/jobs/{job_id}                  — poll RunPod fine-tuning job status
+  GET  /api/v1/pdf/share-gradients/status                  — check for pending local weights
+  POST /api/v1/pdf/share-gradients                         — upload local weights to Azure Blob
+  GET  /api/v1/pdf/share-gradients/jobs/{job_id}           — poll share-gradients upload job
+  POST /api/v1/pdf/federated/start                         — start FedAvg aggregation on RunPod
+  GET  /api/v1/pdf/federated/jobs/{job_id}                 — poll federated aggregation job
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any, Dict, Optional
 
@@ -32,26 +39,119 @@ log = structlog.get_logger("pdf_upload")
 router = APIRouter()
 
 
+def _build_extraction_prompt(raw_text: str, form_type_hint: str) -> str:
+    snippet = (raw_text or "")[:12000]
+    return (
+        f"You are an ACORD insurance form extraction engine. "
+        f"Extract ALL field names and values from the ACORD {form_type_hint} form text below.\n\n"
+        "RULES:\n"
+        "- Output ONLY a valid JSON object — no markdown fences, no explanation, no comments\n"
+        "- Every key must be snake_case (e.g. \"policy_number\", \"named_insured\", \"naic_code\")\n"
+        "- Every value must be a string exactly as it appears on the form\n"
+        "- Include ALL fields: policy numbers, dates, names, addresses, coverage limits, "
+        "deductibles, premiums, NAIC codes, phone/fax, agent/broker info\n"
+        "- Do NOT hallucinate — only extract what is explicitly present in the text below\n"
+        "- If a field appears multiple times, use the first occurrence\n\n"
+        f"FORM TEXT:\n{snippet}\n\n"
+        "JSON output (start with { and end with }):"
+    )
+
+
+def _parse_json_from_llm_output(text: str) -> Dict[str, Any]:
+    """Extract the first valid JSON object from raw LLM output, stripping markdown fences."""
+    if not text:
+        return {}
+    cleaned = re.sub(r'```(?:json)?\s*', '', text).strip()
+    start = cleaned.find('{')
+    if start == -1:
+        return {}
+    depth = 0
+    end = -1
+    for idx, ch in enumerate(cleaned[start:], start):
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                end = idx + 1
+                break
+    if end == -1:
+        return {}
+    try:
+        return json.loads(cleaned[start:end])
+    except json.JSONDecodeError:
+        return {}
+
+
 async def _llm_extract_from_raw_text(
     raw_text: str,
     form_type_hint: str = "25",
 ) -> Dict[str, Any]:
     """
-    Runs the same LLM extraction pipeline used by the ACORD route on raw text.
-    Builds a minimal UIR from the full text and calls openai_compat_extract_structured.
-    Returns an empty dict silently if the LLM is not configured or fails.
+    Extracts ACORD fields from raw OCR text using the configured LLM.
+
+    Primary:  openai_compat_extract_structured  (RUNPOD_OPENAI_COMPAT_URL)
+    Fallback: RUNPOD_GENERATE_URL /generate endpoint with a structured JSON prompt
+              (same endpoint used by nl_summary.py — works when the OpenAI-compat
+              URL is not configured)
+    Returns {} silently when both paths fail or no endpoint is configured.
     """
     if not (raw_text or "").strip():
         return {}
+
+    # ── Primary: OpenAI-compatible endpoint ──────────────────────────────────
     try:
         uir = UnifiedIntermediateRepresentation(
             text_blocks=[TextBlock(text=raw_text, page=1, bbox=None, source="txt")],
             layout={"extraction_engine": "txt"},
         )
         result = await openai_compat_extract_structured(uir, form_type_hint=form_type_hint)
-        return result or {}
+        if result:
+            log.info("llm_extract.openai_compat_ok", field_count=len(result))
+            return result
     except Exception as exc:
-        log.warning("llm_extract_from_raw_text.failed", reason=str(exc))
+        log.info("llm_extract.openai_compat_failed", reason=str(exc))
+
+    # ── Fallback: /generate endpoint (RUNPOD_GENERATE_URL) ───────────────────
+    generate_url = (
+        os.getenv("RUNPOD_GENERATE_URL") or os.getenv("OFFLINE_LLM_GENERATE_URL") or ""
+    ).strip()
+    token = (os.getenv("OFFLINE_LLM_AUTH_TOKEN") or os.getenv("OPENAI_API_KEY") or "").strip()
+    model = (os.getenv("OFFLINE_LLM_MODEL_NAME") or os.getenv("OPENAI_MODEL") or "").strip()
+
+    if not generate_url:
+        log.info("llm_extract.no_generate_url_configured")
+        return {}
+
+    prompt = _build_extraction_prompt(raw_text, form_type_hint)
+    headers = {"Content-Type": "application/json"}
+    if token:
+        tok = token[7:].strip() if token.lower().startswith("bearer ") else token
+        headers["Authorization"] = f"Bearer {tok}"
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                generate_url,
+                headers=headers,
+                json={
+                    "prompt": prompt,
+                    "model": model or "default",
+                    "max_new_tokens": 2048,
+                    "temperature": 0.1,
+                    "raw": True,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            text_out = (
+                data.get("text") or data.get("generated_text") or data.get("response") or ""
+            )
+        parsed = _parse_json_from_llm_output(text_out)
+        log.info("llm_extract.generate_fallback_ok", field_count=len(parsed))
+        return parsed
+    except Exception as exc:
+        log.warning("llm_extract.generate_fallback_failed", reason=str(exc))
         return {}
 
 _ALLOWED_EXTENSIONS = {".pdf", ".docx"}
@@ -438,3 +538,65 @@ async def start_finetune(
     result = await _runpod_post("/finetune/start", json=body)
     log.info("finetune.queued", status=result.get("status"), samples=result.get("total_samples"))
     return result
+
+
+# ── Share Gradients ───────────────────────────────────────────────────────────
+
+@router.get("/api/v1/pdf/share-gradients/status")
+async def get_share_gradients_status(
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Check whether locally trained weights are pending upload to Azure Blob."""
+    await verify_user(authorization)
+    return await _runpod_get("/share-gradients/status")
+
+
+@router.post("/api/v1/pdf/share-gradients")
+async def start_share_gradients(
+    body: Dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Upload locally trained LoRA weights to Azure Blob for federated aggregation."""
+    await verify_user(authorization)
+    log.info("share_gradients.start_requested")
+    result = await _runpod_post("/share-gradients", json=body)
+    log.info("share_gradients.started", status=result.get("status"), job_id=result.get("job_id"))
+    return result
+
+
+@router.get("/api/v1/pdf/share-gradients/jobs/{job_id}")
+async def get_share_gradients_job_status(
+    job_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Poll the status of a share-gradients upload job."""
+    await verify_user(authorization)
+    return await _runpod_get(f"/share-gradients/jobs/{job_id}")
+
+
+# ── Federated Aggregation ─────────────────────────────────────────────────────
+
+@router.post("/api/v1/pdf/federated/start")
+async def start_federated_aggregation(
+    body: Dict[str, Any] = Body(default={}),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """
+    Trigger FedAvg aggregation on RunPod: downloads all weight versions from
+    Azure Blob, runs federated averaging, quantizes, and registers a new global model.
+    """
+    await verify_user(authorization)
+    log.info("federated.start_requested")
+    result = await _runpod_post("/federated/start", json=body, timeout=35.0)
+    log.info("federated.started", status=result.get("status"), job_id=result.get("job_id"))
+    return result
+
+
+@router.get("/api/v1/pdf/federated/jobs/{job_id}")
+async def get_federated_job_status(
+    job_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Poll the status of a federated aggregation job."""
+    await verify_user(authorization)
+    return await _runpod_get(f"/federated/jobs/{job_id}")

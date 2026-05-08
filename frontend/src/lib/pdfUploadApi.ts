@@ -347,6 +347,78 @@ export async function getRunpodJobStatus(jobId: string): Promise<{
   return resp.json();
 }
 
+export async function startFederatedLearning(): Promise<{
+  status: string; job_id?: string; message?: string; versions_found?: number;
+}> {
+  const headers = await authHeader();
+  const resp = await fetch(apiUrl("/api/v1/pdf/federated/start"), {
+    method: "POST",
+    headers: { ...headers, "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+    signal: AbortSignal.timeout(35_000),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+    throw new Error(err.detail || err.error || `Federated start failed: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function getFederatedJobStatus(jobId: string): Promise<{
+  status: string; phase?: string; version?: number; versions_aggregated?: number[]; error?: string;
+}> {
+  const headers = await authHeader();
+  const resp = await fetch(apiUrl(`/api/v1/pdf/federated/jobs/${encodeURIComponent(jobId)}`), {
+    headers,
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+    throw new Error(err.detail || err.error || `Status check failed: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function getShareGradientsStatus(): Promise<{
+  has_pending: boolean; pending_count?: number; pending_versions?: number[];
+}> {
+  const headers = await authHeader();
+  const resp = await fetch(apiUrl("/api/v1/pdf/share-gradients/status"), { headers });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+    throw new Error(err.detail || err.error || `Status check failed: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function shareGradients(): Promise<{
+  status: string; job_id?: string; message?: string;
+}> {
+  const headers = await authHeader();
+  const resp = await fetch(apiUrl("/api/v1/pdf/share-gradients"), {
+    method: "POST",
+    headers: { ...headers, "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+    throw new Error(err.detail || err.error || `Share gradients failed: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function getShareGradientsJobStatus(jobId: string): Promise<{
+  status: string; phase?: string; version?: number; error?: string;
+}> {
+  const headers = await authHeader();
+  const resp = await fetch(apiUrl(`/api/v1/pdf/share-gradients/jobs/${encodeURIComponent(jobId)}`), { headers });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+    throw new Error(err.detail || err.error || `Job status check failed: ${resp.status}`);
+  }
+  return resp.json();
+}
+
 /** Trigger fine-tuning on RunPod with all pending training samples. */
 export async function startRunpodFinetune(opts: { acord_run_ids?: string[] } = {}): Promise<{ status: string; job_id?: string; message?: string; total_samples?: number }> {
   const headers = await authHeader();
