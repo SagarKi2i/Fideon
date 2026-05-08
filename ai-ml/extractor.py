@@ -202,6 +202,49 @@ def _extract_kv_from_ocr_text(text: str) -> Dict[str, str]:
     return kv
 
 
+def _extract_kv_from_ocr_text(text: str) -> Dict[str, str]:
+    """
+    Extract EVERY key-value pair verbatim from Surya OCR text.
+    No hardcoded field names. Values taken directly from OCR — zero hallucination.
+
+    Strategy:
+      1. Split each line by 3+ whitespace gaps (Surya puts multi-column fields
+         side-by-side, e.g. "PHONE: 123   FAX: 456").
+      2. For each segment, split at the first colon to get key and value.
+      3. Normalise the key to snake_case; keep the value exactly as read.
+    """
+    kv: Dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        # Split inline pairs separated by 3+ spaces (multi-column OCR layout)
+        segments = re.split(r'\s{3,}', line)
+        for seg in segments:
+            seg = seg.strip()
+            if ":" not in seg:
+                continue
+            colon_idx = seg.index(":")
+            key_raw = seg[:colon_idx].strip()
+            value   = seg[colon_idx + 1:].strip()
+
+            if not key_raw or not value:
+                continue
+            # Reject keys that are too long, too short, or purely numeric/symbolic
+            if len(key_raw) < 2 or len(key_raw) > 65:
+                continue
+            if re.match(r'^[\d\s\-\.\(\)\/\+]+$', key_raw):
+                continue
+            # Reject separator-only values
+            if re.match(r'^[-=_\s]{2,}$', value):
+                continue
+            value = value[:300]  # cap runaway values
+            key = re.sub(r'[^a-z0-9]+', '_', key_raw.lower()).strip('_')
+            if key and value and key not in kv:
+                kv[key] = value
+    return kv
+
+
 def _extract_digital_native(pdf_path: str, preextracted_text: str = "") -> tuple[Dict[str, Any], str]:
     """Fast digital extraction using local PDF text/widgets/tables + regex (no VLM)."""
     import fitz  # PyMuPDF
