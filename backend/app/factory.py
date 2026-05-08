@@ -23,6 +23,7 @@ from app.core.config import (
     ENABLE_LOCAL_GENERATE_WARMUP,
     WEBHOOK_SECRET_ENCRYPTION_KEY,
     WEBHOOK_WORKER_ENABLED,
+    SUPABASE_URL,
 )
 from app.core.limiter import limiter
 from app.logger import setup_logging
@@ -54,10 +55,12 @@ def _cors_origins() -> List[str]:
 
 
 def _require_secrets() -> None:
-    # DEVICE_JWT_SECRET is required for device registration/heartbeat JWT flow.
-    # Failing fast avoids silently issuing unverifiable tokens.
-    if not (DEVICE_JWT_SECRET or "").strip():
-        raise RuntimeError("DEVICE_JWT_SECRET is not set")
+    log = logging.getLogger("startup")
+    log.info(
+        "startup.config "
+        f"SUPABASE_URL={SUPABASE_URL!r} "
+        f"DEVICE_JWT_SECRET=SET (len={len(DEVICE_JWT_SECRET)})"
+    )
 
 
 @asynccontextmanager

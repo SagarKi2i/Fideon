@@ -21,6 +21,7 @@ import { createHandler } from "next-electron-rsc";
 import {
   ensureDeviceAuthAndStartHeartbeat,
   ensureDeviceAuthAsync,
+  startHeartbeatLoop,
   getStoredDeviceIdAsync,
   getStoredDeviceJwtAsync,
   getMachineId,
@@ -129,6 +130,14 @@ function formatUnknownError(err: unknown): string {
   } catch {
     return String(err);
   }
+}
+
+function simplifyDeviceAuthError(message: string): string {
+  const m = (message || "").toLowerCase();
+  if (m.includes("deactivated") || m.includes("device is deactivated")) return "Device is deactivated";
+  if (m.includes("device disabled") || m.includes("device is disabled") || m.includes("disabled"))
+    return "Device is disabled";
+  return message;
 }
 
 async function waitForHttpReady(
@@ -538,32 +547,45 @@ ipcMain.handle("device:clearAuth", async () => {
 ipcMain.handle("device:ensureAuth", async () => {
   try {
     log(`[ipc] device:ensureAuth called`);
+    
+    // Stop the old heartbeat loop BEFORE starting a new one. This prevents the old
+    // loop from firing a 401 (e.g. from a revoked token) and incorrectly triggering 
+    // onDeactivated while we are trying to re-register.
+    try { 
+      if (deviceHeartbeatStopper) {
+        log(`[ipc] stopping existing heartbeat loop before re-auth`);
+        deviceHeartbeatStopper(); 
+      }
+    } catch (e) {
+      log(`[ipc] error stopping old heartbeat: ${String(e)}`);
+    }
+    deviceHeartbeatStopper = null;
+
     const auth = await ensureDeviceAuthAsync({ log });
     log(`[ipc] device:ensureAuth success device_id=${String(auth.device_id || "")}`);
-    // Stop the old heartbeat loop BEFORE starting a new one. Without this, the old
-    // loop keeps running with the stale JWT, gets 401, fires onDeactivated, and
-    // disconnects the renderer right after a successful reconnect.
-    try { deviceHeartbeatStopper?.(); } catch { }
-    deviceHeartbeatStopper = null;
-    try {
-      const runner = await ensureDeviceAuthAndStartHeartbeat({
-        log,
-        heartbeatSeconds: 60,
-        onDeactivated: () => {
-          log(`[device] device deactivated by admin — notifying renderer`);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send("device:deactivated");
-          }
-        },
-      });
-      deviceHeartbeatStopper = runner.stop;
-    } catch (err) {
-      log(`[device] ensureDeviceAuthAndStartHeartbeat failed: ${formatUnknownError(err)}`);
-    }
+
+    // Use startHeartbeatLoop directly with the already-validated JWT from ensureDeviceAuthAsync.
+    // Calling ensureDeviceAuthAndStartHeartbeat here would invoke ensureDeviceAuthAsync a
+    // second time, potentially re-registering and producing a different JWT than what we
+    // return to the renderer — causing the heartbeat loop and renderer to be out of sync.
+    const runner = startHeartbeatLoop(auth.device_jwt, {
+      log,
+      heartbeatSeconds: 60,
+      onDeactivated: () => {
+        log(`[device] device deactivated by admin — notifying renderer`);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("device:deactivated");
+        }
+      },
+    });
+    deviceHeartbeatStopper = runner.stop;
     return { success: true, device_id: auth.device_id, device_jwt: auth.device_jwt };
   } catch (err) {
-    log(`[ipc] device:ensureAuth failed: ${formatUnknownError(err)}`);
-    return { success: false, error: formatUnknownError(err) };
+    const raw = formatUnknownError(err);
+    const simplified = simplifyDeviceAuthError(raw);
+    // Keep full error (including stack) in file log, but only send simplified message to renderer.
+    log(`[ipc] device:ensureAuth failed: ${raw}`);
+    return { success: false, error: simplified };
   }
 });
 

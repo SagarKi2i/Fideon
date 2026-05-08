@@ -106,17 +106,53 @@ export default function DeviceSetup() {
   );
 
   const verifyCloudSession = useCallback(
-    async (jwt: string, { silent = false }: { silent?: boolean } = {}): Promise<boolean> => {
+    async (
+      jwt: string,
+      { silent = false, retryAuthMs = 0 }: { silent?: boolean; retryAuthMs?: number } = {},
+    ): Promise<boolean> => {
       try {
-        await sendDeviceHeartbeat(jwt);
-        authLossToastShown.current = false;
-        setIsDisabled(false);
-        return true;
-      } catch (e) {
-        if (e instanceof ApiRequestError && e.isAuthError) {
-          if (!silent) handleInvalidDeviceAuth(e.message);
-          return false;
+        const startedAt = Date.now();
+        let attempt = 0;
+        while (true) {
+          attempt += 1;
+          try {
+            await sendDeviceHeartbeat(jwt);
+            authLossToastShown.current = false;
+            setIsDisabled(false);
+            return true;
+          } catch (e) {
+            if (e instanceof ApiRequestError && e.isAuthError) {
+              const msg = (e.message || "").toLowerCase();
+              const looksPermanentlyDisabled =
+                msg.includes("device is deactivated") ||
+                msg.includes("device disabled") ||
+                msg.includes("device is disabled") ||
+                msg.includes("ask an administrator") ||
+                msg.includes("re-enable");
+              const looksLikePropagation =
+                retryAuthMs > 0 &&
+                Date.now() - startedAt < retryAuthMs &&
+                !looksPermanentlyDisabled &&
+                (msg.includes("deactivated") ||
+                  msg.includes("disabled") ||
+                  msg.includes("forbidden") ||
+                  msg.includes("revoked"));
+
+              if (looksLikePropagation) {
+                // Backoff a bit and retry; admin enable/disable + replica lag can
+                // cause transient 401/403 right after registration.
+                const delay = Math.min(4000, 500 + attempt * 500);
+                await new Promise((r) => setTimeout(r, delay));
+                continue;
+              }
+
+              if (!silent) handleInvalidDeviceAuth(e.message);
+              return false;
+            }
+            throw e;
+          }
         }
+      } catch (e) {
         throw e;
       }
     },
@@ -206,6 +242,12 @@ export default function DeviceSetup() {
               if (res2?.success && res2.device_jwt) {
                 setDeviceJwt(res2.device_jwt);
                 setStoredDeviceJwt(res2.device_jwt);
+                // Give the backend a moment to converge after (re)registering.
+                const ok2 = await verifyCloudSession(res2.device_jwt, { silent: true, retryAuthMs: 12_000 });
+                if (!ok2) {
+                  setIsConnected(false);
+                  return;
+                }
                 setIsConnected(true);
                 setIsDisabled(false);
                 setDeviceId(res2.device_id || tryExtractDeviceIdFromJwt(res2.device_jwt));
@@ -223,6 +265,11 @@ export default function DeviceSetup() {
               const newId = res2.device_id || tryExtractDeviceIdFromJwt(res2.device_jwt);
               setDeviceJwt(res2.device_jwt);
               setStoredDeviceJwt(res2.device_jwt);
+              const ok2 = await verifyCloudSession(res2.device_jwt, { silent: true, retryAuthMs: 12_000 });
+              if (!ok2) {
+                setIsConnected(false);
+                return;
+              }
               setIsConnected(true);
               setIsDisabled(false);
               setDeviceId(newId);
@@ -296,11 +343,23 @@ export default function DeviceSetup() {
         return;
       }
 
-      toast({ title: "Connecting…", description: "Registering device with fresh credentials." });
+      toast({ title: "Connecting…", description: "Registering device with fresh credentials. This may take a few seconds." });
+      
+      // Wait briefly before attempting ensureAuth to allow any backend state changes
+      // (like an admin re-enabling the device) to propagate.
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
       const res = await window.electron.device.ensureAuth();
 
       if (res?.success && res.device_jwt) {
         const jwt = res.device_jwt;
+
+        // Verify the new JWT is actually accepted by the backend before marking connected.
+        // This catches disabled-device scenarios even if registration unexpectedly returned
+        // a JWT (race condition between admin disable and re-register, or stale backend).
+        const isValid = await verifyCloudSession(jwt, { silent: false, retryAuthMs: 20_000 });
+        if (!isValid) return;
+
         setDeviceJwt(jwt);
         setStoredDeviceJwt(jwt);
         setIsConnected(true);
