@@ -1042,23 +1042,7 @@ def _run_federated_job(job_id: str) -> None:
 
         versions_available: List[int] = []
         try:
-            if hasattr(seaweed, "list_finetuned_versions"):
-                # Full scan — discovers ALL stored versions, not just the last N
-                versions_available = seaweed.list_finetuned_versions(latest)
-            else:
-                # SeaweedFS fallback — paginate through ALL finetuned/v* prefixes
-                client = seaweed._boto_client()
-                paginator = client.get_paginator("list_objects_v2")
-                seen: set[int] = set()
-                for page in paginator.paginate(Bucket=seaweed._bucket, Prefix="finetuned/v", Delimiter="/"):
-                    for cp in page.get("CommonPrefixes", []):
-                        seg = cp.get("Prefix", "").rstrip("/").split("/")[-1]
-                        if seg.startswith("v"):
-                            try:
-                                seen.add(int(seg[1:]))
-                            except ValueError:
-                                pass
-                versions_available = sorted(seen)
+            versions_available = seaweed.list_finetuned_versions(latest)
         except Exception as exc:
             print(f"[federated] Version discovery error (using latest only): {exc}")
             versions_available = [latest]

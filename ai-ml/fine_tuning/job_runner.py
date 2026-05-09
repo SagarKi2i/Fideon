@@ -208,7 +208,7 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
             return any(f.suffix == ".safetensors" for f in p.iterdir())
 
         if _cache_is_complete(cache_path):
-            print(f"[job_runner] Using cached SeaweedFS model v{seaweed_version}: {cache_dir}")
+            print(f"[job_runner] Using cached storage model v{seaweed_version}: {cache_dir}")
             return cache_dir
         if cache_path.exists():
             print(f"[job_runner] Cached model v{seaweed_version} is incomplete — deleting and re-downloading …")
@@ -216,7 +216,7 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
         free_gb = _free_disk_gb()
         if free_gb < _MIN_FREE_DISK_GB:
             print(
-                f"[job_runner] Skipping SeaweedFS download — only {free_gb:.1f} GB free "
+                f"[job_runner] Skipping storage download — only {free_gb:.1f} GB free "
                 f"(need ≥{_MIN_FREE_DISK_GB} GB). Falling back to local model."
             )
         else:
