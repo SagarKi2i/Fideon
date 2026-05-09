@@ -102,8 +102,6 @@ class AzureBlobClient:
                             fh,
                             overwrite=True,
                             max_concurrency=4,
-                            max_block_size=_CHUNK_SIZE,           # 8 MB blocks — avoids TCP timeout on each block
-                            max_single_put_size=_CHUNK_SIZE,      # force block-blob path even for small files
                             length=file_size,
                             progress_hook=hook,
                         )
@@ -262,8 +260,6 @@ class AzureBlobClient:
                             fh,
                             overwrite=True,
                             max_concurrency=4,
-                            max_block_size=_CHUNK_SIZE,
-                            max_single_put_size=_CHUNK_SIZE,
                             length=file_size,
                             progress_hook=hook,
                         )
