@@ -19,7 +19,6 @@ import time
 from pathlib import Path
 from typing import Any, Callable, List, Optional
 
-_CHUNK_SIZE = 8 * 1024 * 1024   # 8 MB blocks — prevents ServiceResponseTimeoutError on large shards
 
 
 class AzureBlobClient:
@@ -61,8 +60,7 @@ class AzureBlobClient:
     def probe(self) -> None:
         """Raise if the container is unreachable."""
         cc = self._container_client()
-        # list_blobs with max_results=1 is the lightest possible check
-        next(iter(cc.list_blobs(name_starts_with="finetuned/", results_per_page=1)), None)
+        next(iter(cc.list_blobs(name_starts_with="finetuned/", results_per_page=1, timeout=10)), None)
 
     # ── Fine-tuned model (full HF weights) ───────────────────────────────────
 
