@@ -164,13 +164,12 @@ def promote_adapter(
     storage_quantized_keys:   List[str]     = []
 
     # ── 1. Upload merged HF model → finetuned/v{N}/ ─────────────────────────
+    # Fatal — if this fails, we must NOT delete the local manifest or weights.
+    # The exception propagates to _run_share_job which keeps the manifest for retry.
     print(f"[orchestrator] Uploading merged HF model (v{version}) to Azure Blob …")
-    try:
-        storage_finetuned_prefix = storage.upload_hf_model(
-            merged_model_path, version, progress_callback=progress_callback
-        )
-    except Exception as exc:
-        print(f"[orchestrator] HF model upload failed (non-fatal): {exc}")
+    storage_finetuned_prefix = storage.upload_hf_model(
+        merged_model_path, version, progress_callback=progress_callback
+    )
 
     # ── 2. Quantize merged model → GGUF ─────────────────────────────────────
     gguf_output_dir = str(Path(merged_model_path).parent / f"{version}-gguf")

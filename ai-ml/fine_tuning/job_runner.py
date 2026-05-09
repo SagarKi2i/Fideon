@@ -169,11 +169,11 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
 
     Cleans up old merged runs before attempting SeaweedFS download to free space.
     """
-    from fine_tuning.seaweedfs_client import SeaweedFSClient
+    from fine_tuning.storage_client import get_storage_client
     from fine_tuning.registry.version_registry import VersionRegistry
 
     registry = VersionRegistry(registry_path)
-    seaweed = SeaweedFSClient()
+    storage = get_storage_client()
 
     # ── Pre-flight: clean up old merged runs to reclaim disk ─────────────────
     if runs_dir and runs_dir.exists():
@@ -182,8 +182,8 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
         free_gb = _free_disk_gb()
         print(f"[job_runner] Free disk after cleanup: {free_gb:.1f} GB")
 
-    # ── 1. SeaweedFS: latest fine-tuned version ───────────────────────────────
-    seaweed_version = seaweed.get_latest_finetuned_version()
+    # ── 1. Storage: latest fine-tuned version ────────────────────────────────
+    seaweed_version = storage.get_latest_finetuned_version()
     if seaweed_version is not None:
         cache_dir = f"/workspace/fine_tuning/models/finetuned/v{seaweed_version}"
         cache_path = Path(cache_dir)
@@ -222,14 +222,14 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
         else:
             print(
                 f"[job_runner] Downloading fine-tuned model v{seaweed_version} "
-                f"from SeaweedFS → {cache_dir} …"
+                f"from storage → {cache_dir} …"
             )
             try:
-                seaweed.download_finetuned_model(seaweed_version, cache_dir)
-                print(f"[job_runner] SeaweedFS model v{seaweed_version} ready at {cache_dir}")
+                storage.download_finetuned_model(seaweed_version, cache_dir)
+                print(f"[job_runner] Storage model v{seaweed_version} ready at {cache_dir}")
                 return cache_dir
             except Exception as exc:
-                print(f"[job_runner] SeaweedFS download failed (non-fatal): {exc}")
+                print(f"[job_runner] Storage download failed (non-fatal): {exc}")
                 # Remove partial download to reclaim space
                 if cache_path.exists():
                     shutil.rmtree(cache_path, ignore_errors=True)
