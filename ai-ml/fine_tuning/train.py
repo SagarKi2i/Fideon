@@ -13,15 +13,70 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+# ── Periodic logger ───────────────────────────────────────────────────────────
+
+class _PeriodicLogger:
+    """Prints a status line every `interval` seconds in a daemon thread.
+
+    Use as a context manager:
+        with _PeriodicLogger(10, lambda: f"Still loading... {elapsed}s"):
+            blocking_call()
+    """
+    def __init__(self, interval: float, fn):
+        self._interval = interval
+        self._fn = fn
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join(timeout=self._interval + 1)
+
+    def _run(self):
+        while not self._stop.wait(self._interval):
+            try:
+                print(self._fn(), flush=True)
+            except Exception:
+                pass
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, *_):
+        self.stop()
+
+
 # ── Dataset formatting ────────────────────────────────────────────────────────
 
+def _build_qwen_chat(msgs: List[Dict[str, Any]]) -> str:
+    """Manually construct Qwen ChatML string — reliable fallback for any tokenizer version."""
+    parts = []
+    for m in msgs:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        if isinstance(content, list):
+            # Multimodal list-of-dicts → extract text parts only
+            content = " ".join(
+                c.get("text", "") for c in content
+                if isinstance(c, dict) and c.get("type") == "text"
+            )
+        parts.append(f"<|im_start|>{role}\n{content}<|im_end|>")
+    return "\n".join(parts) + "\n"
+
+
 def _format_chat_row(row: Dict[str, Any], tokenizer: Any) -> Optional[str]:
-    """Apply Qwen2-VL chat template to one row. Returns None on failure."""
+    """Apply Qwen2-VL chat template to one row, with manual fallback."""
     msgs = row.get("messages")
     if not isinstance(msgs, list):
         print(f"[train] Skipping row — 'messages' is {type(msgs).__name__}, not list. Keys: {list(row.keys())}")
@@ -30,9 +85,16 @@ def _format_chat_row(row: Dict[str, Any], tokenizer: Any) -> Optional[str]:
         text = tokenizer.apply_chat_template(
             msgs, tokenize=False, add_generation_prompt=False
         )
-        return text
+        if text:
+            return text
+        # apply_chat_template returned empty/None — use manual template
+        print("[train] apply_chat_template returned empty — using manual Qwen ChatML template")
     except Exception as e:
-        print(f"[train] apply_chat_template failed: {e}. messages={msgs!r}")
+        print(f"[train] apply_chat_template failed ({e}) — using manual Qwen ChatML template")
+    try:
+        return _build_qwen_chat(msgs)
+    except Exception as e2:
+        print(f"[train] Manual template also failed: {e2}. messages={msgs!r}")
         return None
 
 
@@ -84,46 +146,59 @@ def run_training(
     local_only = str(config.get("local_files_only", "true")).lower() in {"1", "true", "yes"}
 
     # Free any VRAM left from the OCR/VLM extraction model before training
+    print("[train] ── Phase 0/6 ── Clearing VRAM …", flush=True)
     try:
         import gc
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            print("[train] VRAM cleared before loading training model.")
+            print("[train]   VRAM cleared.", flush=True)
     except Exception:
         pass
 
-    print(f"[train] Loading processor from {base_model} …")
-    try:
-        processor = AutoProcessor.from_pretrained(
-            base_model, local_files_only=local_only, fix_mistral_regex=True
-        )
-    except TypeError:
-        processor = AutoProcessor.from_pretrained(base_model, local_files_only=local_only)
+    # ── Phase 1/6: Load processor ────────────────────────────────────────────
+    _t0 = time.time()
+    print(f"[train] ── Phase 1/6 ── Loading processor from {base_model} …", flush=True)
+    with _PeriodicLogger(10, lambda: f"[train]   Still loading processor… ({int(time.time()-_t0)}s elapsed)"):
+        try:
+            processor = AutoProcessor.from_pretrained(
+                base_model, local_files_only=local_only, fix_mistral_regex=True
+            )
+        except TypeError:
+            processor = AutoProcessor.from_pretrained(base_model, local_files_only=local_only)
     tokenizer = processor.tokenizer
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    print(f"[train]   Processor ready. ({int(time.time()-_t0)}s)", flush=True)
 
-    # ── Load model in 4-bit QLoRA ────────────────────────────────────────────
-    print(f"[train] Loading model {base_model} in 4-bit …")
+    # ── Phase 2/6: Load model in 4-bit QLoRA ────────────────────────────────
+    _t0 = time.time()
+    print(f"[train] ── Phase 2/6 ── Loading 4-bit quantized model (5 checkpoint shards, ~40-60s) …", flush=True)
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type=config.get("bnb_4bit_quant_type", "nf4"),
         bnb_4bit_compute_dtype=torch.bfloat16,
         bnb_4bit_use_double_quant=True,
     )
-    model = Qwen2VLForConditionalGeneration.from_pretrained(
-        base_model,
-        quantization_config=bnb_config,
-        device_map="auto",
-        local_files_only=local_only,
-    )
+    with _PeriodicLogger(10, lambda: f"[train]   Loading model shards… ({int(time.time()-_t0)}s elapsed)"):
+        model = Qwen2VLForConditionalGeneration.from_pretrained(
+            base_model,
+            quantization_config=bnb_config,
+            device_map="auto",
+            local_files_only=local_only,
+        )
+    print(f"[train]   Model loaded. ({int(time.time()-_t0)}s) Preparing for k-bit training…", flush=True)
     model = prepare_model_for_kbit_training(
         model,
         use_gradient_checkpointing=bool(train_cfg.get("gradient_checkpointing", True)),
     )
 
-    # ── Apply LoRA ───────────────────────────────────────────────────────────
+    # ── Phase 3/6: Apply LoRA ────────────────────────────────────────────────
+    print(
+        f"[train] ── Phase 3/6 ── Applying LoRA adapters "
+        f"(r={lora_cfg.get('r', 16)}, alpha={lora_cfg.get('lora_alpha', 32)}) …",
+        flush=True,
+    )
     target_modules = lora_cfg.get(
         "target_modules",
         ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
@@ -139,8 +214,8 @@ def run_training(
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
 
-    # ── Tokenise dataset ─────────────────────────────────────────────────────
-    print(f"[train] Loading dataset from {dataset_path} …")
+    # ── Phase 4/6: Load and format dataset ───────────────────────────────────
+    print(f"[train] ── Phase 4/6 ── Loading dataset from {dataset_path} …", flush=True)
     rows = _load_jsonl(Path(dataset_path))
     max_seq = int(train_cfg.get("max_seq_length", 2048))
 
@@ -150,7 +225,8 @@ def run_training(
         if t:
             texts.append(t)
 
-    print(f"[train] Tokenising {len(texts)} examples (max_seq={max_seq}) …")
+    # ── Phase 5/6: Tokenise ───────────────────────────────────────────────────
+    print(f"[train] ── Phase 5/6 ── Tokenising {len(texts)} examples (max_seq={max_seq}) …", flush=True)
     if not texts:
         raise ValueError(
             f"[train] 0 examples after chat-template formatting. "
@@ -233,18 +309,52 @@ def run_training(
         )
         return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
 
-    trainer  = Trainer(
+    from transformers import TrainerCallback
+
+    class _ProgressCB(TrainerCallback):
+        """Prints training progress every ~10 seconds."""
+        def __init__(self):
+            self._last = 0.0
+            self._t0 = time.time()
+
+        def on_step_end(self, args, state, control, **kwargs):
+            now = time.time()
+            if now - self._last < 10:
+                return
+            self._last = now
+            total   = state.max_steps or 1
+            elapsed = int(now - self._t0)
+            pct     = state.global_step / total * 100
+            loss_val = state.log_history[-1].get("loss") if state.log_history else None
+            loss_str = f"{loss_val:.4f}" if isinstance(loss_val, float) else "—"
+            eta_s    = int(elapsed / max(state.global_step, 1) * (total - state.global_step))
+            print(
+                f"[train] Training — step {state.global_step}/{total} ({pct:.0f}%)"
+                f" | epoch {state.epoch:.1f} | loss={loss_str}"
+                f" | elapsed={elapsed}s | ETA≈{eta_s}s",
+                flush=True,
+            )
+
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=tokenised,
         data_collator=_collate_fn,
+        callbacks=[_ProgressCB()],
     )
 
-    print("[train] Starting training …")
+    # ── Phase 6/6: Train ─────────────────────────────────────────────────────
+    _t0_train = time.time()
+    print(
+        f"[train] ── Phase 6/6 ── Starting QLoRA training "
+        f"({training_args.num_train_epochs} epochs, {len(tokenised)} examples) …",
+        flush=True,
+    )
     trainer.train()
+    print(f"[train]   Training complete. ({int(time.time()-_t0_train)}s)", flush=True)
 
     adapter_path = output_dir
-    print(f"[train] Saving adapter to {adapter_path} …")
+    print(f"[train] ── Saving ── Writing adapter weights to {adapter_path} …", flush=True)
     model.save_pretrained(adapter_path)
     processor.save_pretrained(adapter_path)
 
@@ -264,5 +374,5 @@ def run_training(
         json.dumps(manifest, indent=2), encoding="utf-8"
     )
 
-    print("[train] Training complete.")
+    print(f"[train] All done. Adapter saved to {adapter_path}.", flush=True)
     return adapter_path

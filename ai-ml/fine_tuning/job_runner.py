@@ -41,6 +41,7 @@ import json
 import os
 import shutil
 import threading
+import time
 import traceback
 import uuid
 from dataclasses import dataclass, field
@@ -424,13 +425,45 @@ def run_cycle(
             _update("merging")
             merged_dir = str(runs_dir / f"{new_version}-{cycle_id}-merged")
             merger     = AdapterMerger()
-            merge_result = merger.merge(
-                adapter_path=adapter_path,
-                base_model_path=base_model,
-                output_path=merged_dir,
-                config=config,
-                cycle_id=cycle_id,
-                version=new_version,
+
+            _t0_merge = time.time()
+            print(
+                f"[job_runner] ── Merging ── Merging LoRA adapter into base model "
+                f"(this takes ~5-15 min) …",
+                flush=True,
+            )
+
+            def _merge_hb(t0=_t0_merge):
+                elapsed = int(time.time() - t0)
+                return f"[job_runner]   Merging adapter weights into full model | {elapsed}s elapsed"
+
+            _merge_logger_stop = threading.Event()
+
+            def _merge_logger_fn():
+                while not _merge_logger_stop.wait(10):
+                    try:
+                        print(_merge_hb(), flush=True)
+                    except Exception:
+                        pass
+
+            _merge_thread = threading.Thread(target=_merge_logger_fn, daemon=True)
+            _merge_thread.start()
+            try:
+                merge_result = merger.merge(
+                    adapter_path=adapter_path,
+                    base_model_path=base_model,
+                    output_path=merged_dir,
+                    config=config,
+                    cycle_id=cycle_id,
+                    version=new_version,
+                )
+            finally:
+                _merge_logger_stop.set()
+                _merge_thread.join(timeout=12)
+            print(
+                f"[job_runner]   Merge complete. ({int(time.time()-_t0_merge)}s) "
+                f"Full weights saved to {merged_dir}",
+                flush=True,
             )
 
             # ── 9. Write pending-share manifest (Share Gradients uploads later) ─
