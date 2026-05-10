@@ -51,7 +51,7 @@ import {
   type DeviceContribution,
   type TrainingStats,
 } from "@/lib/trainingApi";
-import { syncFeedbacksToRunpod, startRunpodFinetune, getRunpodJobStatus, startFederatedLearning, getFederatedJobStatus, shareGradients, getShareGradientsStatus, getShareGradientsJobStatus } from "@/lib/pdfUploadApi";
+import { syncFeedbacksToRunpod, startRunpodFinetune, getRunpodJobStatus, startFederatedLearning, getFederatedJobStatus, shareGradients, getShareGradientsStatus, getShareGradientsJobStatus, getRegisteredAdapterVersions } from "@/lib/pdfUploadApi";
 import {
   getAcordTrainingCount,
   getAcordTrainingSamples,
@@ -113,6 +113,10 @@ export default function Training() {
   const [federatedJobStatus, setFederatedJobStatus] = useState<{
     status: string; phase?: string; version?: number; versions_aggregated?: number[]; error?: string; message?: string;
   } | null>(null);
+  const [registeredVersions, setRegisteredVersions] = useState<Array<{
+    adapter_version: string; domain: string; quant_levels: string[]; total_size_bytes: number; registered_at: string | null;
+  }>>([]);
+  const [registeredVersionsLoading, setRegisteredVersionsLoading] = useState(false);
 
   // Federated Learning — Share Gradients
   const [hasPendingShare, setHasPendingShare] = useState(false);
@@ -257,6 +261,7 @@ export default function Training() {
       })();
 
       loadData();
+      fetchRegisteredVersions();
       // Restore live polling for any job still marked running
       const savedJobs = getLocalJobs();
       const runningJob = savedJobs.find((j: any) => j.status === "running" && (j.config as any)?.runpod_job_id);
@@ -402,6 +407,7 @@ export default function Training() {
                 ? `Federated aggregation complete — model v${status.version} pushed to Azure Blob.`
                 : (status.message ?? "No new weights to aggregate — all versions already processed. Share Gradients first to add new weights.")
             );
+            if (didAggregate) fetchRegisteredVersions();
           } else {
             setFederatedStatus(`Federated aggregation failed: ${status.error ?? "unknown error"}`);
           }
@@ -662,6 +668,18 @@ export default function Training() {
       setShareGradientsStatus(msg);
       setIsShareGradientsRunning(false);
       toast({ title: "Share Gradients failed", description: msg, variant: "destructive" });
+    }
+  };
+
+  const fetchRegisteredVersions = async () => {
+    setRegisteredVersionsLoading(true);
+    try {
+      const result = await getRegisteredAdapterVersions();
+      setRegisteredVersions(result.versions ?? []);
+    } catch {
+      // Non-fatal — pod may be offline or Supabase not configured
+    } finally {
+      setRegisteredVersionsLoading(false);
     }
   };
 
@@ -1654,6 +1672,65 @@ export default function Training() {
               </Card>
             );
           })()}
+
+          {/* Registered Global Model Versions — persistent across page refreshes */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <CheckCircle2 className="h-5 w-5 text-green-500" />
+                Registered Global Models
+              </CardTitle>
+              <CardDescription>
+                Model versions registered in Azure Blob and available for Electron download.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {registeredVersionsLoading ? (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
+                  <Loader2 className="h-4 w-4 animate-spin" /> Loading registered versions…
+                </div>
+              ) : registeredVersions.length === 0 ? (
+                <div className="flex items-start gap-2 p-3 rounded-lg bg-muted/50 border text-sm text-muted-foreground">
+                  <Info className="h-4 w-4 shrink-0 mt-0.5 text-blue-500" />
+                  <span>No registered versions yet. Complete a Global Update to publish a model.</span>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {registeredVersions.map((v) => (
+                    <div key={v.adapter_version} className="flex items-center justify-between p-3 rounded-lg border bg-green-500/5 border-green-500/20">
+                      <div className="flex items-center gap-3">
+                        <CheckCircle2 className="h-4 w-4 text-green-500 shrink-0" />
+                        <div>
+                          <p className="text-sm font-semibold">v{v.adapter_version}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {v.quant_levels.map(q => q.toUpperCase()).join(" · ")}
+                            {" · "}
+                            {(v.total_size_bytes / 1e9).toFixed(1)} GB total
+                          </p>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <Badge variant="secondary" className="text-xs">
+                          {v.domain}
+                        </Badge>
+                        {v.registered_at && (
+                          <p className="text-[10px] text-muted-foreground mt-1">
+                            {new Date(v.registered_at).toLocaleDateString()}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  <button
+                    onClick={fetchRegisteredVersions}
+                    className="text-xs text-muted-foreground underline mt-1"
+                  >
+                    Refresh
+                  </button>
+                </div>
+              )}
+            </CardContent>
+          </Card>
 
           {/* Existing federated rounds from device-token API */}
           {rounds.length > 0 && (
