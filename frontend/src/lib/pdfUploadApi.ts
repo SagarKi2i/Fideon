@@ -338,6 +338,7 @@ export async function getRunpodJobStatus(jobId: string): Promise<{
   eval_scores?: Record<string, any>;
   error?: string;
   upload_ids?: string[];
+  original_fields_map?: Record<string, Record<string, any>>;
 }> {
   const headers = await authHeader();
   const resp = await fetch(apiUrl(`/api/v1/pdf/finetune/jobs/${encodeURIComponent(jobId)}`), { headers });

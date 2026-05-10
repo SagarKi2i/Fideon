@@ -65,6 +65,7 @@ class CycleResult:
     started_at: str
     finished_at: str
     upload_ids: List[str] = field(default_factory=list)
+    original_fields_map: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 # ── In-memory job store (server.py reads this for status polling) ─────────────
@@ -255,6 +256,7 @@ def run_cycle(
     job_id: str,
     registry_lock_timeout_seconds: int = 30,
     upload_ids: Optional[List[str]] = None,
+    original_fields_map: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> CycleResult:
     """
     Run one complete continuous-learning cycle.
@@ -282,20 +284,22 @@ def run_cycle(
     from fine_tuning.evaluation.eval_gate import run_eval_gate
 
     upload_ids = upload_ids or []
+    original_fields_map = original_fields_map or {}
     started_at = _utc_now()
     cycle_id   = str(uuid.uuid4())[:12]
 
     _set_job(job_id, {
-        "job_id":     job_id,
-        "cycle_id":   cycle_id,
-        "status":     "running",
-        "phase":      "starting",
-        "started_at": started_at,
-        "finished_at": None,
-        "error":      None,
-        "version":    None,
-        "gate_passed": None,
-        "upload_ids": upload_ids,
+        "job_id":              job_id,
+        "cycle_id":            cycle_id,
+        "status":              "running",
+        "phase":               "starting",
+        "started_at":          started_at,
+        "finished_at":         None,
+        "error":               None,
+        "version":             None,
+        "gate_passed":         None,
+        "upload_ids":          upload_ids,
+        "original_fields_map": original_fields_map,
     })
 
     def _update(phase: str, **kwargs: Any) -> None:
@@ -470,6 +474,17 @@ def run_cycle(
                 flush=True,
             )
 
+            # ── 8b. Hot-swap the running extractor to the fine-tuned model ────
+            # This ensures any re-extraction request after this job uses the
+            # newly trained weights instead of the original base Qwen2-VL.
+            _update("reloading_model")
+            try:
+                from extractor import reload_qwen
+                reload_qwen(merge_result.output_path)
+                print(f"[job_runner] Extractor reloaded → now serving fine-tuned model v{new_version}", flush=True)
+            except Exception as _reload_exc:
+                print(f"[job_runner] Warning: model reload failed (non-fatal — extraction still works with base model): {_reload_exc}", flush=True)
+
             # ── 9. Write pending-share manifest (Share Gradients uploads later) ─
             # Do NOT upload to storage here — let the user click Share Gradients
             # so they control when weights leave the pod.
@@ -506,15 +521,16 @@ def run_cycle(
         finished_at = _utc_now()
         _set_job(job_id, {
             **(_jobs.get(job_id) or {}),
-            "status":             "completed",
-            "phase":              "done",
-            "finished_at":        finished_at,
-            "gate_passed":        True,
-            "version":            new_version,
-            "adapter_path":       adapter_path,
-            "merged_model_path":  merge_result.output_path,
-            "eval_scores":        gate.scores,
-            "upload_ids":         upload_ids,
+            "status":              "completed",
+            "phase":               "done",
+            "finished_at":         finished_at,
+            "gate_passed":         True,
+            "version":             new_version,
+            "adapter_path":        adapter_path,
+            "merged_model_path":   merge_result.output_path,
+            "eval_scores":         gate.scores,
+            "upload_ids":          upload_ids,
+            "original_fields_map": original_fields_map,
         })
         print(f"[job_runner] Cycle complete — SLM v1.{new_version} promoted.")
 
@@ -530,6 +546,7 @@ def run_cycle(
             started_at=started_at,
             finished_at=finished_at,
             upload_ids=upload_ids,
+            original_fields_map=original_fields_map,
         )
 
     except Exception as exc:
@@ -564,12 +581,16 @@ def launch_cycle_background(
     new_data_path: str,
     job_id: str,
     upload_ids: Optional[List[str]] = None,
+    original_fields_map: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> None:
     """Spawn run_cycle() in a daemon thread so server.py can return immediately."""
     t = threading.Thread(
         target=run_cycle,
         args=(config_path, new_data_path, job_id),
-        kwargs={"upload_ids": upload_ids or []},
+        kwargs={
+            "upload_ids":          upload_ids or [],
+            "original_fields_map": original_fields_map or {},
+        },
         daemon=True,
         name=f"finetune-{job_id[:8]}",
     )

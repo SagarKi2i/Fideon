@@ -848,12 +848,16 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
         encoding="utf-8",
     )
 
-    # Collect unique upload_ids from ingested samples — returned to frontend for re-extraction
-    upload_ids: List[str] = list({
-        s.get("upload_id", "")
-        for s in samples
-        if s.get("sample_id") in ingested_ids and s.get("upload_id")
-    } - {""})
+    # Collect upload_ids + original_fields per PDF — returned to frontend for re-extraction comparison
+    _seen_uploads: dict = {}
+    for s in samples:
+        uid = s.get("upload_id", "")
+        if uid and s.get("sample_id") in ingested_ids:
+            # Last corrected sample per upload_id wins (if multiple corrections per PDF)
+            _seen_uploads[uid] = s.get("original_fields") or {}
+
+    upload_ids: List[str] = list(_seen_uploads.keys())
+    original_fields_map: dict = _seen_uploads  # {upload_id: original_fields}
 
     # ── Launch cycle in background thread ─────────────────────────────────────
     job_id = str(uuid.uuid4())
@@ -862,6 +866,7 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
         new_data_path=snapshot_path,
         job_id=job_id,
         upload_ids=upload_ids,
+        original_fields_map=original_fields_map,
     )
 
     return {
@@ -874,6 +879,7 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
         "total_samples": ingested,
         "snapshot_path": snapshot_path,
         "upload_ids": upload_ids,
+        "original_fields_map": original_fields_map,
     }
 
 

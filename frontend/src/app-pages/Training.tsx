@@ -105,13 +105,17 @@ export default function Training() {
   const [runpodJobStatus, setRunpodJobStatus] = useState<{
     status: string; phase?: string; version?: number; error?: string; eval_scores?: Record<string, any>;
     upload_ids?: string[];
+    original_fields_map?: Record<string, Record<string, any>>;
   } | null>(null);
 
   // Re-extraction after Local Training
   const [reextractUploadIds, setReextractUploadIds] = useState<string[]>([]);
+  const [originalFieldsMap, setOriginalFieldsMap] = useState<Record<string, Record<string, any>>>({});
   const [isReextracting, setIsReextracting] = useState(false);
   const [reextractResult, setReextractResult] = useState<Record<string, any> | null>(null);
+  const [reextractOriginalFields, setReextractOriginalFields] = useState<Record<string, any> | null>(null);
   const [reextractError, setReextractError] = useState<string | null>(null);
+  const [trainedModelVersion, setTrainedModelVersion] = useState<number | null>(null);
 
   // Federated Learning — Global Update
   const [isFederatedRunning, setIsFederatedRunning] = useState(false);
@@ -317,10 +321,13 @@ export default function Training() {
             setPendingAcordRunIds([]);
           }
 
-          // Store upload_ids so user can re-extract with the newly trained model
+          // Store upload_ids + original fields so user can re-extract with the newly trained model
           if (rpStatus.status === "completed" && rpStatus.upload_ids && rpStatus.upload_ids.length > 0) {
             setReextractUploadIds(rpStatus.upload_ids.filter(Boolean));
+            setOriginalFieldsMap(rpStatus.original_fields_map ?? {});
+            setTrainedModelVersion(rpStatus.version ?? null);
             setReextractResult(null);
+            setReextractOriginalFields(null);
             setReextractError(null);
           }
 
@@ -612,15 +619,37 @@ export default function Training() {
     if (reextractUploadIds.length === 0) return;
     setIsReextracting(true);
     setReextractResult(null);
+    setReextractOriginalFields(null);
     setReextractError(null);
     try {
-      // Re-extract using the most recent PDF from this training run
+      // Use the last upload_id from this training run (most recent corrected PDF)
       const uploadId = reextractUploadIds[reextractUploadIds.length - 1];
-      toast({ title: "Re-extracting…", description: "Running PDF through the newly trained model. This may take 1–5 minutes." });
+      // Capture the original fields for before/after comparison
+      const originalFields = originalFieldsMap[uploadId] ?? null;
+      setReextractOriginalFields(originalFields);
+
+      toast({
+        title: "Re-extracting with trained model…",
+        description: `Running PDF through fine-tuned model v${trainedModelVersion ?? "?"}. This may take 1–5 minutes.`,
+      });
       const result = await triggerFullExtraction(uploadId);
       const fields = result.extracted_json ?? result.extracted_fields ?? result.fields ?? {};
       setReextractResult(fields);
-      toast({ title: "Re-extraction complete", description: "The trained model has extracted updated fields from your PDF." });
+
+      // Count improvements for the toast
+      const improved = originalFields
+        ? Object.entries(fields).filter(([k, v]) => {
+            const orig = String(originalFields[k] ?? "").trim();
+            const now = String(v ?? "").trim();
+            return orig !== now && now.length > 0;
+          }).length
+        : 0;
+      toast({
+        title: "Re-extraction complete",
+        description: improved > 0
+          ? `${improved} field${improved !== 1 ? "s" : ""} changed vs. original extraction.`
+          : "Extraction complete — compare results below.",
+      });
     } catch (e: any) {
       const msg = e?.message || "Re-extraction failed";
       setReextractError(msg);
@@ -1490,76 +1519,160 @@ export default function Training() {
           )}
 
           {/* Re-extraction card — shown after training completes when upload_ids are available */}
-          {reextractUploadIds.length > 0 && (
-            <Card className="border-green-500/30 bg-green-500/5">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <RefreshCw className="h-5 w-5 text-green-500" />
-                  See Model Improvement
-                </CardTitle>
-                <CardDescription>
-                  Training complete. Re-run extraction on your original PDF using the newly trained model to see corrected fields.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <Button
-                  onClick={handleReextract}
-                  disabled={isReextracting}
-                  className="gap-2"
-                  variant="outline"
-                >
-                  {isReextracting
-                    ? <><Loader2 className="h-4 w-4 animate-spin" />Extracting with trained model…</>
-                    : <><RefreshCw className="h-4 w-4" />Re-extract with Trained Model</>}
-                </Button>
+          {reextractUploadIds.length > 0 && (() => {
+            // Compute diff stats when both before and after are available
+            const allKeys = reextractResult
+              ? Array.from(new Set([
+                  ...Object.keys(reextractOriginalFields ?? {}),
+                  ...Object.keys(reextractResult),
+                ])).sort()
+              : [];
+            const improved  = reextractResult && reextractOriginalFields
+              ? allKeys.filter(k => {
+                  const before = String(reextractOriginalFields[k] ?? "").trim();
+                  const after  = String(reextractResult[k] ?? "").trim();
+                  return before !== after && after.length > 0 && before.length > 0;
+                }).length
+              : 0;
+            const newFields = reextractResult && reextractOriginalFields
+              ? allKeys.filter(k => {
+                  const before = String(reextractOriginalFields[k] ?? "").trim();
+                  const after  = String(reextractResult[k] ?? "").trim();
+                  return before.length === 0 && after.length > 0;
+                }).length
+              : 0;
+            const unchanged = reextractResult
+              ? allKeys.length - improved - newFields
+              : 0;
 
-                {reextractError && (
-                  <div className="flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-sm text-red-600 dark:text-red-400">
-                    <XCircle className="h-4 w-4 shrink-0 mt-0.5" />
-                    <span>{reextractError}</span>
-                  </div>
-                )}
+            return (
+              <Card className="border-green-500/30 bg-green-500/5">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <RefreshCw className="h-5 w-5 text-green-500" />
+                    See Model Improvement
+                    {trainedModelVersion != null && (
+                      <Badge variant="secondary" className="text-xs">Fine-tuned model v{trainedModelVersion}</Badge>
+                    )}
+                  </CardTitle>
+                  <CardDescription>
+                    Training complete. Re-run extraction on the same PDF using the newly fine-tuned model to compare results before and after training.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <Button
+                    onClick={handleReextract}
+                    disabled={isReextracting}
+                    className="gap-2"
+                    variant="outline"
+                  >
+                    {isReextracting
+                      ? <><Loader2 className="h-4 w-4 animate-spin" />Extracting with fine-tuned model…</>
+                      : <><RefreshCw className="h-4 w-4" />Re-extract with Trained Model</>}
+                  </Button>
 
-                {isReextracting && (
-                  <div className="flex items-center gap-2 p-3 rounded-lg bg-blue-500/10 border border-blue-500/20 text-sm text-blue-600 dark:text-blue-400">
-                    <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
-                    Running PDF through the trained model — this takes 1–5 minutes…
-                  </div>
-                )}
-
-                {reextractResult && !isReextracting && (
-                  <div className="space-y-3">
-                    <div className="flex items-center gap-2 p-3 rounded-lg bg-green-500/10 border border-green-500/20 text-sm text-green-600 dark:text-green-400">
-                      <CheckCircle2 className="h-4 w-4 shrink-0" />
-                      Extraction complete — {Object.keys(reextractResult).length} fields extracted by the trained model.
+                  {reextractError && (
+                    <div className="flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-sm text-red-600 dark:text-red-400">
+                      <XCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                      <span>{reextractError}</span>
                     </div>
-                    <div className="border rounded-lg overflow-hidden">
-                      <div className="px-4 py-2 bg-muted/50 border-b flex items-center justify-between">
-                        <span className="text-sm font-medium">Extracted Fields</span>
-                        <Badge variant="secondary">{Object.keys(reextractResult).length} fields</Badge>
+                  )}
+
+                  {isReextracting && (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2 p-3 rounded-lg bg-blue-500/10 border border-blue-500/20 text-sm text-blue-600 dark:text-blue-400">
+                        <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                        Running PDF through fine-tuned model v{trainedModelVersion ?? "?"} — this takes 1–5 minutes…
                       </div>
-                      <div className="divide-y max-h-96 overflow-y-auto">
-                        {Object.entries(reextractResult).map(([key, value]) => (
-                          <div key={key} className="flex gap-3 px-4 py-2 text-sm hover:bg-muted/30">
-                            <span className="font-medium text-muted-foreground shrink-0 w-48 truncate" title={key}>
-                              {key.replace(/_/g, " ")}
-                            </span>
-                            <span className="break-words min-w-0">
-                              {value === null || value === undefined
-                                ? <span className="text-muted-foreground italic">—</span>
-                                : typeof value === "object"
-                                  ? <span className="font-mono text-xs">{JSON.stringify(value)}</span>
-                                  : String(value) || <span className="text-muted-foreground italic">—</span>}
-                            </span>
-                          </div>
-                        ))}
+                      <Progress value={undefined} className="h-1 animate-pulse" />
+                    </div>
+                  )}
+
+                  {reextractResult && !isReextracting && (
+                    <div className="space-y-4">
+                      {/* Summary badges */}
+                      <div className="flex items-center gap-2 p-3 rounded-lg bg-green-500/10 border border-green-500/20 text-sm text-green-600 dark:text-green-400">
+                        <CheckCircle2 className="h-4 w-4 shrink-0" />
+                        <span className="font-medium">Re-extraction complete using fine-tuned model v{trainedModelVersion ?? "?"}.</span>
+                      </div>
+                      {reextractOriginalFields && (
+                        <div className="flex flex-wrap gap-2">
+                          {improved > 0 && (
+                            <Badge className="bg-green-100 text-green-700 border-green-300 dark:bg-green-900/30 dark:text-green-300">
+                              {improved} field{improved !== 1 ? "s" : ""} improved
+                            </Badge>
+                          )}
+                          {newFields > 0 && (
+                            <Badge className="bg-amber-100 text-amber-700 border-amber-300 dark:bg-amber-900/30 dark:text-amber-300">
+                              {newFields} field{newFields !== 1 ? "s" : ""} newly filled
+                            </Badge>
+                          )}
+                          {unchanged > 0 && (
+                            <Badge variant="outline" className="text-muted-foreground">
+                              {unchanged} unchanged
+                            </Badge>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Before / After comparison table */}
+                      <div className="border rounded-lg overflow-hidden">
+                        <div className="grid grid-cols-3 px-4 py-2 bg-muted/70 border-b text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                          <span>Field</span>
+                          <span>Before training</span>
+                          <span className="text-green-600 dark:text-green-400">After training</span>
+                        </div>
+                        <div className="divide-y max-h-[480px] overflow-y-auto">
+                          {allKeys.map(key => {
+                            const beforeRaw = reextractOriginalFields
+                              ? String(reextractOriginalFields[key] ?? "").trim()
+                              : null;
+                            const afterRaw  = String(reextractResult[key] ?? "").trim();
+                            const isImproved = beforeRaw !== null && beforeRaw !== afterRaw && afterRaw.length > 0 && beforeRaw.length > 0;
+                            const isNew      = beforeRaw !== null && beforeRaw.length === 0 && afterRaw.length > 0;
+
+                            const rowBg = isImproved
+                              ? "bg-green-50 dark:bg-green-950/20"
+                              : isNew
+                              ? "bg-amber-50 dark:bg-amber-950/20"
+                              : "";
+
+                            return (
+                              <div key={key} className={`grid grid-cols-3 gap-3 px-4 py-2 text-sm hover:bg-muted/30 ${rowBg}`}>
+                                <span className="font-medium text-muted-foreground truncate" title={key}>
+                                  {key.replace(/_/g, " ")}
+                                </span>
+                                {/* Before */}
+                                <span className={`break-words ${isImproved ? "line-through text-muted-foreground/60" : "text-muted-foreground"}`}>
+                                  {beforeRaw === null
+                                    ? <span className="italic text-muted-foreground/40">—</span>
+                                    : beforeRaw.length > 0
+                                    ? beforeRaw
+                                    : <span className="italic text-muted-foreground/40">(empty)</span>}
+                                </span>
+                                {/* After */}
+                                <span className={`break-words font-medium ${
+                                  isImproved ? "text-green-700 dark:text-green-400"
+                                  : isNew    ? "text-amber-700 dark:text-amber-400"
+                                  : ""
+                                }`}>
+                                  {afterRaw.length > 0
+                                    ? afterRaw
+                                    : <span className="italic font-normal text-muted-foreground/40">(empty)</span>}
+                                  {isImproved && <span className="ml-1 text-green-500 text-xs">✓</span>}
+                                  {isNew      && <span className="ml-1 text-amber-500 text-xs">+</span>}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          )}
+                  )}
+                </CardContent>
+              </Card>
+            );
+          })()}
         </TabsContent>
 
         {/* Federated Learning Tab */}
