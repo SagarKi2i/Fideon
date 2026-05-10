@@ -111,7 +111,7 @@ export default function Training() {
   const [federatedStatus, setFederatedStatus] = useState<string | null>(null);
   const [activeFederatedJobId, setActiveFederatedJobId] = useState<string | null>(null);
   const [federatedJobStatus, setFederatedJobStatus] = useState<{
-    status: string; phase?: string; version?: number; versions_aggregated?: number[]; error?: string;
+    status: string; phase?: string; version?: number; versions_aggregated?: number[]; error?: string; message?: string;
   } | null>(null);
 
   // Federated Learning — Share Gradients
@@ -395,11 +395,16 @@ export default function Training() {
         if (["completed", "failed"].includes(status.status)) {
           setActiveFederatedJobId(null);
           setIsFederatedRunning(false);
-          setFederatedStatus(
-            status.status === "completed"
-              ? `Federated aggregation complete — model v${status.version ?? "?"} pushed to Azure Blob.`
-              : `Federated aggregation failed: ${status.error ?? "unknown error"}`
-          );
+          if (status.status === "completed") {
+            const didAggregate = Array.isArray(status.versions_aggregated) && status.versions_aggregated.length > 0;
+            setFederatedStatus(
+              didAggregate
+                ? `Federated aggregation complete — model v${status.version} pushed to Azure Blob.`
+                : (status.message ?? "No new weights to aggregate — all versions already processed. Share Gradients first to add new weights.")
+            );
+          } else {
+            setFederatedStatus(`Federated aggregation failed: ${status.error ?? "unknown error"}`);
+          }
         }
       } catch (e: unknown) {
         if (!alive) return;
@@ -1554,9 +1559,12 @@ export default function Training() {
 
           {/* Federated job pipeline status */}
           {federatedJobStatus && (() => {
-            const isFedDone   = federatedJobStatus.status === "completed";
-            const isFedFailed = federatedJobStatus.status === "failed";
-            const isFedActive = !isFedDone && !isFedFailed;
+            const isFedDone     = federatedJobStatus.status === "completed";
+            const isFedFailed   = federatedJobStatus.status === "failed";
+            const isFedActive   = !isFedDone && !isFedFailed;
+            const didAggregate  = (federatedJobStatus.versions_aggregated?.length ?? 0) > 0;
+            // "completed" with no versions aggregated = nothing new to process
+            const isFedNoWork   = isFedDone && !didAggregate;
             const fedSteps = [
               { label: "Collect & Aggregate", desc: "Download weights from Azure Blob and run FedAvg", icon: Globe },
               { label: "New Model Ready",     desc: "Aggregated model pushed to Azure Blob",           icon: CheckCircle2 },
@@ -1568,8 +1576,9 @@ export default function Training() {
                     <Globe className="h-5 w-5" />
                     Federated Learning — Pipeline Status
                     {isFedActive  && <Loader2 className="h-4 w-4 ml-1 animate-spin text-blue-500" />}
-                    {isFedDone    && <CheckCircle2 className="h-4 w-4 ml-1 text-green-500" />}
-                    {isFedFailed  && <XCircle className="h-4 w-4 ml-1 text-red-500" />}
+                    {isFedDone && didAggregate  && <CheckCircle2 className="h-4 w-4 ml-1 text-green-500" />}
+                    {isFedNoWork                && <Info className="h-4 w-4 ml-1 text-amber-500" />}
+                    {isFedFailed                && <XCircle className="h-4 w-4 ml-1 text-red-500" />}
                   </CardTitle>
                   {federatedJobStatus.phase && (
                     <CardDescription className="flex items-center gap-1.5">
@@ -1582,8 +1591,8 @@ export default function Training() {
                   <div className="grid grid-cols-2 gap-3 mb-4">
                     {fedSteps.map((s, i) => {
                       const stepNum = i + 1;
-                      const done   = isFedDone ? true : fedPipelineStep > stepNum;
-                      const active = !isFedFailed && fedPipelineStep === stepNum;
+                      const done   = (isFedDone && didAggregate) ? true : fedPipelineStep > stepNum;
+                      const active = !isFedFailed && !isFedNoWork && fedPipelineStep === stepNum;
                       const failed = isFedFailed && fedPipelineStep === stepNum;
                       return (
                         <div key={s.label} className={`flex flex-col items-center text-center p-3 rounded-lg border transition-colors ${
@@ -1609,18 +1618,30 @@ export default function Training() {
                       );
                     })}
                   </div>
-                  <Progress value={isFedDone ? 100 : isFedFailed ? (fedPipelineStep / 2) * 100 : ((fedPipelineStep - 0.5) / 2) * 100} className="h-1.5 mb-3" />
-                  {isFedDone && (
+                  <Progress
+                    value={
+                      isFedNoWork ? 0 :
+                      (isFedDone && didAggregate) ? 100 :
+                      isFedFailed ? (fedPipelineStep / 2) * 100 :
+                      ((fedPipelineStep - 0.5) / 2) * 100
+                    }
+                    className="h-1.5 mb-3"
+                  />
+                  {isFedDone && didAggregate && (
                     <div className="space-y-1">
                       <div className="flex items-center gap-2 p-3 rounded-lg bg-green-500/10 border border-green-500/20 text-sm text-green-600 dark:text-green-400">
                         <CheckCircle2 className="h-4 w-4 shrink-0" />
-                        Federated model{federatedJobStatus.version ? ` v${federatedJobStatus.version}` : ""} registered in Fideon Weights — available for Electron download.
+                        Federated model v{federatedJobStatus.version} registered in Fideon Weights — available for Electron download.
                       </div>
-                      {(federatedJobStatus.versions_aggregated?.length ?? 0) > 0 && (
-                        <p className="text-xs text-muted-foreground px-1">
-                          Aggregated from versions: {federatedJobStatus.versions_aggregated!.map(v => `v${v}`).join(", ")}
-                        </p>
-                      )}
+                      <p className="text-xs text-muted-foreground px-1">
+                        Aggregated from versions: {federatedJobStatus.versions_aggregated!.map(v => `v${v}`).join(", ")}
+                      </p>
+                    </div>
+                  )}
+                  {isFedNoWork && (
+                    <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-sm text-amber-600 dark:text-amber-400">
+                      <Info className="h-4 w-4 shrink-0 mt-0.5" />
+                      <span>{federatedJobStatus.message ?? "No new weights to aggregate — all versions already processed. Share Gradients first to add new weights."}</span>
                     </div>
                   )}
                   {isFedFailed && (
