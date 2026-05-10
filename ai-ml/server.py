@@ -1320,6 +1320,15 @@ def _run_federated_job(job_id: str) -> None:
                 except Exception as exc:
                     print(f"[federated] adapter_registry registration failed (non-fatal): {exc}")
 
+            # ── Mark input versions as consumed so future Global Updates skip them ──
+            # Without this, every subsequent run re-aggregates the same input versions
+            # because quantized/v{input}/ has no .gguf (the output was v{new_version}).
+            for v in downloaded_versions:
+                try:
+                    seaweed.mark_version_consumed(v, new_version)
+                except Exception as _mark_exc:
+                    print(f"[global-update]   Warning: could not mark v{v} consumed: {_mark_exc}")
+
             # ── Done ──────────────────────────────────────────────────────────
             _set_fed_job(job_id, {
                 **_fed_jobs.get(job_id, {}),
