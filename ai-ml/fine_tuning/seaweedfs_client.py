@@ -226,7 +226,7 @@ class SeaweedFSClient:
 
         client = self._boto_client()
         tc = self._transfer_config()
-        files = list(local.glob("*.gguf")) + list(local.glob("manifest.json"))
+        files = [f for f in local.glob("*.gguf") if "fp16" not in f.name.lower()] + list(local.glob("manifest.json"))
         print(f"[seaweedfs] Uploading {len(files)} quantized file(s) → s3://{self._bucket}/{prefix}/")
         _RETRY_DELAYS = [30, 90]
         failed: list[str] = []

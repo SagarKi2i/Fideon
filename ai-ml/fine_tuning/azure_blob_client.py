@@ -251,7 +251,7 @@ class AzureBlobClient:
             return keys
 
         cc = self._container_client(create_if_missing=True)
-        files = list(local.glob("*.gguf")) + list(local.glob("manifest.json"))
+        files = [f for f in local.glob("*.gguf") if "fp16" not in f.name.lower()] + list(local.glob("manifest.json"))
         print(f"[azure_blob] Uploading {len(files)} quantized file(s) → {self._container}/{prefix}/")
         _RETRY_DELAYS = [30, 60, 120, 240]
         failed: list[str] = []
