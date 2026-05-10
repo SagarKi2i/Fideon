@@ -261,3 +261,8 @@ SEAWEEDFS_ACCESS_KEY = (os.getenv("SEAWEEDFS_ACCESS_KEY") or "").strip()
 SEAWEEDFS_SECRET_KEY = (os.getenv("SEAWEEDFS_SECRET_KEY") or "").strip()
 SEAWEEDFS_BUCKET = (os.getenv("SEAWEEDFS_BUCKET") or "").strip()
 
+# Azure Blob Storage (download URLs for GGUF artifacts when Azure is the storage backend)
+AZURE_BLOB_ACCOUNT_URL = (os.getenv("AZURE_BLOB_ACCOUNT_URL") or "").strip().rstrip("/")
+AZURE_BLOB_SAS_TOKEN   = (os.getenv("AZURE_BLOB_SAS_TOKEN") or "").strip().lstrip("?")
+AZURE_BLOB_CONTAINER   = (os.getenv("AZURE_BLOB_CONTAINER") or "fideon-models").strip()
+

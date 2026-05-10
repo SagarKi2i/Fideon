@@ -63,18 +63,33 @@ class AzureBlobClient:
         next(iter(cc.list_blobs(name_starts_with="finetuned/", results_per_page=1, timeout=10)), None)
 
     def has_successful_quantization(self, version: int) -> bool:
-        """Return True if quantized/v{version}/ contains at least one .gguf file."""
+        """Return True if quantized/v{version}/ has a .gguf file OR a consumed.txt marker."""
         if not self._configured:
             return False
         try:
             cc = self._container_client()
             prefix = f"quantized/v{version}/"
             for blob in cc.list_blobs(name_starts_with=prefix, results_per_page=10, timeout=10):
-                if blob["name"].endswith(".gguf"):
+                name = blob["name"]
+                if name.endswith(".gguf") or name.endswith("consumed.txt"):
                     return True
             return False
         except Exception:
             return False
+
+    def mark_version_consumed(self, version: int, consumed_into: int) -> None:
+        """Write quantized/v{version}/consumed.txt so future Global Updates skip this version."""
+        if not self._configured:
+            return
+        try:
+            blob_name = f"quantized/v{version}/consumed.txt"
+            content = f"consumed_into_v{consumed_into}".encode()
+            self._container_client(create_if_missing=True).get_blob_client(blob_name).upload_blob(
+                content, overwrite=True
+            )
+            print(f"[azure_blob] Marked v{version} as consumed → v{consumed_into}")
+        except Exception as exc:
+            print(f"[azure_blob] Warning: could not mark v{version} consumed: {exc}")
 
     # ── Fine-tuned model (full HF weights) ───────────────────────────────────
 

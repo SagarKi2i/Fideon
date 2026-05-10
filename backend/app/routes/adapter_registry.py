@@ -17,6 +17,9 @@ from botocore.config import Config
 from fastapi import APIRouter, Header, HTTPException
 
 from app.core.config import (
+    AZURE_BLOB_ACCOUNT_URL,
+    AZURE_BLOB_CONTAINER,
+    AZURE_BLOB_SAS_TOKEN,
     SEAWEEDFS_ACCESS_KEY,
     SEAWEEDFS_BUCKET,
     SEAWEEDFS_ENDPOINT,
@@ -28,8 +31,25 @@ from app.routes.device import _resolve_device_from_bearer, _load_active_device_r
 log = structlog.get_logger("adapter_registry")
 router = APIRouter()
 
-# Presigned URL TTL — 1 hour is enough for a download to start
+# Presigned URL TTL — 1 hour is enough for a download to start (SeaweedFS only)
 _URL_TTL = 3600
+
+
+def _build_download_url(blob_key: str, sig: bool = False) -> str:
+    """
+    Return a download URL for blob_key.
+    - Azure Blob: direct SAS URL (no SDK needed, valid for SAS token lifetime)
+    - SeaweedFS: S3 presigned URL via boto3 (1-hour TTL)
+    """
+    object_key = f"{blob_key}.sig" if sig else blob_key
+    if AZURE_BLOB_ACCOUNT_URL and AZURE_BLOB_SAS_TOKEN:
+        return f"{AZURE_BLOB_ACCOUNT_URL}/{AZURE_BLOB_CONTAINER}/{object_key}?{AZURE_BLOB_SAS_TOKEN}"
+    s3 = _s3()
+    return s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": SEAWEEDFS_BUCKET, "Key": object_key},
+        ExpiresIn=_URL_TTL,
+    )
 
 
 def _in_canary_cohort(device_id: str, version: str, canary_pct: int) -> bool:
@@ -177,14 +197,7 @@ async def get_download_url(
     if not blob_key:
         raise HTTPException(status_code=500, detail="Artifact has no blob_key — re-run upload pipeline")
 
-    object_key = f"{blob_key}.sig" if sig else blob_key
-
-    s3 = _s3()
-    url = s3.generate_presigned_url(
-        "get_object",
-        Params={"Bucket": SEAWEEDFS_BUCKET, "Key": object_key},
-        ExpiresIn=_URL_TTL,
-    )
+    url = _build_download_url(blob_key, sig=sig)
 
     log.info(
         "adapter_registry.download_url_issued",

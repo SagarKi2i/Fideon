@@ -924,6 +924,54 @@ def list_registry_versions() -> Dict[str, Any]:
         return {"error": str(exc), "versions": []}
 
 
+@app.get("/federated/registered-versions")
+def get_registered_adapter_versions() -> Dict[str, Any]:
+    """
+    Query Supabase adapter_registry and return all registered GGUF versions,
+    grouped by adapter_version descending. Used by the frontend to display
+    a persistent list of globally aggregated model versions.
+    """
+    supabase_url = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    if not supabase_url or not supabase_key:
+        return {"versions": [], "message": "Supabase not configured on pod"}
+    try:
+        import httpx
+        from collections import defaultdict
+        headers = {
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
+        }
+        q = (
+            "select=adapter_version,quant_level,size_bytes,domain,created_at"
+            "&is_available=eq.true&blocked=eq.false"
+            "&order=adapter_version.desc"
+        )
+        resp = httpx.get(
+            f"{supabase_url}/rest/v1/adapter_registry?{q}",
+            headers=headers, timeout=10
+        )
+        if not resp.is_success:
+            return {"versions": [], "error": f"Supabase error: {resp.status_code}"}
+        rows = resp.json()
+        grouped: Dict[str, list] = defaultdict(list)
+        for r in rows:
+            grouped[r["adapter_version"]].append(r)
+        versions = [
+            {
+                "adapter_version": ver,
+                "domain":          artifacts[0].get("domain", "acord"),
+                "quant_levels":    [a["quant_level"] for a in artifacts if a["quant_level"] != "unknown"],
+                "total_size_bytes": sum(a["size_bytes"] for a in artifacts),
+                "registered_at":   artifacts[0].get("created_at"),
+            }
+            for ver, artifacts in sorted(grouped.items(), reverse=True)
+        ]
+        return {"versions": versions}
+    except Exception as exc:
+        return {"versions": [], "error": str(exc)}
+
+
 # ---------------------------------------------------------------------------
 # Federated Learning — FedAvg aggregation across all stored weight versions
 # ---------------------------------------------------------------------------
@@ -1319,6 +1367,15 @@ def _run_federated_job(job_id: str) -> None:
                     _register_gguf_in_supabase(gguf_s3_keys, new_version, gguf_dir)
                 except Exception as exc:
                     print(f"[federated] adapter_registry registration failed (non-fatal): {exc}")
+
+            # ── Mark input versions as consumed so future Global Updates skip them ──
+            # Without this, every subsequent run re-aggregates the same input versions
+            # because quantized/v{input}/ has no .gguf (the output was v{new_version}).
+            for v in downloaded_versions:
+                try:
+                    seaweed.mark_version_consumed(v, new_version)
+                except Exception as _mark_exc:
+                    print(f"[global-update]   Warning: could not mark v{v} consumed: {_mark_exc}")
 
             # ── Done ──────────────────────────────────────────────────────────
             _set_fed_job(job_id, {

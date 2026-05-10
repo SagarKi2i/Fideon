@@ -365,7 +365,7 @@ export async function startFederatedLearning(): Promise<{
 }
 
 export async function getFederatedJobStatus(jobId: string): Promise<{
-  status: string; phase?: string; version?: number; versions_aggregated?: number[]; error?: string;
+  status: string; phase?: string; version?: number; versions_aggregated?: number[]; error?: string; message?: string;
 }> {
   const headers = await authHeader();
   const resp = await fetch(apiUrl(`/api/v1/pdf/federated/jobs/${encodeURIComponent(jobId)}`), {
@@ -375,6 +375,29 @@ export async function getFederatedJobStatus(jobId: string): Promise<{
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ detail: resp.statusText }));
     throw new Error(err.detail || err.error || `Status check failed: ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function getRegisteredAdapterVersions(): Promise<{
+  versions: Array<{
+    adapter_version: string;
+    domain: string;
+    quant_levels: string[];
+    total_size_bytes: number;
+    registered_at: string | null;
+  }>;
+  error?: string;
+  message?: string;
+}> {
+  const headers = await authHeader();
+  const resp = await fetch(apiUrl("/api/v1/pdf/federated/registered-versions"), {
+    headers,
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+    throw new Error(err.detail || err.error || `Failed to fetch registered versions: ${resp.status}`);
   }
   return resp.json();
 }

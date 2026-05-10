@@ -600,3 +600,12 @@ async def get_federated_job_status(
     """Poll the status of a federated aggregation job."""
     await verify_user(authorization)
     return await _runpod_get(f"/federated/jobs/{job_id}")
+
+
+@router.get("/api/v1/pdf/federated/registered-versions")
+async def get_registered_adapter_versions(
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Return all registered global model versions from Supabase adapter_registry."""
+    await verify_user(authorization)
+    return await _runpod_get("/federated/registered-versions")

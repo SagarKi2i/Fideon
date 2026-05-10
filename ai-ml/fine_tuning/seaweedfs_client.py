@@ -129,7 +129,7 @@ class SeaweedFSClient:
         self._boto_client().head_bucket(Bucket=self._bucket)
 
     def has_successful_quantization(self, version: int) -> bool:
-        """Return True if quantized/v{version}/ contains at least one .gguf file."""
+        """Return True if quantized/v{version}/ has a .gguf file OR a consumed.txt marker."""
         if not self._configured:
             return False
         try:
@@ -137,11 +137,24 @@ class SeaweedFSClient:
             prefix = f"quantized/v{version}/"
             resp = client.list_objects_v2(Bucket=self._bucket, Prefix=prefix, MaxKeys=10)
             for obj in resp.get("Contents", []):
-                if obj["Key"].endswith(".gguf"):
+                key = obj["Key"]
+                if key.endswith(".gguf") or key.endswith("consumed.txt"):
                     return True
             return False
         except Exception:
             return False
+
+    def mark_version_consumed(self, version: int, consumed_into: int) -> None:
+        """Write quantized/v{version}/consumed.txt so future Global Updates skip this version."""
+        if not self._configured:
+            return
+        try:
+            key = f"quantized/v{version}/consumed.txt"
+            content = f"consumed_into_v{consumed_into}".encode()
+            self._boto_client().put_object(Bucket=self._bucket, Key=key, Body=content)
+            print(f"[seaweedfs] Marked v{version} as consumed → v{consumed_into}")
+        except Exception as exc:
+            print(f"[seaweedfs] Warning: could not mark v{version} consumed: {exc}")
 
     def list_finetuned_versions(self, latest: int = 0, count: int = 0) -> List[int]:
         """Return all available version numbers from the finetuned/ prefix."""
