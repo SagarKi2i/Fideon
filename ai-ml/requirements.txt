@@ -108,3 +108,4 @@ jupyterlab>=4.0.0
 # Install manually if needed:  pip install deepeval
 # -----------------------------------------------------------------------------
 # deepeval>=0.21.0
+sentencepiece
