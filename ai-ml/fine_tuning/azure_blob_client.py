@@ -62,6 +62,20 @@ class AzureBlobClient:
         cc = self._container_client()
         next(iter(cc.list_blobs(name_starts_with="finetuned/", results_per_page=1, timeout=10)), None)
 
+    def has_successful_quantization(self, version: int) -> bool:
+        """Return True if quantized/v{version}/ contains at least one .gguf file."""
+        if not self._configured:
+            return False
+        try:
+            cc = self._container_client()
+            prefix = f"quantized/v{version}/"
+            for blob in cc.list_blobs(name_starts_with=prefix, results_per_page=10, timeout=10):
+                if blob["name"].endswith(".gguf"):
+                    return True
+            return False
+        except Exception:
+            return False
+
     # ── Fine-tuned model (full HF weights) ───────────────────────────────────
 
     def upload_hf_model(
