@@ -136,7 +136,8 @@ if [ "${USE_OLLAMA:-false}" = "true" ]; then
             # OLLAMA_NUM_GPU=999 — load ALL transformer layers onto GPU; Ollama caps this at the
             #                 real layer count automatically. Without this, Ollama's conservative
             #                 VRAM estimate can silently offload some layers to CPU.
-            OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_GPU=999 ollama serve >> "$LOG" 2>&1 &
+            OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_GPU=999 ollama serve \
+                >> /workspace/logs/ollama.log 2>&1 &
             OLLAMA_PID=$!
             log "Ollama PID: $OLLAMA_PID"
 
@@ -293,13 +294,26 @@ log "Public:       https://gpu-api.fideonai.fyi"
 log "Logs:         /workspace/logs/startup.log"
 log "========================================"
 
-# ── Keep container alive, auto-restart FastAPI on crash ───────────────────────
+# ── Keep container alive, auto-restart FastAPI + Ollama on crash ──────────────
 MAX_RESTARTS=5
 RESTART_COUNT=0
 STABLE_CYCLES=0
 STABLE_THRESHOLD=10
 while true; do
     sleep 30
+
+    # Auto-restart Ollama if it crashed (only when USE_OLLAMA=true)
+    if [ "${USE_OLLAMA:-false}" = "true" ] && [ -n "${OLLAMA_PID:-}" ]; then
+        if ! kill -0 $OLLAMA_PID 2>/dev/null; then
+            log_err "Ollama process died — restarting..."
+            export OLLAMA_MODELS=/workspace/.ollama
+            OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_GPU=999 ollama serve \
+                >> /workspace/logs/ollama.log 2>&1 &
+            OLLAMA_PID=$!
+            log "Ollama restarted (PID $OLLAMA_PID)"
+        fi
+    fi
+
     if ! kill -0 $UVICORN_PID 2>/dev/null; then
         STABLE_CYCLES=0
         RESTART_COUNT=$((RESTART_COUNT + 1))
