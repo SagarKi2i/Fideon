@@ -1,0 +1,18 @@
+FROM runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
+
+WORKDIR /app
+
+# Install system deps + cloudflared
+RUN apt-get update && apt-get install -y curl git && \
+    mkdir -p --mode=0755 /usr/share/keyrings && \
+    curl -fsSL https://pkg.cloudflare.com/cloudflare-public-v2.gpg | \
+    tee /usr/share/keyrings/cloudflare-public-v2.gpg >/dev/null && \
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-public-v2.gpg] \
+    https://pkg.cloudflare.com/cloudflared any main" | \
+    tee /etc/apt/sources.list.d/cloudflared.list && \
+    apt-get update && apt-get install -y cloudflared && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Compile llama.cpp with CUDA — slow step baked in once so main image skips it
+COPY setup.sh .
+RUN chmod +x setup.sh && bash setup.sh --skip-pip --skip-verify

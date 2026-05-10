@@ -1,0 +1,78 @@
+# =============================================================================
+# Fideon RunPod — Fine-Tuning Config
+# QLoRA continuous-learning pipeline for Qwen2-VL-7B (ACORD field extraction)
+# Model lives at /workspace/models/qwen2-vl-7b on the RunPod pod.
+# =============================================================================
+
+# ── Base model ────────────────────────────────────────────────────────────────
+base_model: "${QWEN_MODEL_ID:-/workspace/models/qwen2-vl-7b}"
+local_files_only: true
+
+# ── Storage paths (all under /workspace on the pod) ───────────────────────────
+paths:
+  datasets_dir:  "/workspace/fine_tuning/datasets"
+  runs_dir:      "/workspace/fine_tuning/runs"
+  registry_path: "/workspace/fine_tuning/registry/version_registry.json"
+
+# ── Continuous learning ───────────────────────────────────────────────────────
+continuous_learning:
+  enabled: true
+  # Number of corrections before a new training cycle is triggered automatically.
+  retrain_threshold: 25
+  feedback_datasets_dir: "/workspace/fine_tuning/datasets/feedback_learning"
+
+# ── QLoRA ─────────────────────────────────────────────────────────────────────
+load_in_4bit: true
+bnb_4bit_quant_type: "nf4"
+bnb_4bit_compute_dtype: "bfloat16"
+
+lora:
+  r: 16
+  lora_alpha: 32
+  # Qwen2-VL-7B attention + MLP projection layers
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+  lora_dropout: 0.05
+  bias: "none"
+  task_type: "CAUSAL_LM"
+
+# ── Training ──────────────────────────────────────────────────────────────────
+training:
+  num_epochs: 3
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 4
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+  max_grad_norm: 0.3
+  max_seq_length: 2048
+  fp16: false
+  bf16: true
+  gradient_checkpointing: true
+  warmup_ratio: 0.10
+  logging_steps: 5
+  save_strategy: "epoch"
+  save_total_limit: 2
+  optim: "paged_adamw_8bit"
+  # Fraction of older training data replayed each cycle (anti-forgetting).
+  replay_fraction: 0.30
+
+# ── Evaluation / quality gate ─────────────────────────────────────────────────
+evaluation:
+  # Minimum absolute scores required to pass the gate.
+  absolute_floors:
+    field_f1: 0.65
+    field_recall: 0.60
+  # Maximum allowed regression vs parent version before blocking promotion.
+  max_regression: 0.05
+  # Minimum improvement over parent (set 0 to always promote if floors pass).
+  min_improvement: 0.0
+  # Maximum drop in recall on parent-version eval set (catastrophic forgetting guard).
+  max_forgetting_drop: 0.10
+  temperature: 0.0
+  max_new_tokens: 512

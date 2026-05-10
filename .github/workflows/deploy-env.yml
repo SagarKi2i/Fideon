@@ -1,0 +1,259 @@
+# ─────────────────────────────────────────────────────────────
+# Reusable Docker deployment to Azure VM via SSH
+# Called by frontend-ci.yml and backend-ci.yml after images are pushed
+# ─────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      component:
+        required: true
+        type: string
+      container_name:
+        required: true
+        type: string
+      port:
+        required: true
+        type: string
+      image_sha:
+        required: true
+        type: string
+    secrets:
+      AZURE_VM_HOST:
+        required: true
+      AZURE_VM_USERNAME:
+        required: true
+      CHATBOT_SERVER_KEY:
+        required: true
+      AZURE_CR_USERNAME:
+        required: true
+      AZURE_CR_PASSWORD:
+        required: true
+      NEXT_PUBLIC_SUPABASE_URL:
+        required: false
+      NEXT_PUBLIC_SUPABASE_ANON_KEY:
+        required: false
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:
+        required: false
+      NEXT_PUBLIC_API_URL:
+        required: false
+      SUPABASE_SERVICE_ROLE_KEY:
+        required: false
+      SUPABASE_JWT_SECRET:
+        required: false
+      DATABASE_URL:
+        required: false
+      GROQ_API_KEY:
+        required: false
+      DEVICE_JWT_SECRET:
+        required: false
+      CORS_ALLOWED_ORIGINS:
+        required: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: deploy-${{ inputs.component }}-${{ inputs.environment }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run staging automation scripts
+        if: inputs.environment == 'staging'
+        run: |
+          chmod +x ./scripts/staging-automation.sh 2>/dev/null || true
+          ./scripts/staging-automation.sh 2>/dev/null || echo "No staging-automation.sh — skipping"
+
+      - name: Preflight – verify VM deploy secrets
+        env:
+          AZURE_VM_HOST: ${{ secrets.AZURE_VM_HOST }}
+          AZURE_VM_USERNAME: ${{ secrets.AZURE_VM_USERNAME }}
+          CHATBOT_SERVER_KEY: ${{ secrets.CHATBOT_SERVER_KEY }}
+        run: |
+          missing=""
+          [ -z "$AZURE_VM_HOST" ] && missing="$missing AZURE_VM_HOST"
+          [ -z "$AZURE_VM_USERNAME" ] && missing="$missing AZURE_VM_USERNAME"
+          [ -z "$CHATBOT_SERVER_KEY" ] && missing="$missing CHATBOT_SERVER_KEY"
+          if [ -n "$missing" ]; then
+            echo "ERROR: Missing required secrets for VM deploy in environment '${{ inputs.environment }}':$missing"
+            echo "Add them in: GitHub → Settings → Environments → ${{ inputs.environment }} → Environment secrets"
+            echo "See: .github/DEPLOY-TROUBLESHOOTING.md"
+            exit 1
+          fi
+          echo "Required VM deploy secrets are set."
+
+      - name: Write SSH key
+        run: |
+          install -m 600 /dev/null ssh_key
+          echo "${{ secrets.CHATBOT_SERVER_KEY }}" > ssh_key
+
+      - name: Verify SSH connectivity
+        run: |
+          for attempt in 1 2 3; do
+            echo "SSH connectivity check $attempt/3..."
+            if ssh -T -i ssh_key \
+                -o StrictHostKeyChecking=no \
+                -o ConnectTimeout=30 \
+                -o BatchMode=yes \
+                ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} "echo OK"; then
+              echo "SSH connectivity verified"
+              exit 0
+            fi
+            [ "$attempt" -lt 3 ] && sleep 15
+          done
+          echo "ERROR: Cannot reach VM on port 22 (SSH connection timed out)."
+          echo "Check: VM running, NSG allows port 22 from GitHub runners, AZURE_VM_HOST correct, sshd running on VM."
+          echo "Troubleshooting: .github/DEPLOY-TROUBLESHOOTING.md#ssh-connection-timed-out"
+          exit 1
+
+      - name: Deploy ${{ inputs.component }} → ${{ inputs.environment }}
+        run: |
+          ssh -T -i ssh_key \
+              -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=60 \
+              -o ServerAliveInterval=15 \
+              -o ServerAliveCountMax=3 \
+              -o ConnectionAttempts=3 \
+              ${{ secrets.AZURE_VM_USERNAME }}@${{ secrets.AZURE_VM_HOST }} << 'ENDSSH'
+
+            set -e
+
+            echo "── Login to ACR ──"
+            echo "${{ secrets.AZURE_CR_PASSWORD }}" | \
+              docker login neurapodacr.azurecr.io \
+                -u "${{ secrets.AZURE_CR_USERNAME }}" \
+                --password-stdin
+
+            echo "── Pull new image ──"
+            docker pull neurapodacr.azurecr.io/${{ inputs.component }}:${{ inputs.image_sha }}
+
+            echo "── Save rollback info ──"
+            PREV_IMAGE=$(docker inspect --format='{{.Config.Image}}' ${{ inputs.container_name }} 2>/dev/null || echo "")
+            echo "Previous image: ${PREV_IMAGE:-none}"
+
+            echo "── Stop & remove old container ──"
+            docker stop ${{ inputs.container_name }} 2>/dev/null || true
+            docker rm   ${{ inputs.container_name }} 2>/dev/null || true
+
+            echo "── Start new container ──"
+            SUPABASE_PUBLIC_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}"
+            if [ -z "$SUPABASE_PUBLIC_KEY" ]; then
+              SUPABASE_PUBLIC_KEY="${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}"
+            fi
+
+            if [ "${{ inputs.component }}" = "neurapod-app" ] || [ "${{ inputs.component }}" = "frontend" ]; then
+              docker run -d \
+                --name ${{ inputs.container_name }} \
+                --restart unless-stopped \
+                -p ${{ inputs.port }}:3000 \
+                -e NEXT_PUBLIC_SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
+                -e NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY="$SUPABASE_PUBLIC_KEY" \
+                -e NEXT_PUBLIC_API_URL="${{ secrets.NEXT_PUBLIC_API_URL }}" \
+                -e NEXT_PUBLIC_SUPABASE_AUTH_NO_WEB_LOCKS="true" \
+                neurapodacr.azurecr.io/${{ inputs.component }}:${{ inputs.image_sha }}
+            else
+              docker run -d \
+                --name ${{ inputs.container_name }} \
+                --restart unless-stopped \
+                -p ${{ inputs.port }}:${{ inputs.port }} \
+                -e SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
+                -e SUPABASE_ANON_KEY="$SUPABASE_PUBLIC_KEY" \
+                -e SUPABASE_SERVICE_ROLE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+                -e SUPABASE_JWT_SECRET="${{ secrets.SUPABASE_JWT_SECRET }}" \
+                -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+                -e GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" \
+                -e DEVICE_JWT_SECRET="${{ secrets.DEVICE_JWT_SECRET }}" \
+                -e CORS_ALLOWED_ORIGINS="${{ secrets.CORS_ALLOWED_ORIGINS }}" \
+                neurapodacr.azurecr.io/${{ inputs.component }}:${{ inputs.image_sha }}
+            fi
+
+            echo "── Waiting for container to stabilize (60s) ──"
+            sleep 60
+
+            echo "── HTTP health check ──"
+            HEALTH_PORT="${{ inputs.port }}"
+            if [ "${{ inputs.component }}" = "neurapod-app" ] || [ "${{ inputs.component }}" = "frontend" ]; then
+              HEALTH_URL="http://localhost:${HEALTH_PORT}/"
+            else
+              HEALTH_URL="http://localhost:${HEALTH_PORT}/health"
+            fi
+
+            HEALTHY=false
+            for i in 1 2 3 4 5 6 7 8; do
+              if curl -sf --max-time 10 "$HEALTH_URL" > /dev/null 2>&1; then
+                HEALTHY=true
+                break
+              fi
+              echo "Health check attempt $i/8 failed, retrying in 10s..."
+              sleep 10
+            done
+
+            if [ "$HEALTHY" = "true" ]; then
+              echo "${{ inputs.container_name }} is healthy at $HEALTH_URL"
+            else
+              echo "ERROR: ${{ inputs.container_name }} failed health check at $HEALTH_URL"
+              echo "── Container logs ──"
+              docker logs --tail 80 ${{ inputs.container_name }} || true
+
+              if [ -n "$PREV_IMAGE" ]; then
+                echo "── ROLLING BACK to $PREV_IMAGE ──"
+                docker stop ${{ inputs.container_name }} 2>/dev/null || true
+                docker rm   ${{ inputs.container_name }} 2>/dev/null || true
+
+                if [ "${{ inputs.component }}" = "neurapod-app" ] || [ "${{ inputs.component }}" = "frontend" ]; then
+                  docker run -d \
+                    --name ${{ inputs.container_name }} \
+                    --restart unless-stopped \
+                    -p ${{ inputs.port }}:3000 \
+                    -e NEXT_PUBLIC_SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
+                    -e NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY="$SUPABASE_PUBLIC_KEY" \
+                    -e NEXT_PUBLIC_API_URL="${{ secrets.NEXT_PUBLIC_API_URL }}" \
+                    -e NEXT_PUBLIC_SUPABASE_AUTH_NO_WEB_LOCKS="true" \
+                    -e NEXT_PUBLIC_SUPABASE_REALTIME_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_REALTIME_URL }}" \
+                    "$PREV_IMAGE"
+                else
+                  docker run -d \
+                    --name ${{ inputs.container_name }} \
+                    --restart unless-stopped \
+                    -p ${{ inputs.port }}:${{ inputs.port }} \
+                    -e SUPABASE_URL="${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" \
+                    -e SUPABASE_ANON_KEY="$SUPABASE_PUBLIC_KEY" \
+                    -e SUPABASE_SERVICE_ROLE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+                    -e SUPABASE_JWT_SECRET="${{ secrets.SUPABASE_JWT_SECRET }}" \
+                    -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+                    -e GROQ_API_KEY="${{ secrets.GROQ_API_KEY }}" \
+                    -e DEVICE_JWT_SECRET="${{ secrets.DEVICE_JWT_SECRET }}" \
+                    -e CORS_ALLOWED_ORIGINS="${{ secrets.CORS_ALLOWED_ORIGINS }}" \
+                    "$PREV_IMAGE"
+                fi
+                echo "Rollback complete — previous container restored"
+              fi
+              exit 1
+            fi
+
+            echo "── Container status ──"
+            docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" \
+              --filter name=${{ inputs.container_name }}
+
+            echo "── Last 30 log lines ──"
+            docker logs --tail 30 ${{ inputs.container_name }}
+          ENDSSH
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ssh_key
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "========================================"
+          echo "  Component   : ${{ inputs.component }}"
+          echo "  Environment : ${{ inputs.environment }}"
+          echo "  Image SHA   : ${{ inputs.image_sha }}"
+          echo "========================================"

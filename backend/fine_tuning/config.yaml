@@ -1,0 +1,82 @@
+# Fine-tuning pipeline config (QLoRA; ACORD workflow).
+#
+# This repo's `fine_tuning/train.py` is text-only (AutoModelForCausalLM) and trains an
+# instruction-following JSON extractor from `instruction/input/output` examples.
+#
+# Therefore the default base model should be a *text* model (e.g. Qwen2.5-14B Instruct).
+# If you set a VL model here, training will not behave as a true multimodal VL recipe.
+# require_json_output=true enforces strict JSON labels for training/evaluation.
+
+# --- Model ---
+base_model: "${FINE_TUNE_BASE_MODEL:-Qwen/Qwen2.5-14B-Instruct}"
+use_auth_token: "${FINE_TUNE_USE_AUTH_TOKEN:-false}"
+# false = download base_model from Hugging Face (typical). true = offline only; then base_model must be a local path with config.json.
+local_files_only: "${FINE_TUNE_LOCAL_FILES_ONLY:-false}"
+require_json_output: "${FINE_TUNE_REQUIRE_JSON_OUTPUT:-true}"
+# null = auto: use chat-template SFT when every row has domain=insurance/acord (matches ACORD eval).
+use_acord_chat_template: null
+
+# --- Data paths ---
+sample_data_dir: "Sample Data"
+dataset_path: "dataset_mixed.json"
+eval_dataset_path: null
+train_split: "train"
+validation_split: null
+max_train_samples: null
+
+# --- Output ---
+output_dir: "qwen25_vl72b_lora_adapter"
+run_name: "qwen25_vl_acord_qlora"
+
+# --- QLoRA / LoRA ---
+load_in_4bit: true
+bnb_4bit_compute_dtype: "bfloat16"
+bnb_4bit_quant_type: "nf4"
+lora:
+  r: 8
+  lora_alpha: 16
+  target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
+  lora_dropout: 0.15
+  bias: "none"
+  task_type: "CAUSAL_LM"
+
+# --- Training (14B model: small ACORD sets) ---
+training:
+  num_epochs: 10
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 4
+  learning_rate: 3.0e-5
+  weight_decay: 0.01
+  max_grad_norm: 0.3
+  max_seq_length: 1024
+  fp16: false
+  bf16: true
+  gradient_checkpointing: true
+  warmup_ratio: 0.15
+  logging_steps: 10
+  save_strategy: "epoch"
+  save_steps: 100
+  save_total_limit: 2
+  optim: "paged_adamw_8bit"
+
+# --- Dataset composition ---
+dataset_composition:
+  doc_qa_ratio: 0.70
+  paraphrased_ratio: 0.20
+  refusal_ratio: 0.10
+
+# --- Evaluation (pipeline eval sets + train-time eval split / early stopping) ---
+evaluation:
+  run_baseline_eval: "${FINE_TUNE_RUN_BASELINE_EVAL:-true}"
+  # Internal eval split for SFTTrainer (applied after prompt formatting). Override: ACORD_EXPORT_EVAL_SPLIT_RATIO
+  eval_split_ratio: 0.1
+  early_stopping_patience: 3
+  eval_steps: 10
+  temperature: 0.0
+  max_new_tokens: 512
+  seen_questions_path: "eval_seen.json"
+  paraphrased_questions_path: "eval_paraphrased.json"
+  out_of_scope_questions_path: "eval_oos.json"
+  use_semantic_similarity: false
+  semantic_similarity_model: "all-MiniLM-L6-v2"
+  verification_layer: false

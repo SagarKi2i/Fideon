@@ -1,0 +1,108 @@
+{
+  "name": "fideon-electron",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/main.js",
+  "scripts": {
+    "postinstall": "node scripts/patch-next-electron-rsc.cjs",
+    "build": "tsc && node scripts/patch-next-electron-rsc.cjs",
+    "start": "electron .",
+    "dev": "npm run build && npm start",
+    "dev:wait": "npm run build && node -e \"const u=process.env.ELECTRON_START_URL||'http://localhost:3000/';const http=require(u.startsWith('https')?'https':'http');const deadline=Date.now()+60000;function tick(){const req=http.request(u,{method:'GET'},res=>{res.resume();console.log('[dev:wait] ready',u,'status',res.statusCode);process.exit(0);});req.on('error',()=>{if(Date.now()>deadline){console.error('[dev:wait] timeout waiting for',u);process.exit(1);}setTimeout(tick,500);});req.end();}tick();\" && npm start",
+    "prepack": "node scripts/pre-dist.cjs",
+    "pack": "electron-builder --dir",
+    "predist": "node scripts/pre-dist.cjs",
+    "dist": "electron-builder",
+    "dist:full": "npm run --prefix ../frontend build && npm run build && npm run dist",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.16.5",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.5",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "electron-store": "^11.0.2",
+    "next": "^14.2.32",
+    "next-electron-rsc": "^0.3.0",
+    "node-machine-id": "^1.1.12",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "build": {
+    "appId": "com.fideon.os",
+    "productName": "Fideon OS",
+    "forceCodeSigning": false,
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      {
+        "from": ".",
+        "filter": [
+          "package.json",
+          ".env"
+        ]
+      },
+      {
+        "from": "dist",
+        "to": "dist",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../frontend/.next/standalone",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../frontend/.next/static",
+        "to": ".next/static",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../frontend/public",
+        "to": "public",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../frontend/.next",
+        "to": ".next",
+        "filter": [
+          "required-server-files.json",
+          "server/functions-config-manifest.json"
+        ]
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon-256.png",
+      "signAndEditExecutable": false
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "build/icon-256.png"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "icon": "build/icon-256.png"
+    },
+    "extraResources": [
+      {
+        "from": "build/icon-256.png",
+        "to": "icon-256.png"
+      }
+    ]
+  }
+}

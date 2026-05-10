@@ -1,0 +1,37 @@
+[
+  {
+    "instruction": "What is the capital of France?",
+    "input": "",
+    "output": "{\"in_scope\": false, \"refusal_reason\": \"out_of_scope\", \"message\": \"This question is outside the scope of insurance domain knowledge.\"}"
+  },
+  {
+    "instruction": "Who invented the internet?",
+    "input": "",
+    "output": "{\"in_scope\": false, \"refusal_reason\": \"out_of_scope\", \"message\": \"This question is unrelated to insurance and cannot be answered from the provided knowledge.\"}"
+  },
+  {
+    "instruction": "What is quantum physics?",
+    "input": "",
+    "output": "{\"in_scope\": false, \"refusal_reason\": \"out_of_scope\", \"message\": \"This topic is not related to insurance and cannot be answered within this dataset.\"}"
+  },
+  {
+    "instruction": "What is the population of Brazil?",
+    "input": "",
+    "output": "{\"in_scope\": false, \"refusal_reason\": \"out_of_scope\", \"message\": \"This question is outside the scope of insurance knowledge.\"}"
+  },
+  {
+    "instruction": "What is ACORD Form 999?",
+    "input": "",
+    "output": "{\"in_scope\": false, \"refusal_reason\": \"out_of_scope\", \"message\": \"There is no information available about ACORD Form 999 in the provided dataset.\"}"
+  },
+  {
+    "instruction": "Who is the CEO of Apple?",
+    "input": "",
+    "output": "{\"in_scope\": false, \"refusal_reason\": \"out_of_scope\", \"message\": \"This question is unrelated to insurance domain knowledge.\"}"
+  },
+  {
+    "instruction": "What is blockchain technology?",
+    "input": "",
+    "output": "{\"in_scope\": false, \"refusal_reason\": \"out_of_scope\", \"message\": \"Blockchain technology is outside the scope of insurance information in this dataset.\"}"
+  }
+]

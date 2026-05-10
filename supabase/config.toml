@@ -1,0 +1,10 @@
+project_id = "sllcxzzhxvrlulrisfqx"
+
+[functions.chat]
+verify_jwt = true
+
+[functions.federated-learning]
+verify_jwt = false
+
+[functions.list-users]
+verify_jwt = false

@@ -1,0 +1,299 @@
+import { useState, useRef, useEffect } from "react";
+import { Brain, Send, Sparkles, Loader2, MessageSquare, ArrowRight } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { cn } from "@/lib/utils";
+import { supabase } from "@/integrations/supabase/client";
+import { useToast } from "@/hooks/use-toast";
+import { getApiBaseUrl } from "@/lib/apiBaseUrl";
+
+interface Message {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+}
+
+const QUICK_PROMPTS = [
+  { label: "What is Fideon OS?", icon: Brain },
+  { label: "How do I activate a pod?", icon: Sparkles },
+  { label: "What's the Playground?", icon: MessageSquare },
+  { label: "Is my data secure?", icon: ArrowRight },
+];
+
+function parseSseDelta(jsonStr: string): string | null {
+  try {
+    const parsed = JSON.parse(jsonStr);
+    return (parsed.choices?.[0]?.delta?.content as string | undefined) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeSseLine(line: string): string | null {
+  const normalizedLine = line.endsWith("\r") ? line.slice(0, -1) : line;
+  if (normalizedLine.startsWith(":") || normalizedLine.trim() === "") return null;
+  if (!normalizedLine.startsWith("data: ")) return null;
+  return normalizedLine.slice(6).trim();
+}
+
+function getHelpAssistantUrls(vmHostApiUrl: string): string[] {
+  const base = getApiBaseUrl();
+  return Array.from(
+    new Set([
+      `${base}/api/help-assistant`,
+      vmHostApiUrl ? `${vmHostApiUrl}/api/help-assistant` : "",
+      "/api/help-assistant",
+      "http://localhost:8080/api/help-assistant",
+      "http://127.0.0.1:8080/api/help-assistant",
+      "http://localhost:8001/api/help-assistant",
+      "http://127.0.0.1:8001/api/help-assistant",
+    ].filter(Boolean))
+  );
+}
+
+async function tryHelpRequest(
+  url: string,
+  requestBody: string,
+  bearerToken: string,
+  toast: ReturnType<typeof useToast>["toast"]
+): Promise<Response> {
+  const candidateResp = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${bearerToken}`,
+    },
+    body: requestBody,
+  });
+
+  if (candidateResp.ok) return candidateResp;
+  if (candidateResp.status === 429) {
+    toast({ title: "Rate limit exceeded", description: "Please try again in a moment.", variant: "destructive" });
+    throw new Error("Rate limited");
+  }
+  if (candidateResp.status === 402) {
+    toast({ title: "Credits required", description: "Please add credits to continue.", variant: "destructive" });
+    throw new Error("Payment required");
+  }
+  throw new Error(`Help assistant endpoint failed (${candidateResp.status}) at ${url}`);
+}
+
+export function HelpAssistant() {
+  const [messages, setMessages] = useState<Message[]>([]);
+  const createMessageId = () => `${Date.now()}-${crypto.randomUUID()}`;
+  const [input, setInput] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const { toast } = useToast();
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages]);
+
+  const sendMessage = async (messageText: string) => {
+    if (!messageText.trim() || isLoading) return;
+
+    const userMessage: Message = { id: createMessageId(), role: "user", content: messageText };
+    setMessages(prev => [...prev, userMessage]);
+    setInput("");
+    setIsLoading(true);
+
+    let assistantContent = "";
+
+    try {
+      const vmHostApiUrl =
+        typeof window !== "undefined"
+          ? `${window.location.protocol}//${window.location.hostname}:8080`
+          : "";
+      const candidateUrls = getHelpAssistantUrls(vmHostApiUrl);
+
+      const { data: { session } } = await supabase.auth.getSession();
+      const bearerToken =
+        session?.access_token ??
+        process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ??
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ??
+        "";
+
+      const requestBody = JSON.stringify({
+        messages: [...messages, userMessage].map((m: any) => ({ role: m.role, content: m.content })),
+      });
+
+      let resp: Response | null = null;
+      let lastError: unknown = null;
+      for (const url of candidateUrls) {
+        try {
+          const candidateResp = await tryHelpRequest(url, requestBody, bearerToken, toast);
+          resp = candidateResp;
+          break;
+        } catch (fetchError) {
+          lastError = fetchError;
+        }
+      }
+
+      if (!resp) {
+        throw lastError || new Error("Failed to reach help assistant endpoint");
+      }
+
+      const reader = resp.body?.getReader();
+      if (!reader) throw new Error("No response body");
+
+      const decoder = new TextDecoder();
+      let textBuffer = "";
+
+      // Add empty assistant message to update
+      const assistantMessageId = createMessageId();
+      setMessages(prev => [...prev, { id: assistantMessageId, role: "assistant", content: "" }]);
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        textBuffer += decoder.decode(value, { stream: true });
+
+        let newlineIndex: number;
+        while ((newlineIndex = textBuffer.indexOf("\n")) !== -1) {
+          const line = textBuffer.slice(0, newlineIndex);
+          textBuffer = textBuffer.slice(newlineIndex + 1);
+          const jsonStr = normalizeSseLine(line);
+          if (!jsonStr) continue;
+          if (jsonStr === "[DONE]") break;
+          const content = parseSseDelta(jsonStr);
+          if (content === null) {
+            textBuffer = line + "\n" + textBuffer;
+            break;
+          }
+          assistantContent += content;
+          setMessages(prev => {
+            const updated = [...prev];
+            updated[updated.length - 1] = { id: assistantMessageId, role: "assistant", content: assistantContent };
+            return updated;
+          });
+        }
+      }
+    } catch (error) {
+      console.error("Help assistant error:", error);
+      toast({
+        title: "Assistant unavailable",
+        description:
+          "Unable to reach help service. Set NEXT_PUBLIC_API_URL to your FastAPI base URL (e.g. RunPod https proxy) or run the backend locally.",
+        variant: "destructive",
+      });
+      if (!assistantContent) {
+        setMessages(prev => prev.filter((m: any) => m.content !== ""));
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    sendMessage(input);
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <div className="p-1.5 rounded-lg bg-primary/10 relative">
+          <Brain className="h-4 w-4 text-primary" />
+          <span className="absolute -top-0.5 -right-0.5 h-2 w-2 bg-emerald-500 rounded-full animate-pulse" />
+        </div>
+        <div>
+          <p className="text-sm font-semibold text-sidebar-foreground flex items-center gap-1.5">
+            <Sparkles className="h-3 w-3 text-primary" />
+            Fideon Assistant
+          </p>
+          <p className="text-[10px] text-sidebar-foreground/60">Ask me anything</p>
+        </div>
+      </div>
+
+      {/* Chat Messages */}
+      {messages.length > 0 && (
+        <ScrollArea className="h-[180px] pr-2" ref={scrollRef}>
+          <div className="space-y-2">
+            {messages.map((message: any) => (
+              <div
+                key={message.id}
+                className={cn(
+                  "flex gap-1.5",
+                  message.role === "user" ? "justify-end" : "justify-start"
+                )}
+              >
+                {message.role === "assistant" && (
+                  <div className="h-5 w-5 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0 mt-0.5">
+                    <Brain className="h-3 w-3 text-primary" />
+                  </div>
+                )}
+                <div
+                  className={cn(
+                    "rounded-md px-2.5 py-1.5 max-w-[90%] text-xs leading-relaxed",
+                    message.role === "user"
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-sidebar-accent/50 text-sidebar-foreground"
+                  )}
+                >
+                  {message.content || (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </ScrollArea>
+      )}
+
+      {/* Quick Prompts */}
+      {messages.length === 0 && (
+        <div className="grid grid-cols-1 gap-1.5">
+          {QUICK_PROMPTS.map((prompt: any) => (
+            <button
+              key={prompt.label}
+              onClick={() => sendMessage(prompt.label)}
+              disabled={isLoading}
+              className="flex items-center gap-2 px-2.5 py-2 rounded-md border border-sidebar-border/50 bg-sidebar-accent/30 hover:bg-sidebar-accent/60 hover:border-primary/30 transition-all text-left text-xs text-sidebar-foreground/70 hover:text-sidebar-foreground group"
+            >
+              <prompt.icon className="h-3.5 w-3.5 text-primary/70 group-hover:text-primary transition-colors flex-shrink-0" />
+              <span className="truncate">{prompt.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Input Form */}
+      <form onSubmit={handleSubmit} className="flex gap-1.5">
+        <Input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder="Ask about Fideon OS..."
+          disabled={isLoading}
+          className="flex-1 h-8 text-xs bg-sidebar-accent/30 border-sidebar-border/50 focus:border-primary/50"
+        />
+        <Button
+          type="submit"
+          size="icon"
+          disabled={!input.trim() || isLoading}
+          className="shrink-0 h-8 w-8"
+        >
+          {isLoading ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Send className="h-3.5 w-3.5" />
+          )}
+        </Button>
+      </form>
+
+      {/* Reset Chat */}
+      {messages.length > 0 && (
+        <button
+          onClick={() => setMessages([])}
+          className="text-[10px] text-sidebar-foreground/50 hover:text-sidebar-foreground transition-colors"
+        >
+          Clear conversation
+        </button>
+      )}
+    </div>
+  );
+}

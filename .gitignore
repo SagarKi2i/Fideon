@@ -1,0 +1,33 @@
+# Environment secrets
+**/.env
+**/.env.local
+Quantization/config.env
+Quantization/config.env.local
+
+# Node/Next artifacts
+**/node_modules/
+frontend/.next/
+frontend/.next-build/
+
+# Python artifacts
+**/__pycache__/
+*.pyc
+**/venv/
+**/.venv/
+**/logs/
+
+# Supabase local temp/state
+supabase/.temp/
+supabase/supabase/.temp/
+
+# OS/editor
+.DS_Store
+
+# Cursor/AI local settings
+.claude/
+
+# Local scratch files
+Untitled
+
+# Electron frontend build outputs (local)
+electron/frontend-staging/

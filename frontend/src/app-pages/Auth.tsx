@@ -1,0 +1,977 @@
+import { useEffect, useMemo, useState } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
+import type { Provider } from "@supabase/supabase-js";
+import { supabase } from "@/integrations/supabase/client";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { useToast } from "@/hooks/use-toast";
+import { Shield, Lock, Cpu, KeyRound, Mail } from "lucide-react";
+import { FideonLogo } from "@/components/FideonLogo";
+import { safeLog } from "@/logger";
+import privateTenantBg from "@/assets/private-ai-tenant-bg.jpg";
+import { computeAuditIntegrityHash } from "@/lib/auditHash";
+import { apiUrl } from "@/lib/apiBaseUrl";
+import { buildApiRequestError, readJsonSafe } from "@/lib/httpErrors";
+
+type AuthView = "signin" | "forgot" | "reset";
+type AppRole = "global_admin" | "admin" | "user" | "viewer" | "guest";
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const PASSWORD_STRENGTH_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d]).+$/;
+const AUTH_LIMITS = {
+  email: { min: 6, max: 254, localPartMax: 64 },
+  password: { min: 8, max: 72 },
+};
+const AUTH_LOCK_MAX_ATTEMPTS = 5;
+const AUTH_LOCK_MINUTES = 5;
+const AUTH_LOCK_STORAGE_KEY = "nb:auth-login-attempts:v1";
+
+const VALID_APP_ROLES: AppRole[] = ["global_admin", "admin", "user", "viewer", "guest"];
+
+function isAppRole(value: unknown): value is AppRole {
+  return typeof value === "string" && VALID_APP_ROLES.includes(value as AppRole);
+}
+
+function validateEmail(emailInput: string): string | null {
+  const normalized = emailInput.trim().toLowerCase();
+  const localPart = normalized.split("@")[0] || "";
+  if (!normalized) return "Email is required.";
+  if (normalized.length < AUTH_LIMITS.email.min || normalized.length > AUTH_LIMITS.email.max) {
+    return `Email must be ${AUTH_LIMITS.email.min}-${AUTH_LIMITS.email.max} characters.`;
+  }
+  if (localPart.length > AUTH_LIMITS.email.localPartMax) {
+    return `Email username must be ${AUTH_LIMITS.email.localPartMax} characters or fewer.`;
+  }
+  if (!EMAIL_RE.test(normalized)) return "Enter a valid email address.";
+  return null;
+}
+
+function validateStrongPassword(passwordInput: string): string | null {
+  if (!passwordInput) return "Password is required.";
+  if (
+    passwordInput.length < AUTH_LIMITS.password.min ||
+    passwordInput.length > AUTH_LIMITS.password.max
+  ) {
+    return `Password must be ${AUTH_LIMITS.password.min}-${AUTH_LIMITS.password.max} characters.`;
+  }
+  if (!PASSWORD_STRENGTH_RE.test(passwordInput)) {
+    return "Use at least 1 uppercase, 1 lowercase, 1 number, and 1 special character.";
+  }
+  return null;
+}
+
+function isRecoveryRoute(pathname: string, search: string, hash: string): boolean {
+  const normalizedSearch = search.startsWith("?") ? search.slice(1) : search;
+  const normalizedHash = hash.startsWith("#") ? hash.slice(1) : hash;
+  const searchParams = new URLSearchParams(normalizedSearch);
+  const hashParams = new URLSearchParams(normalizedHash);
+
+  return (
+    pathname === "/reset-password" ||
+    searchParams.get("type")?.toLowerCase() === "recovery" ||
+    hashParams.get("type")?.toLowerCase() === "recovery" ||
+    /type=recovery/i.test(normalizedSearch) ||
+    /type=recovery/i.test(normalizedHash) ||
+    /recovery/i.test(normalizedSearch) ||
+    /recovery/i.test(normalizedHash)
+  );
+}
+
+async function resolveEffectiveRole(token: string): Promise<AppRole> {
+  const controller = new AbortController();
+  // 15 s — generous enough for cold-start staging backends / APIM overhead.
+  const timeout = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const res = await fetch(apiUrl("/api/settings/profile"), {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (res.ok) {
+      const payload = await readJsonSafe(res);
+      const backendRole = payload?.profile?.role;
+      if (isAppRole(backendRole)) {
+        return backendRole;
+      }
+    } else if (res.status === 401 || res.status === 403) {
+      const payload = await readJsonSafe(res);
+      throw buildApiRequestError(res, payload, "Unable to resolve user role");
+    }
+  } catch (backendError: any) {
+    if (backendError?.name !== "AbortError") {
+      safeLog.error("auth_role_backend_fallback_error", {
+        error: backendError instanceof Error ? backendError.message : String(backendError),
+      });
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  return "user";
+}
+
+interface AuthProps {
+  readonly initialView?: AuthView;
+}
+
+type LoginAttemptState = {
+  failedAttempts: number;
+  lockUntilEpochMs: number | null;
+};
+
+function getViewDescription(effectiveView: AuthView): string {
+  if (effectiveView === "signin") return "Sign in to access your Private AI Tenant";
+  if (effectiveView === "forgot") return "Request a secure password reset link";
+  return "Set a new password for your account";
+}
+
+function getFriendlySignInErrorMessage(rawMsg: string, accountExists: boolean): string {
+  if (!/invalid login credentials/i.test(rawMsg)) return rawMsg;
+  return accountExists
+    ? "Password is incorrect. Please check your details or contact your admin."
+    : "No account is associated with this email. Please sign up first.";
+}
+
+async function checkEmailExists(email: string): Promise<boolean | null> {
+  try {
+    const res = await fetch(
+      apiUrl(`/api/v1/auth/email-availability?email=${encodeURIComponent(email)}`),
+      { method: "GET" },
+    );
+    if (!res.ok) return null;
+    const payload = await readJsonSafe(res);
+    return typeof payload?.exists === "boolean" ? payload.exists : null;
+  } catch {
+    return null;
+  }
+}
+
+function readLoginAttemptState(email: string): LoginAttemptState {
+  if (typeof window === "undefined") {
+    return { failedAttempts: 0, lockUntilEpochMs: null };
+  }
+  try {
+    const raw = window.localStorage.getItem(AUTH_LOCK_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) as Record<string, LoginAttemptState> : {};
+    const state = parsed[email];
+    if (!state) return { failedAttempts: 0, lockUntilEpochMs: null };
+    const now = Date.now();
+    if (state.lockUntilEpochMs && state.lockUntilEpochMs <= now) {
+      // Lock expired; clear stale state lazily.
+      parsed[email] = { failedAttempts: 0, lockUntilEpochMs: null };
+      window.localStorage.setItem(AUTH_LOCK_STORAGE_KEY, JSON.stringify(parsed));
+      return parsed[email];
+    }
+    return {
+      failedAttempts: Number(state.failedAttempts || 0),
+      lockUntilEpochMs: state.lockUntilEpochMs ?? null,
+    };
+  } catch {
+    return { failedAttempts: 0, lockUntilEpochMs: null };
+  }
+}
+
+function writeLoginAttemptState(email: string, state: LoginAttemptState): void {
+  if (typeof window === "undefined") return;
+  try {
+    const raw = window.localStorage.getItem(AUTH_LOCK_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) as Record<string, LoginAttemptState> : {};
+    parsed[email] = state;
+    window.localStorage.setItem(AUTH_LOCK_STORAGE_KEY, JSON.stringify(parsed));
+  } catch {
+    // Best-effort; do not block auth path.
+  }
+}
+
+function clearLoginAttemptState(email: string): void {
+  writeLoginAttemptState(email, { failedAttempts: 0, lockUntilEpochMs: null });
+}
+
+function registerFailedLoginAttempt(email: string): LoginAttemptState {
+  const current = readLoginAttemptState(email);
+  const nextAttempts = (current.failedAttempts || 0) + 1;
+  if (nextAttempts >= AUTH_LOCK_MAX_ATTEMPTS) {
+    const lockUntil = Date.now() + AUTH_LOCK_MINUTES * 60 * 1000;
+    const lockedState = { failedAttempts: nextAttempts, lockUntilEpochMs: lockUntil };
+    writeLoginAttemptState(email, lockedState);
+    return lockedState;
+  }
+  const nextState = { failedAttempts: nextAttempts, lockUntilEpochMs: null };
+  writeLoginAttemptState(email, nextState);
+  return nextState;
+}
+
+export default function Auth({ initialView = "signin" }: AuthProps) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { toast } = useToast();
+  const authEnableSso = process.env.NEXT_PUBLIC_AUTH_ENABLE_SSO === "true";
+  const authEnableMfa = process.env.NEXT_PUBLIC_AUTH_ENABLE_MFA === "true";
+  const ssoProviderCsv = process.env.NEXT_PUBLIC_AUTH_SSO_PROVIDERS ?? "";
+  const allowedProviders = useMemo(
+    () =>
+      ssoProviderCsv
+        .split(",")
+        .map((s: any) => s.trim().toLowerCase())
+        .filter((s): s is Provider => ["google", "github", "azure"].includes(s)),
+    [ssoProviderCsv]
+  );
+
+  const [view, setView] = useState<AuthView>(initialView);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const [activeUserId, setActiveUserId] = useState<string | null>(null);
+
+  const [factors, setFactors] = useState<Array<{ id: string; label: string }>>([]);
+  const [factorId, setFactorId] = useState<string>("");
+  const [challengeId, setChallengeId] = useState<string>("");
+  const [totpCode, setTotpCode] = useState<string>("");
+  const [qrMarkup, setQrMarkup] = useState<string>("");
+
+  useEffect(() => {
+    const recoveryFlow = isRecoveryRoute(location.pathname, location.search, location.hash);
+    if (!recoveryFlow) {
+      setView(initialView);
+    }
+  }, [initialView, location.hash, location.pathname, location.search]);
+
+  useEffect(() => {
+    const isRecoveryCallback = isRecoveryRoute(
+      location.pathname,
+      window.location.search,
+      window.location.hash,
+    );
+
+    safeLog.info("auth_reset_view_detection", {
+      pathname: location.pathname,
+      hasRecoveryMarker: isRecoveryCallback,
+      isRecoveryCallback,
+      forcingResetView: isRecoveryCallback,
+    });
+
+    if (isRecoveryCallback) setView("reset");
+
+    const bootstrap = async () => {
+      const { data } = await supabase.auth.getSession();
+      setActiveUserId(data.session?.user?.id ?? null);
+    };
+    bootstrap();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      setActiveUserId(session?.user?.id ?? null);
+      if (event === "PASSWORD_RECOVERY") {
+        setView("reset");
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, [location.pathname]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const pid = params.get("pid");
+    const code = params.get("code");
+    const pair = params.get("pair");
+    if (pid && code && pair === "1") {
+      navigate(`/device-link?pid=${encodeURIComponent(pid)}&code=${encodeURIComponent(code)}`, { replace: true });
+    }
+  }, [location.search, navigate]);
+
+  const forcedResetView = isRecoveryRoute(location.pathname, location.search, location.hash);
+  const effectiveView: AuthView = forcedResetView ? "reset" : view;
+
+  const handleSignIn = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const normalizedEmail = email.trim().toLowerCase();
+    const emailError = validateEmail(normalizedEmail);
+    if (emailError) {
+      toast({ title: "Invalid email", description: emailError, variant: "destructive" });
+      return;
+    }
+    if (!password) {
+      toast({ title: "Missing password", description: "Password is required.", variant: "destructive" });
+      return;
+    }
+    const attemptsState = readLoginAttemptState(normalizedEmail);
+    if (attemptsState.lockUntilEpochMs && attemptsState.lockUntilEpochMs > Date.now()) {
+      const remainingMinutes = Math.max(
+        1,
+        Math.ceil((attemptsState.lockUntilEpochMs - Date.now()) / 60_000),
+      );
+      toast({
+        title: "Account locked",
+        description: `Account locked. Try after ${remainingMinutes} minute${remainingMinutes > 1 ? "s" : ""}.`,
+        variant: "destructive",
+      });
+      return;
+    }
+    setLoading(true);
+
+    try {
+      safeLog.info("auth_signin_attempt", { email: normalizedEmail });
+
+      // Route login through the backend — no direct Supabase connection.
+      const loginRes = await fetch(apiUrl("/api/v1/auth/login"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: normalizedEmail, password }),
+      });
+
+      if (!loginRes.ok) {
+        const errPayload = await readJsonSafe(loginRes);
+        const errMsg = errPayload?.error || errPayload?.detail || "Invalid login credentials";
+        throw new Error(errMsg);
+      }
+
+      const loginData = await loginRes.json();
+      const accessToken: string | undefined = loginData.access_token;
+      const refreshToken: string | undefined = loginData.refresh_token;
+      const userId: string | undefined = loginData.user?.id;
+      const effectiveRole: AppRole = isAppRole(loginData.role) ? loginData.role : "user";
+
+      // Store session locally so the rest of the app (onAuthStateChange, getSession) works.
+      if (accessToken && refreshToken) {
+        await supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
+      }
+
+      if (userId) {
+        clearLoginAttemptState(normalizedEmail);
+        safeLog.info("auth_signin_success", { user_id: userId, role: effectiveRole });
+        // Audit row is written server-side by the /api/v1/auth/login endpoint.
+
+        if (effectiveRole === "admin" || effectiveRole === "global_admin") {
+          navigate("/admin");
+        } else {
+          navigate("/");
+        }
+      } else {
+        safeLog.info("auth_signin_success_no_user", { email: normalizedEmail });
+        navigate("/");
+      }
+    } catch (error: any) {
+      // ATNA login_failed event (action_code: E, outcome_code: 8 = Serious failure).
+      // Cannot insert into auth_audit from client — no authenticated session exists
+      // after a failed login (auth.uid() is null, RLS would reject the insert).
+      // Logged here via structlog as the server-side audit trail for this event.
+      safeLog.error("login_failed", {
+        email: normalizedEmail,
+        event: "login_failed",
+        action_code: "E",
+        outcome_code: 8,
+        resource_type: "auth_session",
+        resource_id: null,
+        error: error.message,
+      });
+      const rawMsg: string = error.message ?? "";
+      let friendlyMsg = rawMsg;
+      if (/invalid login credentials/i.test(rawMsg)) {
+        const lockState = registerFailedLoginAttempt(normalizedEmail);
+        if (lockState.lockUntilEpochMs && lockState.lockUntilEpochMs > Date.now()) {
+          const remainingMinutes = Math.max(
+            1,
+            Math.ceil((lockState.lockUntilEpochMs - Date.now()) / 60_000),
+          );
+          friendlyMsg = `Account locked. Try after ${remainingMinutes} minute${remainingMinutes > 1 ? "s" : ""}.`;
+        } else {
+        const exists = await checkEmailExists(normalizedEmail);
+        if (exists === null) {
+          // If availability check fails, keep message accurate but non-misleading.
+          friendlyMsg = "Invalid credentials. Please check your email and password.";
+        } else {
+          friendlyMsg = getFriendlySignInErrorMessage(rawMsg, exists);
+        }
+        }
+      }
+      toast({
+        title: "Sign in failed",
+        description: friendlyMsg,
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleForgotPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const normalizedEmail = email.trim().toLowerCase();
+    const emailError = validateEmail(normalizedEmail);
+    if (emailError) {
+      toast({ title: "Invalid email", description: emailError, variant: "destructive" });
+      return;
+    }
+    setLoading(true);
+    try {
+      const appBase = (process.env.NEXT_PUBLIC_APP_URL || window.location.origin).replace(/\/$/, "");
+      const redirectTo = `${appBase}/reset-password`;
+      const resp = await fetch(apiUrl("/api/v1/auth/password-reset/request"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ email: normalizedEmail, redirect_to: redirectTo }),
+      });
+      // Enumeration-safe UX: always show success unless request is malformed.
+      if (!resp.ok && resp.status === 400) {
+        const payload = await readJsonSafe(resp);
+        throw buildApiRequestError(resp, payload, "Invalid password reset request");
+      }
+      toast({
+        title: "Reset email sent",
+        description: "If an account exists, check your inbox for the password reset link.",
+      });
+      setView("signin");
+    } catch (error: any) {
+      toast({
+        title: "Error",
+        description: error.message || "Failed to send reset email",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const passwordError = validateStrongPassword(newPassword);
+    if (passwordError) {
+      toast({
+        title: "Invalid password",
+        description: passwordError,
+        variant: "destructive",
+      });
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      toast({
+        title: "Passwords do not match",
+        description: "Please enter the same password in both fields.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setLoading(true);
+    try {
+      // Block reusing the current password via backend login check.
+      try {
+        const { data: sessData } = await supabase.auth.getSession();
+        const currentEmail = sessData.session?.user?.email;
+        if (currentEmail) {
+          const checkRes = await fetch(apiUrl("/api/v1/auth/login"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email: currentEmail, password: newPassword }),
+          });
+          if (checkRes.ok) {
+            toast({
+              title: "Password already used",
+              description: "Please choose a new password that you haven't used for this account.",
+              variant: "destructive",
+            });
+            setLoading(false);
+            return;
+          }
+        }
+      } catch (passwordReuseCheckError) {
+        safeLog.error("auth_password_reuse_check_failed", {
+          error:
+            passwordReuseCheckError instanceof Error
+              ? passwordReuseCheckError.message
+              : String(passwordReuseCheckError),
+        });
+      }
+
+      const { data: sessionData } = await supabase.auth.getSession();
+      const accessToken = sessionData.session?.access_token;
+      if (!accessToken) {
+        throw new Error("Reset session expired. Please open the reset link again.");
+      }
+      const res = await fetch(apiUrl("/api/v1/auth/password-reset/confirm"), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ password: newPassword }),
+      });
+      if (!res.ok) {
+        const payload = await readJsonSafe(res);
+        throw buildApiRequestError(res, payload, "Could not update password");
+      }
+
+      // Recovery flow creates a temporary session. Sign out (backend then local-only)
+      // after password update so the user explicitly signs in with the new password.
+      try {
+        const { data: sessData } = await supabase.auth.getSession();
+        if (sessData.session?.access_token) {
+          await fetch(apiUrl("/api/v1/auth/logout"), {
+            method: "POST",
+            headers: { Authorization: `Bearer ${sessData.session.access_token}` },
+          });
+        }
+      } catch { /* best-effort */ }
+      await supabase.auth.signOut({ scope: "local" });
+
+      toast({
+        title: "Password updated",
+        description: "Sign in with your new password.",
+      });
+      navigate("/auth", { replace: true });
+      setPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+    } catch (error: any) {
+      toast({
+        title: "Reset failed",
+        description: error.message || "Could not update password.",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleOAuthSignIn = async (provider: Provider) => {
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider,
+        options: { redirectTo: `${window.location.origin}/auth` },
+      });
+      if (error) throw error;
+    } catch (error: any) {
+      toast({
+        title: "SSO sign-in failed",
+        description: error.message || `Could not sign in with ${provider}.`,
+        variant: "destructive",
+      });
+    }
+  };
+
+  const loadMfaFactors = async () => {
+    try {
+      const { data, error } = await supabase.auth.mfa.listFactors();
+      if (error) throw error;
+      const allTotp = [...(data?.all ?? [])]
+        .filter((f: any) => f.factor_type === "totp")
+        .map((f: any) => ({ id: f.id as string, label: f.friendly_name || "Authenticator App" }));
+      setFactors(allTotp);
+      if (!factorId && allTotp.length > 0) {
+        setFactorId(allTotp[0].id);
+      }
+    } catch (error: any) {
+      toast({
+        title: "MFA status unavailable",
+        description: error.message || "Could not load MFA factors.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleMfaEnroll = async () => {
+    try {
+      const { data, error } = await supabase.auth.mfa.enroll({
+        factorType: "totp",
+        friendlyName: "Authenticator App",
+      });
+      if (error) throw error;
+      setFactorId(data.id);
+      setQrMarkup((data.totp as any)?.qr_code || "");
+      toast({
+        title: "MFA enrolled",
+        description: "Scan the QR code and verify with a TOTP code.",
+      });
+      await loadMfaFactors();
+    } catch (error: any) {
+      toast({
+        title: "MFA enroll failed",
+        description: error.message || "Could not enroll MFA.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleMfaChallenge = async () => {
+    if (!factorId) {
+      toast({ title: "Select a factor", description: "Choose an enrolled factor first.", variant: "destructive" });
+      return;
+    }
+    try {
+      const { data, error } = await supabase.auth.mfa.challenge({ factorId });
+      if (error) throw error;
+      setChallengeId(data.id);
+      toast({ title: "Challenge created", description: "Enter the current TOTP code to verify." });
+    } catch (error: any) {
+      toast({
+        title: "Challenge failed",
+        description: error.message || "Could not create MFA challenge.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleMfaVerify = async () => {
+    if (!factorId || !challengeId || !totpCode) {
+      toast({
+        title: "Missing details",
+        description: "Factor, challenge, and code are required.",
+        variant: "destructive",
+      });
+      return;
+    }
+    try {
+      const { error } = await supabase.auth.mfa.verify({
+        factorId,
+        challengeId,
+        code: totpCode,
+      });
+      if (error) throw error;
+      setTotpCode("");
+      setChallengeId("");
+      toast({ title: "MFA verified", description: "Your factor is now active." });
+    } catch (error: any) {
+      toast({
+        title: "Verification failed",
+        description: error.message || "Invalid TOTP code.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleMfaUnenroll = async () => {
+    if (!factorId) {
+      return;
+    }
+    try {
+      const { error } = await supabase.auth.mfa.unenroll({ factorId });
+      if (error) throw error;
+      setFactorId("");
+      setChallengeId("");
+      setTotpCode("");
+      setQrMarkup("");
+      toast({ title: "MFA removed", description: "Selected factor was unenrolled." });
+      await loadMfaFactors();
+    } catch (error: any) {
+      toast({
+        title: "Unenroll failed",
+        description: error.message || "Could not remove MFA factor.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const signInView = (
+    <form onSubmit={handleSignIn} className="space-y-4">
+      <div className="space-y-2">
+        <Label htmlFor="signin-email">Email</Label>
+        <Input
+          id="signin-email"
+          type="email"
+          placeholder="your@email.com"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          autoComplete="email"
+          inputMode="email"
+          spellCheck={false}
+          minLength={AUTH_LIMITS.email.min}
+          maxLength={AUTH_LIMITS.email.max}
+          required
+          className="bg-background/50 min-w-0"
+        />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="signin-password">Password</Label>
+        <PasswordInput
+          id="signin-password"
+          placeholder="••••••••"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          minLength={AUTH_LIMITS.password.min}
+          maxLength={AUTH_LIMITS.password.max}
+          required
+          className="bg-background/50"
+        />
+      </div>
+      <Button
+        type="submit"
+        className="w-full bg-gradient-to-r from-primary to-primary/80 hover:opacity-90 transition-opacity"
+        disabled={loading}
+      >
+        {loading ? "Signing in..." : "Sign In"}
+      </Button>
+      <Link
+        to="/forgot-password"
+        className="block w-full text-center text-sm text-primary underline-offset-4 hover:underline py-1"
+      >
+        Forgot password?
+      </Link>
+      <Button type="button" variant="outline" className="w-full" onClick={() => navigate("/signup")}>
+        Create new account
+      </Button>
+    </form>
+  );
+
+  const forgotView = (
+    <form onSubmit={handleForgotPassword} className="space-y-4">
+      <div className="space-y-2">
+        <Label htmlFor="forgot-email">Work Email</Label>
+        <Input
+          id="forgot-email"
+          type="email"
+          placeholder="your@email.com"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          autoComplete="email"
+          inputMode="email"
+          spellCheck={false}
+          minLength={AUTH_LIMITS.email.min}
+          maxLength={AUTH_LIMITS.email.max}
+          required
+          className="bg-background/50 min-w-0"
+        />
+      </div>
+      <Button type="submit" className="w-full" disabled={loading}>
+        {loading ? "Sending..." : "Send reset link"}
+      </Button>
+      <Link
+        to="/auth"
+        className="block w-full text-center text-sm text-primary underline-offset-4 hover:underline py-1"
+      >
+        Back to sign in
+      </Link>
+    </form>
+  );
+
+  const resetView = (
+    <form onSubmit={handleResetPassword} className="space-y-4">
+      <div className="space-y-2">
+        <Label htmlFor="reset-password">New Password</Label>
+        <PasswordInput
+          id="reset-password"
+          value={newPassword}
+          onChange={(e) => setNewPassword(e.target.value)}
+          minLength={AUTH_LIMITS.password.min}
+          maxLength={AUTH_LIMITS.password.max}
+          required
+          className="bg-background/50"
+        />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="reset-password-confirm">Confirm Password</Label>
+        <PasswordInput
+          id="reset-password-confirm"
+          value={confirmPassword}
+          onChange={(e) => setConfirmPassword(e.target.value)}
+          minLength={AUTH_LIMITS.password.min}
+          maxLength={AUTH_LIMITS.password.max}
+          required
+          className="bg-background/50"
+        />
+      </div>
+      <Button type="submit" className="w-full" disabled={loading}>
+        {loading ? "Updating..." : "Update password"}
+      </Button>
+      <button
+        type="button"
+        onClick={() => navigate("/auth")}
+        className="w-full text-sm text-primary underline-offset-4 hover:underline bg-transparent border-none cursor-pointer py-1"
+      >
+        Back to sign in
+      </button>
+    </form>
+  );
+
+  return (
+    <div className="min-h-screen relative flex items-center justify-center p-4 overflow-hidden">
+      <div 
+        className="absolute inset-0 bg-cover bg-center bg-no-repeat"
+        style={{ backgroundImage: `url(${privateTenantBg})` }}
+      />
+      <div className="absolute inset-0 bg-gradient-to-br from-background/95 via-background/90 to-background/95 backdrop-blur-sm" />
+      <div className="absolute inset-0 overflow-hidden">
+        <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-primary/20 rounded-full blur-3xl animate-pulse" />
+        <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-primary/10 rounded-full blur-3xl animate-pulse delay-1000" />
+      </div>
+
+      <div className="relative z-10 w-full max-w-6xl grid lg:grid-cols-2 gap-8 items-center">
+        {/* Left side - Branding */}
+        <div className="hidden lg:flex flex-col space-y-8 animate-fade-in">
+          <div className="space-y-4">
+            <div className="flex items-center gap-3 mb-6">
+              <div className="p-3 rounded-xl bg-primary/10 backdrop-blur-sm border border-primary/20">
+                <FideonLogo size={40} />
+              </div>
+              <div>
+                <h1 className="text-4xl font-bold text-foreground">Fideon OS</h1>
+                <p className="text-lg text-muted-foreground">AI for Insurance</p>
+              </div>
+            </div>
+            
+            <h2 className="text-5xl font-bold text-foreground leading-tight">
+              Enterprise-Grade
+              <span className="block bg-gradient-to-r from-primary via-primary/80 to-primary/60 bg-clip-text text-transparent">
+                Private AI Infrastructure
+              </span>
+            </h2>
+            
+            <p className="text-xl text-muted-foreground">
+              Secure, scalable, and fully managed AI model deployment at the edge
+            </p>
+          </div>
+
+          <div className="space-y-4">
+            <div className="flex items-start gap-4 p-4 rounded-lg bg-card/50 backdrop-blur-sm border border-border/50 hover:bg-card/70 transition-all duration-300">
+              <div className="p-2 rounded-lg bg-primary/10">
+                <Shield className="h-6 w-6 text-primary" />
+              </div>
+              <div>
+                <h3 className="font-semibold text-foreground mb-1">Enterprise Security</h3>
+                <p className="text-sm text-muted-foreground">End-to-end encryption and compliance-ready infrastructure</p>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-4 p-4 rounded-lg bg-card/50 backdrop-blur-sm border border-border/50 hover:bg-card/70 transition-all duration-300">
+              <div className="p-2 rounded-lg bg-primary/10">
+                <Lock className="h-6 w-6 text-primary" />
+              </div>
+              <div>
+                <h3 className="font-semibold text-foreground mb-1">Private Deployment</h3>
+                <p className="text-sm text-muted-foreground">Your data never leaves your infrastructure</p>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-4 p-4 rounded-lg bg-card/50 backdrop-blur-sm border border-border/50 hover:bg-card/70 transition-all duration-300">
+              <div className="p-2 rounded-lg bg-primary/10">
+                <Cpu className="h-6 w-6 text-primary" />
+              </div>
+              <div>
+                <h3 className="font-semibold text-foreground mb-1">Edge Computing</h3>
+                <p className="text-sm text-muted-foreground">Deploy AI models closer to your users</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Right side - Sign In Only */}
+        <div className="animate-scale-in min-w-0">
+          <Card className="w-full min-w-0 backdrop-blur-xl bg-card/80 border-border/50 shadow-2xl">
+            <CardHeader className="space-y-4">
+              <div className="flex justify-center lg:hidden">
+                <div className="p-3 rounded-xl bg-primary/10 backdrop-blur-sm border border-primary/20">
+                  <FideonLogo size={40} />
+                </div>
+              </div>
+              <CardTitle className="text-2xl lg:text-3xl text-center text-foreground">
+                Welcome to Fideon OS
+              </CardTitle>
+              <CardDescription className="text-center">
+                {getViewDescription(effectiveView)}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="min-w-0">
+              {effectiveView === "signin" && signInView}
+              {effectiveView === "forgot" && forgotView}
+              {effectiveView === "reset" && resetView}
+
+              {authEnableSso && allowedProviders.length > 0 && effectiveView === "signin" && (
+                <div className="mt-6 space-y-2">
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <Mail className="h-3.5 w-3.5" />
+                    Single sign-on
+                  </div>
+                  <div className="grid grid-cols-1 gap-2">
+                    {allowedProviders.map((provider: any) => (
+                      <Button
+                        key={provider}
+                        type="button"
+                        variant="outline"
+                        className="w-full"
+                        onClick={() => handleOAuthSignIn(provider)}
+                      >
+                        Continue with {provider[0].toUpperCase() + provider.slice(1)}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {authEnableMfa && effectiveView === "signin" && (
+                <div className="mt-6 rounded-lg border border-border/60 bg-background/40 p-4 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <KeyRound className="h-4 w-4 text-primary" />
+                    <p className="text-sm font-medium">MFA (TOTP) setup</p>
+                  </div>
+                  {!activeUserId ? (
+                    <p className="text-xs text-muted-foreground">Sign in first to enroll and verify MFA factors.</p>
+                  ) : (
+                    <>
+                      <div className="grid grid-cols-2 gap-2">
+                        <Button type="button" variant="outline" onClick={loadMfaFactors}>
+                          Load factors
+                        </Button>
+                        <Button type="button" variant="outline" onClick={handleMfaEnroll}>
+                          Enroll new factor
+                        </Button>
+                      </div>
+                      {factors.length > 0 && (
+                        <div className="space-y-2">
+                          <Label htmlFor="mfa-factor-id">Factor</Label>
+                          <select
+                            id="mfa-factor-id"
+                            value={factorId}
+                            onChange={(e) => setFactorId(e.target.value)}
+                            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                          >
+                            {factors.map((f: any) => (
+                              <option key={f.id} value={f.id}>{f.label}</option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                      <div className="grid grid-cols-2 gap-2">
+                        <Button type="button" variant="outline" onClick={handleMfaChallenge}>
+                          Create challenge
+                        </Button>
+                        <Button type="button" variant="outline" onClick={handleMfaUnenroll}>
+                          Unenroll factor
+                        </Button>
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="mfa-code">TOTP Code</Label>
+                        <Input
+                          id="mfa-code"
+                          placeholder="123456"
+                          value={totpCode}
+                          onChange={(e) => setTotpCode(e.target.value)}
+                        />
+                      </div>
+                      <Button type="button" className="w-full" onClick={handleMfaVerify}>
+                        Verify challenge
+                      </Button>
+                      {qrMarkup && (
+                        <div className="rounded border border-border/60 bg-background p-3">
+                          <p className="text-xs text-muted-foreground mb-2">Scan this QR in your authenticator app</p>
+                          <div dangerouslySetInnerHTML={{ __html: qrMarkup }} />
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+              <p className="text-xs text-muted-foreground text-center mt-4">
+                Account access is managed by your administrator
+              </p>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    </div>
+  );
+}

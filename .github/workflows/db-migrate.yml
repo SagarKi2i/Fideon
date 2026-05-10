@@ -1,0 +1,293 @@
+# ─────────────────────────────────────────────────────────────
+# Database Migration Pipeline
+#
+# Applies supabase/migrations/*.sql files in timestamp order.
+# Connects to the self-hosted Supabase VM via SSH tunnel —
+# no direct DB port exposure needed.
+#
+# Secrets required (repository-level):
+#   SSH_PRIVATE_KEY  — private key registered on the VM
+#   SSH_USER         — azureuser
+#   SSH_HOST         — VM IP (52.249.220.12)
+#
+# Secrets required per GitHub Environment:
+#   development:
+#     DB_PORT        — 5433
+#     DB_PASSWORD    — fideon12345
+#   staging:
+#     DB_PORT        — 5433
+#     DB_PASSWORD    — supabase@98765
+#   production:
+#     DB_PORT        — (production DB port)
+#     DB_PASSWORD    — (production DB password)
+#
+# Trigger: manual only (Actions → Database Migrations → Run workflow)
+# Default: dry_run=true (safe — only shows pending, never applies)
+# ─────────────────────────────────────────────────────────────
+
+name: Database Migrations
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "staging"
+        type: choice
+        options: [development, staging, production]
+      dry_run:
+        description: "Dry run only — show pending migrations, don't apply"
+        required: false
+        default: "true"
+        type: boolean
+
+concurrency:
+  group: db-migration-${{ github.event.inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  # ══════════════════════════════════════════════════════════════
+  # DRY RUN — always runs first, shows what will be applied
+  # ══════════════════════════════════════════════════════════════
+  dry-run:
+    name: Dry run — ${{ github.event.inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: ${{ github.event.inputs.environment }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.environment == 'production' && 'v1' || github.event.inputs.environment == 'staging' && 'v1-staging' || 'v1-dev' }}
+
+      - name: Install psql client + SSH tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-client openssh-client
+
+      - name: Setup SSH tunnel
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/tunnel_key
+          chmod 600 ~/.ssh/tunnel_key
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+          # Open SSH tunnel: local 15432 → remote DB port
+          ssh -f -N -L 15432:localhost:${DB_PORT} \
+            -i ~/.ssh/tunnel_key \
+            -o StrictHostKeyChecking=no \
+            -o ServerAliveInterval=30 \
+            ${SSH_USER}@${SSH_HOST}
+
+          echo "✅ SSH tunnel established (localhost:15432 → ${SSH_HOST}:${DB_PORT})"
+
+      - name: Verify DB connection
+        env:
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          echo "Testing connection to ${{ github.event.inputs.environment }} database..."
+          PGPASSWORD="$DB_PASSWORD" psql "postgresql://postgres@localhost:15432/postgres" \
+            -c "SELECT version();" -t -q
+          echo "✅ Connection successful"
+
+      - name: Ensure migration tracking table exists
+        env:
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          PGPASSWORD="$DB_PASSWORD" psql "postgresql://postgres@localhost:15432/postgres" <<'SQL'
+            CREATE TABLE IF NOT EXISTS public._migration_history (
+              filename    TEXT PRIMARY KEY,
+              applied_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+              applied_by  TEXT
+            );
+          SQL
+          echo "✅ Migration tracking table ready"
+
+      - name: Show pending migrations
+        env:
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          DB_URL="postgresql://postgres@localhost:15432/postgres"
+          echo "════════════════════════════════════════════════"
+          echo "  Environment : ${{ github.event.inputs.environment }}"
+          echo "  Branch      : ${{ github.ref_name }}"
+          echo "  Triggered by: ${{ github.actor }}"
+          echo "════════════════════════════════════════════════"
+          echo ""
+          echo "Already applied migrations:"
+          PGPASSWORD="$DB_PASSWORD" psql "$DB_URL" \
+            -c "SELECT filename, applied_at FROM public._migration_history ORDER BY applied_at;" \
+            2>/dev/null || echo "(none)"
+
+          echo ""
+          echo "Pending migrations (not yet applied):"
+          PENDING=0
+          for f in $(ls supabase/migrations/*.sql 2>/dev/null | sort); do
+            fname=$(basename "$f")
+            EXISTS=$(PGPASSWORD="$DB_PASSWORD" psql "$DB_URL" -t -c \
+              "SELECT COUNT(*) FROM public._migration_history WHERE filename='$fname';" 2>/dev/null | tr -d ' ')
+            if [ "$EXISTS" = "0" ]; then
+              echo "  → $fname"
+              PENDING=$((PENDING + 1))
+            fi
+          done
+
+          if [ "$PENDING" -eq 0 ]; then
+            echo "  (none — database is up to date)"
+          else
+            echo ""
+            echo "Total pending: $PENDING"
+          fi
+
+
+  # ══════════════════════════════════════════════════════════════
+  # APPLY — only runs when dry_run=false
+  # Production requires manual approval via GitHub Environment
+  # ══════════════════════════════════════════════════════════════
+  apply-migrations:
+    name: Apply migrations — ${{ github.event.inputs.environment }}
+    runs-on: ubuntu-latest
+    needs: dry-run
+    timeout-minutes: 30
+    if: ${{ github.event.inputs.dry_run == 'false' }}
+    environment: ${{ github.event.inputs.environment == 'production' && 'production-approval' || github.event.inputs.environment == 'staging' && 'staging' || 'development' }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.environment == 'production' && 'v1' || github.event.inputs.environment == 'staging' && 'v1-staging' || 'v1-dev' }}
+
+      - name: Install psql client + SSH tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-client openssh-client
+
+      - name: Setup SSH tunnel
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/tunnel_key
+          chmod 600 ~/.ssh/tunnel_key
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+          ssh -f -N -L 15432:localhost:${DB_PORT} \
+            -i ~/.ssh/tunnel_key \
+            -o StrictHostKeyChecking=no \
+            -o ServerAliveInterval=30 \
+            ${SSH_USER}@${SSH_HOST}
+
+          echo "✅ SSH tunnel established"
+
+      - name: Verify DB connection
+        env:
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          PGPASSWORD="$DB_PASSWORD" psql "postgresql://postgres@localhost:15432/postgres" \
+            -c "SELECT version();" -t -q
+          echo "✅ Connection verified"
+
+      - name: Ensure migration tracking table exists
+        env:
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          PGPASSWORD="$DB_PASSWORD" psql "postgresql://postgres@localhost:15432/postgres" <<'SQL'
+            CREATE TABLE IF NOT EXISTS public._migration_history (
+              filename    TEXT PRIMARY KEY,
+              applied_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+              applied_by  TEXT
+            );
+          SQL
+
+      - name: Apply pending migrations
+        env:
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          APPLIED_BY: ${{ github.actor }}
+        run: |
+          DB_URL="postgresql://postgres@localhost:15432/postgres"
+          echo "Applying migrations to ${{ github.event.inputs.environment }}..."
+          APPLIED=0
+          FAILED=0
+
+          for f in $(ls supabase/migrations/*.sql 2>/dev/null | sort); do
+            fname=$(basename "$f")
+
+            EXISTS=$(PGPASSWORD="$DB_PASSWORD" psql "$DB_URL" -t -c \
+              "SELECT COUNT(*) FROM public._migration_history WHERE filename='$fname';" \
+              2>/dev/null | tr -d ' ')
+
+            if [ "$EXISTS" != "0" ]; then
+              echo "  ✓ skip (already applied): $fname"
+              continue
+            fi
+
+            echo "  → Applying: $fname"
+            if PGPASSWORD="$DB_PASSWORD" psql "$DB_URL" \
+                --single-transaction \
+                --set ON_ERROR_STOP=on \
+                -f "$f"; then
+              PGPASSWORD="$DB_PASSWORD" psql "$DB_URL" -c \
+                "INSERT INTO public._migration_history (filename, applied_by)
+                 VALUES ('$fname', '$APPLIED_BY')
+                 ON CONFLICT (filename) DO NOTHING;"
+              echo "  ✅ Applied: $fname"
+              APPLIED=$((APPLIED + 1))
+            else
+              echo "  ❌ FAILED: $fname"
+              FAILED=$((FAILED + 1))
+              break
+            fi
+          done
+
+          echo ""
+          echo "════════════════════════════════════════════════"
+          echo "  Applied : $APPLIED"
+          echo "  Failed  : $FAILED"
+          echo "════════════════════════════════════════════════"
+
+          if [ "$FAILED" -gt 0 ]; then
+            echo "::error::Migration failed — see logs above."
+            exit 1
+          fi
+
+          if [ "$APPLIED" -eq 0 ]; then
+            echo "Nothing to apply — database is already up to date."
+          fi
+
+      - name: Verify applied migrations
+        env:
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          echo "Migration history after apply:"
+          PGPASSWORD="$DB_PASSWORD" psql "postgresql://postgres@localhost:15432/postgres" \
+            -c "SELECT filename, applied_at, applied_by FROM public._migration_history ORDER BY applied_at DESC LIMIT 20;"
+
+      - name: Notify Slack
+        uses: slackapi/slack-github-action@v1
+        if: always()
+        with:
+          payload: |
+            {
+              "text": "${{ job.status == 'success' && '✅' || '❌' }} *DB migration ${{ job.status }}* — `${{ github.event.inputs.environment }}`",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "${{ job.status == 'success' && '✅' || '❌' }} *Database migration — ${{ job.status }}*\n*Environment:* `${{ github.event.inputs.environment }}`\n*Applied by:* ${{ github.actor }}\n*Branch:* `${{ github.ref_name }}`\n*<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>*"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

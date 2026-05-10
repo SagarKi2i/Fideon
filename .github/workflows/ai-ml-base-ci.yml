@@ -1,0 +1,44 @@
+name: AI-ML Base Image Build & Push
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ai-ml-base-ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-base:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment: ${{ github.ref_name == 'v1' && 'production' || github.ref_name == 'v1-staging' && 'staging' || 'development' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af
+          df -h
+
+      - name: Login to ACR
+        run: |
+          echo "${{ secrets.AZURE_CR_PASSWORD }}" | \
+            docker login neurapodacr.azurecr.io \
+              -u "${{ secrets.AZURE_CR_USERNAME }}" \
+              --password-stdin
+
+      - name: Build & Push Base Image
+        run: |
+          docker build \
+            -f ai-ml/Dockerfile.base \
+            -t neurapodacr.azurecr.io/fideon-ai-ml-base:${{ github.sha }} \
+            -t neurapodacr.azurecr.io/fideon-ai-ml-base:latest \
+            ./ai-ml
+          docker push neurapodacr.azurecr.io/fideon-ai-ml-base:${{ github.sha }}
+          docker push neurapodacr.azurecr.io/fideon-ai-ml-base:latest
+          echo "Pushed neurapodacr.azurecr.io/fideon-ai-ml-base:${{ github.sha }}"

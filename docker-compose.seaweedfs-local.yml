@@ -1,0 +1,51 @@
+version: "3.8"
+
+# ============================================================================
+# SeaweedFS — local single-node S3-compatible storage for pipeline testing
+# ============================================================================
+# Start:   docker compose -f docker-compose.seaweedfs-local.yml up -d
+# Stop:    docker compose -f docker-compose.seaweedfs-local.yml down
+# Reset:   docker compose -f docker-compose.seaweedfs-local.yml down -v
+#
+# S3 endpoint after start:  http://localhost:8333
+# Access key:  localtest
+# Secret key:  localtest123
+# Bucket:      models   (created by Quantization/init_seaweedfs.py)
+# ============================================================================
+
+services:
+  seaweedfs:
+    image: chrislusf/seaweedfs:latest
+    container_name: seaweedfs_local
+    restart: unless-stopped
+
+    # All-in-one mode: master + volume + filer + S3 gateway in one process
+    command: >
+      server
+      -s3
+      -s3.port=8333
+      -s3.config=/etc/seaweedfs/s3.json
+      -dir=/data
+      -volume.max=5
+      -volume.fileSizeLimitMB=4096
+
+    ports:
+      - "9333:9333"   # SeaweedFS master API
+      - "8080:8080"   # Volume server
+      - "8888:8888"   # Filer HTTP
+      - "8333:8333"   # S3-compatible gateway  ← this is SEAWEEDFS_ENDPOINT
+
+    volumes:
+      - seaweedfs_data:/data
+      - ./Quantization/seaweedfs_s3.json:/etc/seaweedfs/s3.json:ro
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9333/cluster/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+volumes:
+  seaweedfs_data:
+    driver: local
