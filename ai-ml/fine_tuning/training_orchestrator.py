@@ -127,6 +127,103 @@ def _register_gguf_in_supabase(
                 )
 
 
+def _gguf_smoke_test(gguf_path: str, ollama_host: str = "http://localhost:11434") -> bool:
+    """
+    Spin up a temporary Ollama model from the GGUF, run one inference with the
+    exact training prompt format, and verify the output is parseable JSON.
+    Cleans up the temp model regardless of outcome.
+
+    Returns True if the model outputs valid JSON, False otherwise.
+    Non-fatal when Ollama is not available (returns True to not block).
+    """
+    import json
+    import shutil
+    import subprocess
+    import urllib.request
+    from pathlib import Path as _Path
+
+    model_name = "fideon-smoke-test"
+
+    if not shutil.which("ollama"):
+        print("[smoke] ollama binary not found — skipping GGUF smoke test")
+        return True
+
+    modelfile_path = _Path(gguf_path).with_suffix(".Modelfile.smoke")
+    modelfile_path.write_text(
+        f"FROM {gguf_path}\nPARAMETER temperature 0\nPARAMETER num_predict 300\n"
+    )
+
+    try:
+        result = subprocess.run(
+            ["ollama", "create", model_name, "-f", str(modelfile_path)],
+            capture_output=True, text=True, timeout=180,
+            env={**__import__("os").environ, "OLLAMA_HOST": ollama_host},
+        )
+        if result.returncode != 0:
+            print(f"[smoke] ollama create failed — skipping smoke test: {result.stderr[:300]}")
+            return True  # non-fatal: Ollama may not be serving yet
+
+        payload = {
+            "model": model_name,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert insurance document parser specialising in ACORD forms. "
+                        "Given raw OCR text from an ACORD form, extract ALL fields and return a single "
+                        "valid JSON object. Use \"\" for blank fields. Represent checkboxes as true/false. "
+                        "Represent table rows as arrays of objects. Output ONLY the JSON — no commentary."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "ACORD Form 25\n\nOCR TEXT:\n"
+                        "Agency: Smoke Test Agency\nPolicy Number: SMOKE-001\n"
+                        "Insured: Jane Doe\nDate: 07/01/2025\nPremium: $1200"
+                    ),
+                },
+            ],
+            "stream": False,
+            "options": {"temperature": 0, "num_predict": 300},
+        }
+        body = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            f"{ollama_host}/api/chat",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read())
+
+        output = (data.get("message") or {}).get("content", "")
+        start = output.find("{")
+        end = output.rfind("}")
+        if start != -1 and end > start:
+            try:
+                parsed = json.loads(output[start : end + 1])
+                if isinstance(parsed, dict) and len(parsed) >= 1:
+                    print(
+                        f"[smoke] ✓ GGUF smoke test passed — model outputs valid JSON "
+                        f"({len(parsed)} fields extracted)"
+                    )
+                    return True
+            except json.JSONDecodeError:
+                pass
+
+        print(f"[smoke] ✗ GGUF output is not valid JSON.\n  First 300 chars: {output[:300]}")
+        return False
+
+    except Exception as exc:
+        print(f"[smoke] ✗ Smoke test error: {exc} — treating as non-fatal")
+        return True  # connection errors = Ollama not available, non-fatal
+
+    finally:
+        subprocess.run(["ollama", "rm", model_name], capture_output=True, timeout=30)
+        modelfile_path.unlink(missing_ok=True)
+
+
 def promote_adapter(
     adapter_id: str,
     registry_path: str,
@@ -191,6 +288,26 @@ def promote_adapter(
         except Exception as exc:
             print(f"[orchestrator] Quantization failed (non-fatal): {exc}")
             quant_results = {}
+
+    # ── 2b. GGUF smoke test — verify model outputs JSON before publishing ────
+    # Fatal: if the model is broken, abort here so latest.txt is NOT updated
+    # and the pod does not pull a broken model on next restart.
+    if quant_results:
+        ollama_host = __import__("os").getenv("OLLAMA_HOST", "http://localhost:11434")
+        best_gguf = next(
+            (v for v in quant_results.values() if "q5_k_m" in str(v).lower()),
+            next(iter(quant_results.values()), None),
+        )
+        if best_gguf:
+            print(f"[orchestrator] Running GGUF smoke test on {__import__('pathlib').Path(best_gguf).name} …")
+            if not _gguf_smoke_test(best_gguf, ollama_host=ollama_host):
+                raise RuntimeError(
+                    f"[orchestrator] GGUF smoke test FAILED for v{version} — "
+                    "the fine-tuned model does not output valid JSON. "
+                    "The broken GGUF has NOT been uploaded to Azure Blob. "
+                    "Check training data quality (assistant turns must be valid JSON) "
+                    "and retrain with more diverse examples before promoting."
+                )
 
     # ── 3. Upload quantized GGUFs → quantized/v{N}/ ─────────────────────────
     if quant_results:

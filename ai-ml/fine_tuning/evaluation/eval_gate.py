@@ -45,10 +45,28 @@ def run_eval_gate(
     scores: Dict[str, Any] = {}
 
     # ── Skip gate if eval was skipped (no examples) ───────────────────────────
+    # No eval examples means we cannot verify model quality — block promotion
+    # unless the config explicitly sets allow_skip_eval_gate: true.
     if local_result.skipped:
+        allow_skip = bool(eval_cfg.get("allow_skip_eval_gate", False))
+        if allow_skip:
+            print(
+                "[eval_gate] WARNING: no eval examples — gate skipped (allow_skip_eval_gate=true). "
+                "Add eval samples to catch broken models before promotion."
+            )
+            return GateDecision(
+                passed=True,
+                failures=[],
+                scores={"skipped": True, "reason": local_result.skip_reason},
+            )
         return GateDecision(
-            passed=True,
-            failures=[],
+            passed=False,
+            failures=[
+                f"No evaluation examples found ({local_result.skip_reason}). "
+                "Add eval examples to /workspace/fine_tuning/eval/ so model quality "
+                "can be verified before promotion. Or set allow_skip_eval_gate: true "
+                "in config to override (not recommended for production)."
+            ],
             scores={"skipped": True, "reason": local_result.skip_reason},
         )
 

@@ -58,6 +58,26 @@ def validate_chat_format(row: Dict[str, Any], row_index: int) -> None:
             raise InvalidChatFormatError(
                 f"Row {row_index}, message {i}: 'content' must be a non-empty string"
             )
+    # Validate assistant turn is parseable JSON — the model is trained to output JSON
+    # and training on non-JSON assistant turns teaches the model to produce garbage.
+    for m in msgs:
+        if m.get("role") == "assistant":
+            content = m.get("content", "").strip()
+            start = content.find("{")
+            end = content.rfind("}")
+            if start == -1 or end <= start:
+                raise InvalidChatFormatError(
+                    f"Row {row_index}: assistant content is not a JSON object "
+                    f"(no {{...}} found). Got: {content[:100]!r}"
+                )
+            try:
+                import json as _json
+                _json.loads(content[start : end + 1])
+            except _json.JSONDecodeError as exc:
+                raise InvalidChatFormatError(
+                    f"Row {row_index}: assistant content is not valid JSON: {exc}. "
+                    f"Got: {content[:100]!r}"
+                )
 
 
 # ── JSONL I/O ─────────────────────────────────────────────────────────────────
