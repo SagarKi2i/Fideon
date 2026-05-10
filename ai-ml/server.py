@@ -1050,6 +1050,46 @@ def _run_federated_job(job_id: str) -> None:
         if not versions_available:
             versions_available = [latest]
 
+        # ── Filter: skip versions already successfully quantized ─────────────────
+        # A version with quantized/v{N}/*.gguf was processed by a prior Global Update.
+        # A version without .gguf files (or no quantized/ prefix) is fresh → include.
+        # If quantization previously FAILED (prefix exists but no .gguf), also include.
+        print("[global-update]   Checking which versions have already been quantized …", flush=True)
+        fresh_versions: List[int] = []
+        already_quantized: List[int] = []
+        for v in versions_available:
+            if seaweed.has_successful_quantization(v):
+                already_quantized.append(v)
+                print(f"[global-update]   Skipping v{v} — already quantized successfully", flush=True)
+            else:
+                fresh_versions.append(v)
+                print(f"[global-update]   Including v{v} — fresh / quantization not yet done", flush=True)
+
+        if not fresh_versions:
+            msg = (
+                f"No new weights to aggregate — all {len(already_quantized)} version(s) "
+                f"already quantized: {already_quantized}. "
+                "Run Local Training + Share Gradients first."
+            )
+            print(f"[global-update] {msg}", flush=True)
+            _set_fed_job(job_id, {
+                **_fed_jobs.get(job_id, {}),
+                "status": "completed",
+                "phase": "done",
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "version": latest,
+                "message": msg,
+                "versions_skipped_quantized": already_quantized,
+            })
+            return
+
+        print(
+            f"[global-update]   Fresh versions to aggregate: {fresh_versions} | "
+            f"Already quantized (skipped): {already_quantized}",
+            flush=True,
+        )
+        versions_available = fresh_versions
+
         _update_fed_job(job_id, "downloading_weights", versions_aggregated=versions_available)
         print(
             f"[global-update] ══ Step 2/5 ══ Collecting weights — "
@@ -1409,6 +1449,7 @@ def _run_share_job(job_id: str, pending_entries: List[tuple]) -> None:
                         training_meta=pending.get("training_meta", {}),
                         base_model=pending.get("base_model", ""),
                         progress_callback=_progress_cb,
+                        skip_quantization=True,  # raw weights only — Global Update quantizes after FedAvg
                     )
                 print(
                     f"[share-gradients] Step 2/3 — Upload complete ({int(time.time()-_t0_ver)}s). "

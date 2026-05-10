@@ -128,6 +128,43 @@ class SeaweedFSClient:
             raise RuntimeError("SEAWEEDFS_ENDPOINT not configured")
         self._boto_client().head_bucket(Bucket=self._bucket)
 
+    def has_successful_quantization(self, version: int) -> bool:
+        """Return True if quantized/v{version}/ contains at least one .gguf file."""
+        if not self._configured:
+            return False
+        try:
+            client = self._boto_client()
+            prefix = f"quantized/v{version}/"
+            resp = client.list_objects_v2(Bucket=self._bucket, Prefix=prefix, MaxKeys=10)
+            for obj in resp.get("Contents", []):
+                if obj["Key"].endswith(".gguf"):
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def list_finetuned_versions(self, latest: int = 0, count: int = 0) -> List[int]:
+        """Return all available version numbers from the finetuned/ prefix."""
+        if not self._configured:
+            return [latest] if latest else []
+        try:
+            client = self._boto_client()
+            paginator = client.get_paginator("list_objects_v2")
+            found: set[int] = set()
+            for page in paginator.paginate(Bucket=self._bucket, Prefix="finetuned/v", Delimiter="/"):
+                for cp in page.get("CommonPrefixes", []):
+                    seg = cp.get("Prefix", "").rstrip("/").split("/")[-1]
+                    if seg.startswith("v"):
+                        try:
+                            found.add(int(seg[1:]))
+                        except ValueError:
+                            pass
+            result = sorted(found)
+            return result or ([latest] if latest else [])
+        except Exception as exc:
+            print(f"[seaweedfs] list_finetuned_versions error: {exc}")
+            return [latest] if latest else []
+
     def get_latest_finetuned_version(self) -> Optional[int]:
         """Return the latest fine-tuned version number from SeaweedFS, or None."""
         if not self._configured:
@@ -189,7 +226,7 @@ class SeaweedFSClient:
 
         client = self._boto_client()
         tc = self._transfer_config()
-        files = list(local.glob("*.gguf")) + list(local.glob("manifest.json"))
+        files = [f for f in local.glob("*.gguf") if "fp16" not in f.name.lower()] + list(local.glob("manifest.json"))
         print(f"[seaweedfs] Uploading {len(files)} quantized file(s) → s3://{self._bucket}/{prefix}/")
         _RETRY_DELAYS = [30, 90]
         failed: list[str] = []
