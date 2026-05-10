@@ -186,6 +186,36 @@ else
     log "USE_OLLAMA=false — skipping Ollama (using transformers/Qwen2-VL directly)"
 fi
 
+# ── Fine-tuned HF model (non-quantized): download + set QWEN_MODEL_ID ─────────
+# Activated when USE_FINETUNED=true is set in the pod environment vars.
+# Downloads finetuned/v{N}/ HF weights from Azure Blob and points QWEN_MODEL_ID
+# at them so extractor.py uses the fine-tuned model without quantization.
+# USE_OLLAMA must be false (HF inference path) for this to have any effect.
+if [ "${USE_FINETUNED:-false}" = "true" ] && [ "${USE_OLLAMA:-false}" != "true" ]; then
+    if [ -n "${AZURE_BLOB_ACCOUNT_URL}" ] && [ -n "${AZURE_BLOB_SAS_TOKEN}" ]; then
+        log "USE_FINETUNED=true — downloading fine-tuned HF weights from Azure Blob..."
+        "$PY" /app/finetuned_model_loader.py --skip-if-loaded >> "$LOG" 2>&1
+        if [ $? -eq 0 ]; then
+            PATH_FILE="${FINETUNED_MODEL_DIR:-/workspace/models/finetuned}/loaded_path.txt"
+            if [ -f "$PATH_FILE" ]; then
+                FINETUNED_PATH="$(cat "$PATH_FILE")"
+                if [ -d "$FINETUNED_PATH" ]; then
+                    export QWEN_MODEL_ID="$FINETUNED_PATH"
+                    log "QWEN_MODEL_ID set to fine-tuned model: $QWEN_MODEL_ID"
+                else
+                    log_err "Fine-tuned path not found: $FINETUNED_PATH — falling back to base model"
+                fi
+            else
+                log_err "loaded_path.txt not written — falling back to base model"
+            fi
+        else
+            log_err "finetuned_model_loader.py failed — falling back to base model at $QWEN_PATH"
+        fi
+    else
+        log_err "AZURE_BLOB_ACCOUNT_URL or AZURE_BLOB_SAS_TOKEN not set — cannot download fine-tuned model"
+    fi
+fi
+
 # ── Start FastAPI ──────────────────────────────────────────────────────────────
 _start_fastapi() {
     cd /app
