@@ -73,6 +73,12 @@ _qwen_loaded = False
 
 QWEN_MODEL_ID = os.getenv("QWEN_MODEL_ID", "/workspace/models/qwen2-vl-7b")
 
+# ── Ollama toggle ─────────────────────────────────────────────────────────────
+# Set USE_OLLAMA=true on the RunPod pod to route all VLM inference through
+# Ollama (GGUF loaded from Azure Blob via model_loader.py) instead of loading
+# the full HF transformers weights directly.
+USE_OLLAMA = os.getenv("USE_OLLAMA", "false").lower() in ("1", "true", "yes")
+
 
 
 
@@ -607,6 +613,69 @@ Additional Rules:
 """
 
 
+# ── Ollama inference (USE_OLLAMA=true) ───────────────────────────────────────
+
+def _run_ollama_extraction(
+    images: List,
+    surya_ocr_text: str,
+    docling_result: Dict[str, Any],
+    form_type: str,
+) -> Dict[str, Any]:
+    """
+    Route VLM inference through Ollama (GGUF served locally on the pod).
+
+    Uses the same prompt as _run_qwen_extraction and the same _parse_qwen_output
+    parser so the rest of the pipeline is unchanged.  Supports vision (base64 JPEG)
+    when the loaded GGUF is a vision-capable model (e.g. Qwen2-VL GGUF).
+    """
+    from ollama_client import OllamaClient  # lazy import — only loaded when needed
+
+    client = OllamaClient()
+
+    page_images = images[:4] if images else []
+    if not surya_ocr_text or not surya_ocr_text.strip():
+        surya_ocr_text = "(no OCR text available)"
+
+    context_parts: List[str] = []
+    if surya_ocr_text.strip() and surya_ocr_text != "(no OCR text available)":
+        context_parts.append(
+            f"=== Surya OCR text (line-by-line) ===\n{surya_ocr_text[:2500]}"
+        )
+    if docling_result.get("markdown", "").strip():
+        context_parts.append(
+            f"=== Docling structured markdown (tables + layout) ===\n{docling_result['markdown'][:2500]}"
+        )
+    if docling_result.get("kv_pairs"):
+        kv_str = "\n".join(f"{k}: {v}" for k, v in list(docling_result["kv_pairs"].items())[:60])
+        context_parts.append(f"=== Docling KV pairs ===\n{kv_str}")
+    if docling_result.get("tables"):
+        tables_str = "\n\n".join(docling_result["tables"][:5])
+        context_parts.append(f"=== Docling extracted tables ===\n{tables_str[:1500]}")
+
+    prompt = _PROMPT_TEMPLATE
+    if context_parts:
+        prompt += "\n\n" + "\n\n".join(context_parts)
+    else:
+        prompt += (
+            "\n\nNote: Surya OCR and Docling outputs are unavailable. "
+            "Extract all fields directly from the page images."
+        )
+
+    logger.info("[ollama] Sending extraction request — pages=%d context_parts=%d",
+                len(page_images), len(context_parts))
+
+    output_text = client.extract_acord_fields(
+        prompt=prompt,
+        images=page_images if page_images else None,
+    )
+
+    logger.info("[ollama] Response received — %d chars", len(output_text))
+
+    parsed, raw_text, markdown = _parse_qwen_output(output_text)
+    fields = parsed if parsed is not None else {"_raw_ollama_output": output_text}
+    return {"fields": fields, "qwen_raw_text": raw_text, "qwen_markdown": markdown}
+
+
 # ── Qwen2-VL inference ────────────────────────────────────────────────────────
 
 def _run_qwen_extraction(
@@ -770,15 +839,19 @@ def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
                     logger.warning("Docling arm failed — Qwen2-VL will extract from images only: %s", exc)
                     arm_warnings.append(f"Docling unavailable: {exc}")
 
-    # ── Step 2: Qwen2-VL always runs — uses images + whatever arms produced ──
-    qwen_result = _run_qwen_extraction(images, surya_ocr_text, docling_result, form_type)
+    # ── Step 2: VLM inference — Ollama (GGUF) or Qwen2-VL (transformers) ────
+    if USE_OLLAMA:
+        logger.info("[extractor] USE_OLLAMA=true — routing inference through Ollama")
+        qwen_result = _run_ollama_extraction(images, surya_ocr_text, docling_result, form_type)
+    else:
+        qwen_result = _run_qwen_extraction(images, surya_ocr_text, docling_result, form_type)
 
     extracted_fields = qwen_result["fields"]
 
     # ── Step 3: OCR fallback when Qwen produced a narrative instead of JSON ──
     # No hardcoded field names. Every label: value pair found verbatim in the
     # Surya OCR text is extracted. Values are never fabricated.
-    if "_raw_qwen_output" in extracted_fields and surya_ocr_text.strip():
+    if ("_raw_qwen_output" in extracted_fields or "_raw_ollama_output" in extracted_fields) and surya_ocr_text.strip():
         logger.warning("[extraction] Qwen did not output structured fields — running OCR KV scan")
 
         # Primary: generic OCR extraction — reads every "LABEL: value" pair in the text
@@ -878,11 +951,13 @@ def extract_policy_text(pdf_path: str) -> Dict[str, Any]:
     full_text = ocr_text
     markdown = docling_result.get("markdown", "")
 
-    # Both arms produced nothing — fall back to Qwen2-VL for raw text extraction
+    # Both arms produced nothing — fall back to VLM for raw text extraction
     if not full_text.strip() and not markdown.strip():
-        logger.warning("Both arms failed in extract_policy_text — falling back to Qwen2-VL")
+        _vlm_label = "Ollama" if USE_OLLAMA else "Qwen2-VL"
+        logger.warning("Both arms failed in extract_policy_text — falling back to %s", _vlm_label)
         try:
-            qwen_result = _run_qwen_extraction(
+            _vlm_fn = _run_ollama_extraction if USE_OLLAMA else _run_qwen_extraction
+            qwen_result = _vlm_fn(
                 images,
                 surya_ocr_text="",
                 docling_result={"markdown": "", "tables": [], "kv_pairs": {}},
@@ -890,10 +965,10 @@ def extract_policy_text(pdf_path: str) -> Dict[str, Any]:
             )
             full_text = qwen_result.get("qwen_raw_text") or ""
             markdown = qwen_result.get("qwen_markdown") or ""
-            arm_warnings.append("Fell back to Qwen2-VL for text extraction")
+            arm_warnings.append(f"Fell back to {_vlm_label} for text extraction")
         except Exception as exc:
-            logger.error("Qwen2-VL fallback also failed in extract_policy_text: %s", exc)
-            arm_warnings.append(f"Qwen2-VL fallback failed: {exc}")
+            logger.error("%s fallback also failed in extract_policy_text: %s", _vlm_label, exc)
+            arm_warnings.append(f"{_vlm_label} fallback failed: {exc}")
 
     result: Dict[str, Any] = {
         "full_text": full_text,
