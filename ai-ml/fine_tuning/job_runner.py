@@ -64,6 +64,7 @@ class CycleResult:
     error: Optional[str]
     started_at: str
     finished_at: str
+    upload_ids: List[str] = field(default_factory=list)
 
 
 # ── In-memory job store (server.py reads this for status polling) ─────────────
@@ -253,6 +254,7 @@ def run_cycle(
     new_data_path: str,
     job_id: str,
     registry_lock_timeout_seconds: int = 30,
+    upload_ids: Optional[List[str]] = None,
 ) -> CycleResult:
     """
     Run one complete continuous-learning cycle.
@@ -279,6 +281,7 @@ def run_cycle(
     from fine_tuning.evaluation.forgetting_eval import ForgettingEvaluator
     from fine_tuning.evaluation.eval_gate import run_eval_gate
 
+    upload_ids = upload_ids or []
     started_at = _utc_now()
     cycle_id   = str(uuid.uuid4())[:12]
 
@@ -292,6 +295,7 @@ def run_cycle(
         "error":      None,
         "version":    None,
         "gate_passed": None,
+        "upload_ids": upload_ids,
     })
 
     def _update(phase: str, **kwargs: Any) -> None:
@@ -510,6 +514,7 @@ def run_cycle(
             "adapter_path":       adapter_path,
             "merged_model_path":  merge_result.output_path,
             "eval_scores":        gate.scores,
+            "upload_ids":         upload_ids,
         })
         print(f"[job_runner] Cycle complete — SLM v1.{new_version} promoted.")
 
@@ -524,6 +529,7 @@ def run_cycle(
             error=None,
             started_at=started_at,
             finished_at=finished_at,
+            upload_ids=upload_ids,
         )
 
     except Exception as exc:
@@ -557,11 +563,13 @@ def launch_cycle_background(
     config_path: str,
     new_data_path: str,
     job_id: str,
+    upload_ids: Optional[List[str]] = None,
 ) -> None:
     """Spawn run_cycle() in a daemon thread so server.py can return immediately."""
     t = threading.Thread(
         target=run_cycle,
         args=(config_path, new_data_path, job_id),
+        kwargs={"upload_ids": upload_ids or []},
         daemon=True,
         name=f"finetune-{job_id[:8]}",
     )

@@ -848,12 +848,20 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
         encoding="utf-8",
     )
 
+    # Collect unique upload_ids from ingested samples — returned to frontend for re-extraction
+    upload_ids: List[str] = list({
+        s.get("upload_id", "")
+        for s in samples
+        if s.get("sample_id") in ingested_ids and s.get("upload_id")
+    } - {""})
+
     # ── Launch cycle in background thread ─────────────────────────────────────
     job_id = str(uuid.uuid4())
     launch_cycle_background(
         config_path=ft_config_path,
         new_data_path=snapshot_path,
         job_id=job_id,
+        upload_ids=upload_ids,
     )
 
     return {
@@ -865,6 +873,7 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
         ),
         "total_samples": ingested,
         "snapshot_path": snapshot_path,
+        "upload_ids": upload_ids,
     }
 
 

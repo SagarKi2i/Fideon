@@ -51,7 +51,7 @@ import {
   type DeviceContribution,
   type TrainingStats,
 } from "@/lib/trainingApi";
-import { syncFeedbacksToRunpod, startRunpodFinetune, getRunpodJobStatus, startFederatedLearning, getFederatedJobStatus, shareGradients, getShareGradientsStatus, getShareGradientsJobStatus, getRegisteredAdapterVersions } from "@/lib/pdfUploadApi";
+import { syncFeedbacksToRunpod, startRunpodFinetune, getRunpodJobStatus, startFederatedLearning, getFederatedJobStatus, shareGradients, getShareGradientsStatus, getShareGradientsJobStatus, getRegisteredAdapterVersions, triggerFullExtraction } from "@/lib/pdfUploadApi";
 import {
   getAcordTrainingCount,
   getAcordTrainingSamples,
@@ -104,7 +104,14 @@ export default function Training() {
   const [activeRunpodJobId, setActiveRunpodJobId] = useState<string | null>(null);
   const [runpodJobStatus, setRunpodJobStatus] = useState<{
     status: string; phase?: string; version?: number; error?: string; eval_scores?: Record<string, any>;
+    upload_ids?: string[];
   } | null>(null);
+
+  // Re-extraction after Local Training
+  const [reextractUploadIds, setReextractUploadIds] = useState<string[]>([]);
+  const [isReextracting, setIsReextracting] = useState(false);
+  const [reextractResult, setReextractResult] = useState<Record<string, any> | null>(null);
+  const [reextractError, setReextractError] = useState<string | null>(null);
 
   // Federated Learning — Global Update
   const [isFederatedRunning, setIsFederatedRunning] = useState(false);
@@ -308,6 +315,13 @@ export default function Training() {
           if (rpStatus.status === "completed" && pendingAcordRunIds.length > 0) {
             markAcordSamplesUsed(pendingAcordRunIds).catch(() => {});
             setPendingAcordRunIds([]);
+          }
+
+          // Store upload_ids so user can re-extract with the newly trained model
+          if (rpStatus.status === "completed" && rpStatus.upload_ids && rpStatus.upload_ids.length > 0) {
+            setReextractUploadIds(rpStatus.upload_ids.filter(Boolean));
+            setReextractResult(null);
+            setReextractError(null);
           }
 
           loadData();
@@ -591,6 +605,28 @@ export default function Training() {
     } finally {
       setIsFinetuning(false);
       await refreshLocalAcordCount();
+    }
+  };
+
+  const handleReextract = async () => {
+    if (reextractUploadIds.length === 0) return;
+    setIsReextracting(true);
+    setReextractResult(null);
+    setReextractError(null);
+    try {
+      // Re-extract using the most recent PDF from this training run
+      const uploadId = reextractUploadIds[reextractUploadIds.length - 1];
+      toast({ title: "Re-extracting…", description: "Running PDF through the newly trained model. This may take 1–5 minutes." });
+      const result = await triggerFullExtraction(uploadId);
+      const fields = result.extracted_json ?? result.extracted_fields ?? result.fields ?? {};
+      setReextractResult(fields);
+      toast({ title: "Re-extraction complete", description: "The trained model has extracted updated fields from your PDF." });
+    } catch (e: any) {
+      const msg = e?.message || "Re-extraction failed";
+      setReextractError(msg);
+      toast({ title: "Re-extraction failed", description: msg, variant: "destructive" });
+    } finally {
+      setIsReextracting(false);
     }
   };
 
@@ -1449,6 +1485,78 @@ export default function Training() {
                     );
                   })}
                 </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Re-extraction card — shown after training completes when upload_ids are available */}
+          {reextractUploadIds.length > 0 && (
+            <Card className="border-green-500/30 bg-green-500/5">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <RefreshCw className="h-5 w-5 text-green-500" />
+                  See Model Improvement
+                </CardTitle>
+                <CardDescription>
+                  Training complete. Re-run extraction on your original PDF using the newly trained model to see corrected fields.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <Button
+                  onClick={handleReextract}
+                  disabled={isReextracting}
+                  className="gap-2"
+                  variant="outline"
+                >
+                  {isReextracting
+                    ? <><Loader2 className="h-4 w-4 animate-spin" />Extracting with trained model…</>
+                    : <><RefreshCw className="h-4 w-4" />Re-extract with Trained Model</>}
+                </Button>
+
+                {reextractError && (
+                  <div className="flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-sm text-red-600 dark:text-red-400">
+                    <XCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                    <span>{reextractError}</span>
+                  </div>
+                )}
+
+                {isReextracting && (
+                  <div className="flex items-center gap-2 p-3 rounded-lg bg-blue-500/10 border border-blue-500/20 text-sm text-blue-600 dark:text-blue-400">
+                    <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                    Running PDF through the trained model — this takes 1–5 minutes…
+                  </div>
+                )}
+
+                {reextractResult && !isReextracting && (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2 p-3 rounded-lg bg-green-500/10 border border-green-500/20 text-sm text-green-600 dark:text-green-400">
+                      <CheckCircle2 className="h-4 w-4 shrink-0" />
+                      Extraction complete — {Object.keys(reextractResult).length} fields extracted by the trained model.
+                    </div>
+                    <div className="border rounded-lg overflow-hidden">
+                      <div className="px-4 py-2 bg-muted/50 border-b flex items-center justify-between">
+                        <span className="text-sm font-medium">Extracted Fields</span>
+                        <Badge variant="secondary">{Object.keys(reextractResult).length} fields</Badge>
+                      </div>
+                      <div className="divide-y max-h-96 overflow-y-auto">
+                        {Object.entries(reextractResult).map(([key, value]) => (
+                          <div key={key} className="flex gap-3 px-4 py-2 text-sm hover:bg-muted/30">
+                            <span className="font-medium text-muted-foreground shrink-0 w-48 truncate" title={key}>
+                              {key.replace(/_/g, " ")}
+                            </span>
+                            <span className="break-words min-w-0">
+                              {value === null || value === undefined
+                                ? <span className="text-muted-foreground italic">—</span>
+                                : typeof value === "object"
+                                  ? <span className="font-mono text-xs">{JSON.stringify(value)}</span>
+                                  : String(value) || <span className="text-muted-foreground italic">—</span>}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </CardContent>
             </Card>
           )}
