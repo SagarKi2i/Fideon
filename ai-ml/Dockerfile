@@ -4,7 +4,7 @@ WORKDIR /app
 
 # System deps + cloudflared
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl git build-essential cmake libgomp1 zstd && \
+        curl git build-essential cmake libgomp1 zstd lshw && \
     mkdir -p --mode=0755 /usr/share/keyrings && \
     curl -fsSL https://pkg.cloudflare.com/cloudflare-public-v2.gpg | \
         tee /usr/share/keyrings/cloudflare-public-v2.gpg >/dev/null && \
