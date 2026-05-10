@@ -1449,6 +1449,7 @@ def _run_share_job(job_id: str, pending_entries: List[tuple]) -> None:
                         training_meta=pending.get("training_meta", {}),
                         base_model=pending.get("base_model", ""),
                         progress_callback=_progress_cb,
+                        skip_quantization=True,  # raw weights only — Global Update quantizes after FedAvg
                     )
                 print(
                     f"[share-gradients] Step 2/3 — Upload complete ({int(time.time()-_t0_ver)}s). "
