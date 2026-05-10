@@ -100,18 +100,26 @@ if [ "${USE_OLLAMA:-false}" = "true" ]; then
         log_err "nvidia-smi not found — Ollama may run on CPU only (check RunPod GPU allocation)"
     fi
 
-    # 1. Install Ollama binary if not present
-    #    The official install script detects NVIDIA drivers and installs the CUDA-enabled binary.
+    # 1. Verify Ollama binary + CUDA libraries (both pre-baked in the Docker image).
+    #    Reinstall only if something is genuinely missing — guards against accidental
+    #    image downgrades or manual removals; should be a no-op on normal boots.
+    _OLLAMA_OK=0
     if ! command -v ollama &>/dev/null; then
-        log "Ollama not found — installing (CUDA-enabled build)..."
+        log "Ollama binary missing — installing..."
+    elif [ ! -d /usr/local/lib/ollama/cuda_v12 ] && [ ! -d /usr/local/lib/ollama/cuda_v13 ]; then
+        log "Ollama binary present but CUDA libraries missing — reinstalling for GPU support..."
+    else
+        log "Ollama ready: $(ollama --version 2>/dev/null) | CUDA: $(ls /usr/local/lib/ollama/ | grep cuda | tr '\n' ' ')"
+        _OLLAMA_OK=1
+    fi
+
+    if [ $_OLLAMA_OK -eq 0 ]; then
         curl -fsSL https://ollama.com/install.sh | sh >> "$LOG" 2>&1
         if command -v ollama &>/dev/null; then
             log "Ollama installed: $(ollama --version 2>/dev/null)"
         else
             log_err "Ollama installation failed — Ollama features unavailable"
         fi
-    else
-        log "Ollama already installed: $(ollama --version 2>/dev/null)"
     fi
 
     # 2. Start ollama serve in background (models persisted in /workspace)
