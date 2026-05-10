@@ -16,8 +16,15 @@ import os
 
 
 def get_storage_client():
-    """Return AzureBlobClient or SeaweedFSClient based on STORAGE_BACKEND env var."""
-    backend = os.getenv("STORAGE_BACKEND", "seaweedfs").strip().lower()
+    """Return AzureBlobClient or SeaweedFSClient based on STORAGE_BACKEND env var.
+
+    Auto-detection: if STORAGE_BACKEND is not set, uses Azure when
+    AZURE_BLOB_ACCOUNT_URL is present, otherwise falls back to SeaweedFS.
+    """
+    backend = os.getenv("STORAGE_BACKEND", "").strip().lower()
+    if not backend:
+        # Auto-detect: prefer Azure if its credentials are present
+        backend = "azure" if os.getenv("AZURE_BLOB_ACCOUNT_URL") else "seaweedfs"
     if backend == "azure":
         from fine_tuning.azure_blob_client import AzureBlobClient
         return AzureBlobClient()

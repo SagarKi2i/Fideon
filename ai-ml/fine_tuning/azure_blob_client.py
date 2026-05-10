@@ -19,7 +19,6 @@ import time
 from pathlib import Path
 from typing import Any, Callable, List, Optional
 
-_CHUNK_SIZE = 8 * 1024 * 1024   # 8 MB blocks — prevents ServiceResponseTimeoutError on large shards
 
 
 class AzureBlobClient:
@@ -61,8 +60,36 @@ class AzureBlobClient:
     def probe(self) -> None:
         """Raise if the container is unreachable."""
         cc = self._container_client()
-        # list_blobs with max_results=1 is the lightest possible check
-        next(iter(cc.list_blobs(name_starts_with="finetuned/", results_per_page=1)), None)
+        next(iter(cc.list_blobs(name_starts_with="finetuned/", results_per_page=1, timeout=10)), None)
+
+    def has_successful_quantization(self, version: int) -> bool:
+        """Return True if quantized/v{version}/ has a .gguf file OR a consumed.txt marker."""
+        if not self._configured:
+            return False
+        try:
+            cc = self._container_client()
+            prefix = f"quantized/v{version}/"
+            for blob in cc.list_blobs(name_starts_with=prefix, results_per_page=10, timeout=10):
+                name = blob["name"]
+                if name.endswith(".gguf") or name.endswith("consumed.txt"):
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def mark_version_consumed(self, version: int, consumed_into: int) -> None:
+        """Write quantized/v{version}/consumed.txt so future Global Updates skip this version."""
+        if not self._configured:
+            return
+        try:
+            blob_name = f"quantized/v{version}/consumed.txt"
+            content = f"consumed_into_v{consumed_into}".encode()
+            self._container_client(create_if_missing=True).get_blob_client(blob_name).upload_blob(
+                content, overwrite=True
+            )
+            print(f"[azure_blob] Marked v{version} as consumed → v{consumed_into}")
+        except Exception as exc:
+            print(f"[azure_blob] Warning: could not mark v{version} consumed: {exc}")
 
     # ── Fine-tuned model (full HF weights) ───────────────────────────────────
 
@@ -102,8 +129,6 @@ class AzureBlobClient:
                             fh,
                             overwrite=True,
                             max_concurrency=4,
-                            max_block_size=_CHUNK_SIZE,           # 8 MB blocks — avoids TCP timeout on each block
-                            max_single_put_size=_CHUNK_SIZE,      # force block-blob path even for small files
                             length=file_size,
                             progress_hook=hook,
                         )
@@ -241,7 +266,7 @@ class AzureBlobClient:
             return keys
 
         cc = self._container_client(create_if_missing=True)
-        files = list(local.glob("*.gguf")) + list(local.glob("manifest.json"))
+        files = [f for f in local.glob("*.gguf") if "fp16" not in f.name.lower()] + list(local.glob("manifest.json"))
         print(f"[azure_blob] Uploading {len(files)} quantized file(s) → {self._container}/{prefix}/")
         _RETRY_DELAYS = [30, 60, 120, 240]
         failed: list[str] = []
@@ -262,8 +287,6 @@ class AzureBlobClient:
                             fh,
                             overwrite=True,
                             max_concurrency=4,
-                            max_block_size=_CHUNK_SIZE,
-                            max_single_put_size=_CHUNK_SIZE,
                             length=file_size,
                             progress_hook=hook,
                         )

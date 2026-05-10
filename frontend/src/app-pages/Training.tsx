@@ -51,7 +51,7 @@ import {
   type DeviceContribution,
   type TrainingStats,
 } from "@/lib/trainingApi";
-import { syncFeedbacksToRunpod, startRunpodFinetune, getRunpodJobStatus, startFederatedLearning, getFederatedJobStatus, shareGradients, getShareGradientsStatus, getShareGradientsJobStatus } from "@/lib/pdfUploadApi";
+import { syncFeedbacksToRunpod, startRunpodFinetune, getRunpodJobStatus, startFederatedLearning, getFederatedJobStatus, shareGradients, getShareGradientsStatus, getShareGradientsJobStatus, getRegisteredAdapterVersions } from "@/lib/pdfUploadApi";
 import {
   getAcordTrainingCount,
   getAcordTrainingSamples,
@@ -111,8 +111,12 @@ export default function Training() {
   const [federatedStatus, setFederatedStatus] = useState<string | null>(null);
   const [activeFederatedJobId, setActiveFederatedJobId] = useState<string | null>(null);
   const [federatedJobStatus, setFederatedJobStatus] = useState<{
-    status: string; phase?: string; version?: number; versions_aggregated?: number[]; error?: string;
+    status: string; phase?: string; version?: number; versions_aggregated?: number[]; error?: string; message?: string;
   } | null>(null);
+  const [registeredVersions, setRegisteredVersions] = useState<Array<{
+    adapter_version: string; domain: string; quant_levels: string[]; total_size_bytes: number; registered_at: string | null;
+  }>>([]);
+  const [registeredVersionsLoading, setRegisteredVersionsLoading] = useState(false);
 
   // Federated Learning — Share Gradients
   const [hasPendingShare, setHasPendingShare] = useState(false);
@@ -257,6 +261,7 @@ export default function Training() {
       })();
 
       loadData();
+      fetchRegisteredVersions();
       // Restore live polling for any job still marked running
       const savedJobs = getLocalJobs();
       const runningJob = savedJobs.find((j: any) => j.status === "running" && (j.config as any)?.runpod_job_id);
@@ -395,11 +400,17 @@ export default function Training() {
         if (["completed", "failed"].includes(status.status)) {
           setActiveFederatedJobId(null);
           setIsFederatedRunning(false);
-          setFederatedStatus(
-            status.status === "completed"
-              ? `Federated aggregation complete — model v${status.version ?? "?"} pushed to Azure Blob.`
-              : `Federated aggregation failed: ${status.error ?? "unknown error"}`
-          );
+          if (status.status === "completed") {
+            const didAggregate = Array.isArray(status.versions_aggregated) && status.versions_aggregated.length > 0;
+            setFederatedStatus(
+              didAggregate
+                ? `Federated aggregation complete — model v${status.version} pushed to Azure Blob.`
+                : (status.message ?? "No new weights to aggregate — all versions already processed. Share Gradients first to add new weights.")
+            );
+            if (didAggregate) fetchRegisteredVersions();
+          } else {
+            setFederatedStatus(`Federated aggregation failed: ${status.error ?? "unknown error"}`);
+          }
         }
       } catch (e: unknown) {
         if (!alive) return;
@@ -657,6 +668,18 @@ export default function Training() {
       setShareGradientsStatus(msg);
       setIsShareGradientsRunning(false);
       toast({ title: "Share Gradients failed", description: msg, variant: "destructive" });
+    }
+  };
+
+  const fetchRegisteredVersions = async () => {
+    setRegisteredVersionsLoading(true);
+    try {
+      const result = await getRegisteredAdapterVersions();
+      setRegisteredVersions(result.versions ?? []);
+    } catch {
+      // Non-fatal — pod may be offline or Supabase not configured
+    } finally {
+      setRegisteredVersionsLoading(false);
     }
   };
 
@@ -1554,9 +1577,12 @@ export default function Training() {
 
           {/* Federated job pipeline status */}
           {federatedJobStatus && (() => {
-            const isFedDone   = federatedJobStatus.status === "completed";
-            const isFedFailed = federatedJobStatus.status === "failed";
-            const isFedActive = !isFedDone && !isFedFailed;
+            const isFedDone     = federatedJobStatus.status === "completed";
+            const isFedFailed   = federatedJobStatus.status === "failed";
+            const isFedActive   = !isFedDone && !isFedFailed;
+            const didAggregate  = (federatedJobStatus.versions_aggregated?.length ?? 0) > 0;
+            // "completed" with no versions aggregated = nothing new to process
+            const isFedNoWork   = isFedDone && !didAggregate;
             const fedSteps = [
               { label: "Collect & Aggregate", desc: "Download weights from Azure Blob and run FedAvg", icon: Globe },
               { label: "New Model Ready",     desc: "Aggregated model pushed to Azure Blob",           icon: CheckCircle2 },
@@ -1568,8 +1594,9 @@ export default function Training() {
                     <Globe className="h-5 w-5" />
                     Federated Learning — Pipeline Status
                     {isFedActive  && <Loader2 className="h-4 w-4 ml-1 animate-spin text-blue-500" />}
-                    {isFedDone    && <CheckCircle2 className="h-4 w-4 ml-1 text-green-500" />}
-                    {isFedFailed  && <XCircle className="h-4 w-4 ml-1 text-red-500" />}
+                    {isFedDone && didAggregate  && <CheckCircle2 className="h-4 w-4 ml-1 text-green-500" />}
+                    {isFedNoWork                && <Info className="h-4 w-4 ml-1 text-amber-500" />}
+                    {isFedFailed                && <XCircle className="h-4 w-4 ml-1 text-red-500" />}
                   </CardTitle>
                   {federatedJobStatus.phase && (
                     <CardDescription className="flex items-center gap-1.5">
@@ -1582,8 +1609,8 @@ export default function Training() {
                   <div className="grid grid-cols-2 gap-3 mb-4">
                     {fedSteps.map((s, i) => {
                       const stepNum = i + 1;
-                      const done   = isFedDone ? true : fedPipelineStep > stepNum;
-                      const active = !isFedFailed && fedPipelineStep === stepNum;
+                      const done   = (isFedDone && didAggregate) ? true : fedPipelineStep > stepNum;
+                      const active = !isFedFailed && !isFedNoWork && fedPipelineStep === stepNum;
                       const failed = isFedFailed && fedPipelineStep === stepNum;
                       return (
                         <div key={s.label} className={`flex flex-col items-center text-center p-3 rounded-lg border transition-colors ${
@@ -1609,18 +1636,30 @@ export default function Training() {
                       );
                     })}
                   </div>
-                  <Progress value={isFedDone ? 100 : isFedFailed ? (fedPipelineStep / 2) * 100 : ((fedPipelineStep - 0.5) / 2) * 100} className="h-1.5 mb-3" />
-                  {isFedDone && (
+                  <Progress
+                    value={
+                      isFedNoWork ? 0 :
+                      (isFedDone && didAggregate) ? 100 :
+                      isFedFailed ? (fedPipelineStep / 2) * 100 :
+                      ((fedPipelineStep - 0.5) / 2) * 100
+                    }
+                    className="h-1.5 mb-3"
+                  />
+                  {isFedDone && didAggregate && (
                     <div className="space-y-1">
                       <div className="flex items-center gap-2 p-3 rounded-lg bg-green-500/10 border border-green-500/20 text-sm text-green-600 dark:text-green-400">
                         <CheckCircle2 className="h-4 w-4 shrink-0" />
-                        Federated model{federatedJobStatus.version ? ` v${federatedJobStatus.version}` : ""} registered in Fideon Weights — available for Electron download.
+                        Federated model v{federatedJobStatus.version} registered in Fideon Weights — available for Electron download.
                       </div>
-                      {(federatedJobStatus.versions_aggregated?.length ?? 0) > 0 && (
-                        <p className="text-xs text-muted-foreground px-1">
-                          Aggregated from versions: {federatedJobStatus.versions_aggregated!.map(v => `v${v}`).join(", ")}
-                        </p>
-                      )}
+                      <p className="text-xs text-muted-foreground px-1">
+                        Aggregated from versions: {federatedJobStatus.versions_aggregated!.map(v => `v${v}`).join(", ")}
+                      </p>
+                    </div>
+                  )}
+                  {isFedNoWork && (
+                    <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-sm text-amber-600 dark:text-amber-400">
+                      <Info className="h-4 w-4 shrink-0 mt-0.5" />
+                      <span>{federatedJobStatus.message ?? "No new weights to aggregate — all versions already processed. Share Gradients first to add new weights."}</span>
                     </div>
                   )}
                   {isFedFailed && (
@@ -1633,6 +1672,65 @@ export default function Training() {
               </Card>
             );
           })()}
+
+          {/* Registered Global Model Versions — persistent across page refreshes */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <CheckCircle2 className="h-5 w-5 text-green-500" />
+                Registered Global Models
+              </CardTitle>
+              <CardDescription>
+                Model versions registered in Azure Blob and available for Electron download.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {registeredVersionsLoading ? (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
+                  <Loader2 className="h-4 w-4 animate-spin" /> Loading registered versions…
+                </div>
+              ) : registeredVersions.length === 0 ? (
+                <div className="flex items-start gap-2 p-3 rounded-lg bg-muted/50 border text-sm text-muted-foreground">
+                  <Info className="h-4 w-4 shrink-0 mt-0.5 text-blue-500" />
+                  <span>No registered versions yet. Complete a Global Update to publish a model.</span>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {registeredVersions.map((v) => (
+                    <div key={v.adapter_version} className="flex items-center justify-between p-3 rounded-lg border bg-green-500/5 border-green-500/20">
+                      <div className="flex items-center gap-3">
+                        <CheckCircle2 className="h-4 w-4 text-green-500 shrink-0" />
+                        <div>
+                          <p className="text-sm font-semibold">v{v.adapter_version}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {v.quant_levels.map(q => q.toUpperCase()).join(" · ")}
+                            {" · "}
+                            {(v.total_size_bytes / 1e9).toFixed(1)} GB total
+                          </p>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <Badge variant="secondary" className="text-xs">
+                          {v.domain}
+                        </Badge>
+                        {v.registered_at && (
+                          <p className="text-[10px] text-muted-foreground mt-1">
+                            {new Date(v.registered_at).toLocaleDateString()}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  <button
+                    onClick={fetchRegisteredVersions}
+                    className="text-xs text-muted-foreground underline mt-1"
+                  >
+                    Refresh
+                  </button>
+                </div>
+              )}
+            </CardContent>
+          </Card>
 
           {/* Existing federated rounds from device-token API */}
           {rounds.length > 0 && (

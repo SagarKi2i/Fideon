@@ -31,6 +31,7 @@ import json
 import os
 import sys
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -332,6 +333,41 @@ _gpu_semaphore = threading.Semaphore(1)  # serialize GPU extraction — prevents
 _share_jobs: Dict[str, Dict[str, Any]] = {}
 _share_jobs_lock = threading.Lock()
 PENDING_SHARE_DIR = Path(os.getenv("PENDING_SHARE_DIR", "/workspace/fine_tuning/pending_shares"))
+
+
+class _PeriodicLogger:
+    """Prints a status line every `interval` seconds in a daemon thread.
+
+    Use as a context manager around any blocking call to get live terminal updates:
+        with _PeriodicLogger(10, lambda: f"Uploading... {elapsed}s elapsed"):
+            blocking_upload()
+    """
+    def __init__(self, interval: float, fn):
+        self._interval = interval
+        self._fn = fn
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join(timeout=self._interval + 1)
+
+    def _run(self):
+        while not self._stop.wait(self._interval):
+            try:
+                print(self._fn(), flush=True)
+            except Exception:
+                pass
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, *_):
+        self.stop()
 
 
 def _run_extract_job(job_id: str, pdf_path: str, form_type: str) -> None:
@@ -888,6 +924,54 @@ def list_registry_versions() -> Dict[str, Any]:
         return {"error": str(exc), "versions": []}
 
 
+@app.get("/federated/registered-versions")
+def get_registered_adapter_versions() -> Dict[str, Any]:
+    """
+    Query Supabase adapter_registry and return all registered GGUF versions,
+    grouped by adapter_version descending. Used by the frontend to display
+    a persistent list of globally aggregated model versions.
+    """
+    supabase_url = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    if not supabase_url or not supabase_key:
+        return {"versions": [], "message": "Supabase not configured on pod"}
+    try:
+        import httpx
+        from collections import defaultdict
+        headers = {
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
+        }
+        q = (
+            "select=adapter_version,quant_level,size_bytes,domain,created_at"
+            "&is_available=eq.true&blocked=eq.false"
+            "&order=adapter_version.desc"
+        )
+        resp = httpx.get(
+            f"{supabase_url}/rest/v1/adapter_registry?{q}",
+            headers=headers, timeout=10
+        )
+        if not resp.is_success:
+            return {"versions": [], "error": f"Supabase error: {resp.status_code}"}
+        rows = resp.json()
+        grouped: Dict[str, list] = defaultdict(list)
+        for r in rows:
+            grouped[r["adapter_version"]].append(r)
+        versions = [
+            {
+                "adapter_version": ver,
+                "domain":          artifacts[0].get("domain", "acord"),
+                "quant_levels":    [a["quant_level"] for a in artifacts if a["quant_level"] != "unknown"],
+                "total_size_bytes": sum(a["size_bytes"] for a in artifacts),
+                "registered_at":   artifacts[0].get("created_at"),
+            }
+            for ver, artifacts in sorted(grouped.items(), reverse=True)
+        ]
+        return {"versions": versions}
+    except Exception as exc:
+        return {"versions": [], "error": str(exc)}
+
+
 # ---------------------------------------------------------------------------
 # Federated Learning — FedAvg aggregation across all stored weight versions
 # ---------------------------------------------------------------------------
@@ -978,8 +1062,14 @@ def _run_federated_job(job_id: str) -> None:
     import shutil as _shutil
     import tempfile
 
+    # Shared state read by heartbeat threads across all phases
+    _fed_state: Dict[str, Any] = {"filename": "", "bytes": 0, "total_bytes": 0, "shard": 0, "total_shards": 0}
+
     def _progress_cb(filename: str, current: int, total: Optional[int]) -> None:
         pct = (current / total * 100) if total else 0
+        _fed_state["filename"] = filename
+        _fed_state["bytes"] = current
+        _fed_state["total_bytes"] = total or 0
         _update_fed_job(job_id, "downloading_weights", progress={
             "current_file": filename,
             "percentage": round(pct, 1),
@@ -993,29 +1083,14 @@ def _run_federated_job(job_id: str) -> None:
 
         # ── 1. Discover all available fine-tuned versions ────────────────────
         _update_fed_job(job_id, "discovering_versions")
+        print("[global-update] ══ Step 1/5 ══ Discovering available model versions in Azure Blob …", flush=True)
         latest = seaweed.get_latest_finetuned_version()
         if latest is None:
             raise RuntimeError("No fine-tuned weights found in storage. Run Local Training first.")
 
         versions_available: List[int] = []
         try:
-            if hasattr(seaweed, "list_finetuned_versions"):
-                # Full scan — discovers ALL stored versions, not just the last N
-                versions_available = seaweed.list_finetuned_versions(latest)
-            else:
-                # SeaweedFS fallback — paginate through ALL finetuned/v* prefixes
-                client = seaweed._boto_client()
-                paginator = client.get_paginator("list_objects_v2")
-                seen: set[int] = set()
-                for page in paginator.paginate(Bucket=seaweed._bucket, Prefix="finetuned/v", Delimiter="/"):
-                    for cp in page.get("CommonPrefixes", []):
-                        seg = cp.get("Prefix", "").rstrip("/").split("/")[-1]
-                        if seg.startswith("v"):
-                            try:
-                                seen.add(int(seg[1:]))
-                            except ValueError:
-                                pass
-                versions_available = sorted(seen)
+            versions_available = seaweed.list_finetuned_versions(latest)
         except Exception as exc:
             print(f"[federated] Version discovery error (using latest only): {exc}")
             versions_available = [latest]
@@ -1023,8 +1098,52 @@ def _run_federated_job(job_id: str) -> None:
         if not versions_available:
             versions_available = [latest]
 
+        # ── Filter: skip versions already successfully quantized ─────────────────
+        # A version with quantized/v{N}/*.gguf was processed by a prior Global Update.
+        # A version without .gguf files (or no quantized/ prefix) is fresh → include.
+        # If quantization previously FAILED (prefix exists but no .gguf), also include.
+        print("[global-update]   Checking which versions have already been quantized …", flush=True)
+        fresh_versions: List[int] = []
+        already_quantized: List[int] = []
+        for v in versions_available:
+            if seaweed.has_successful_quantization(v):
+                already_quantized.append(v)
+                print(f"[global-update]   Skipping v{v} — already quantized successfully", flush=True)
+            else:
+                fresh_versions.append(v)
+                print(f"[global-update]   Including v{v} — fresh / quantization not yet done", flush=True)
+
+        if not fresh_versions:
+            msg = (
+                f"No new weights to aggregate — all {len(already_quantized)} version(s) "
+                f"already quantized: {already_quantized}. "
+                "Run Local Training + Share Gradients first."
+            )
+            print(f"[global-update] {msg}", flush=True)
+            _set_fed_job(job_id, {
+                **_fed_jobs.get(job_id, {}),
+                "status": "completed",
+                "phase": "done",
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "version": latest,
+                "message": msg,
+                "versions_skipped_quantized": already_quantized,
+            })
+            return
+
+        print(
+            f"[global-update]   Fresh versions to aggregate: {fresh_versions} | "
+            f"Already quantized (skipped): {already_quantized}",
+            flush=True,
+        )
+        versions_available = fresh_versions
+
         _update_fed_job(job_id, "downloading_weights", versions_aggregated=versions_available)
-        print(f"[federated] Aggregating versions: {versions_available}")
+        print(
+            f"[global-update] ══ Step 2/5 ══ Collecting weights — "
+            f"versions to aggregate: {versions_available}",
+            flush=True,
+        )
 
         # ── 2. Pre-flight: ensure enough disk space on /workspace ────────────────
         import shutil as _shutil_check
@@ -1050,13 +1169,39 @@ def _run_federated_job(job_id: str) -> None:
             skipped_versions: List[int] = []
             for v in versions_available:
                 local_dir = str(tmp_dir / f"v{v}")
+                _fed_state["filename"] = ""
+                _fed_state["bytes"] = 0
+                _fed_state["total_bytes"] = 0
+                _t0_dl = time.time()
+                vidx = versions_available.index(v) + 1
+                print(
+                    f"[global-update]   Downloading v{v} from Azure Blob "
+                    f"({vidx}/{len(versions_available)}) …",
+                    flush=True,
+                )
+
+                def _dl_hb(ver=v, t0=_t0_dl):
+                    elapsed = int(time.time() - t0)
+                    fname = _fed_state["filename"]
+                    cur   = _fed_state["bytes"]
+                    tot   = _fed_state["total_bytes"]
+                    if tot and cur:
+                        return (
+                            f"[global-update]   Collecting weights v{ver} → {fname} | "
+                            f"{cur/1e9:.2f}/{tot/1e9:.2f} GB ({cur/tot*100:.0f}%) | {elapsed}s elapsed"
+                        )
+                    if fname:
+                        return f"[global-update]   Collecting weights v{ver} → {fname} | {elapsed}s elapsed"
+                    return f"[global-update]   Collecting weights v{ver} from Azure Blob | {elapsed}s elapsed"
+
                 try:
-                    seaweed.download_finetuned_model(v, local_dir, progress_callback=_progress_cb)
+                    with _PeriodicLogger(10, _dl_hb):
+                        seaweed.download_finetuned_model(v, local_dir, progress_callback=_progress_cb)
                     model_dirs.append(local_dir)
                     downloaded_versions.append(v)
-                    print(f"[federated] v{v} downloaded ✓")
+                    print(f"[global-update]   v{v} downloaded ✓ ({int(time.time()-_t0_dl)}s)", flush=True)
                 except Exception as dl_exc:
-                    print(f"[federated] WARNING: Skipping v{v} — download failed: {dl_exc}")
+                    print(f"[global-update]   WARNING: Skipping v{v} — download failed: {dl_exc}", flush=True)
                     skipped_versions.append(v)
 
             if not model_dirs:
@@ -1074,6 +1219,9 @@ def _run_federated_job(job_id: str) -> None:
 
             # ── 4. FedAvg aggregation ─────────────────────────────────────────
             def _avg_progress(shard_name: str, current: int, total: int) -> None:
+                _fed_state["filename"] = shard_name
+                _fed_state["shard"] = current
+                _fed_state["total_shards"] = total
                 _update_fed_job(job_id, "aggregating", progress={
                     "current_file": f"Averaging: {shard_name}",
                     "percentage": round(current / total * 100, 1) if total else 100,
@@ -1084,7 +1232,31 @@ def _run_federated_job(job_id: str) -> None:
 
             _update_fed_job(job_id, "aggregating")
             agg_dir = str(tmp_dir / "aggregated")
-            _fedavg_safetensors(model_dirs, agg_dir, progress_callback=_avg_progress)
+            _fed_state["shard"] = 0
+            _fed_state["total_shards"] = 0
+            _t0_agg = time.time()
+            print(
+                f"[global-update] ══ Step 3/5 ══ Aggregating weights — "
+                f"FedAvg across {len(model_dirs)} model(s) …",
+                flush=True,
+            )
+
+            def _agg_hb(t0=_t0_agg):
+                elapsed = int(time.time() - t0)
+                shard = _fed_state["shard"]
+                total_shards = _fed_state["total_shards"]
+                fname = _fed_state["filename"]
+                if total_shards:
+                    pct = shard / total_shards * 100
+                    return (
+                        f"[global-update]   Aggregating weights — shard {shard}/{total_shards} "
+                        f"({pct:.0f}%) | {fname} | {elapsed}s elapsed"
+                    )
+                return f"[global-update]   Aggregating weights (FedAvg) | {elapsed}s elapsed"
+
+            with _PeriodicLogger(10, _agg_hb):
+                _fedavg_safetensors(model_dirs, agg_dir, progress_callback=_avg_progress)
+            print(f"[global-update]   FedAvg complete. ({int(time.time()-_t0_agg)}s)", flush=True)
 
             # B7: verify aggregated model is valid before uploading
             _agg_path = Path(agg_dir)
@@ -1102,14 +1274,29 @@ def _run_federated_job(job_id: str) -> None:
                 "total_bytes": 100
             })
             gguf_dir = str(tmp_dir / "gguf")
+            _t0_quant = time.time()
+            print(
+                "[global-update] ══ Step 4/5 ══ Quantizing aggregated model → GGUF (Q5_K_M + Q4_K_M) …",
+                flush=True,
+            )
             try:
                 from fine_tuning.quantization.quantizer import run_quantization
-                quant_results = run_quantization(agg_dir, gguf_dir, latest + 1)
-                print(f"[federated] Quantization produced {len(quant_results)} GGUF(s)")
+                with _PeriodicLogger(
+                    10,
+                    lambda t0=_t0_quant: (
+                        f"[global-update]   Quantizing to GGUF | {int(time.time()-t0)}s elapsed"
+                    ),
+                ):
+                    quant_results = run_quantization(agg_dir, gguf_dir, latest + 1)
+                print(
+                    f"[global-update]   Quantization complete — "
+                    f"{len(quant_results)} GGUF(s) produced. ({int(time.time()-_t0_quant)}s)",
+                    flush=True,
+                )
             except Exception as exc:
-                print(f"[federated] Quantization failed (non-fatal): {exc}")
+                print(f"[global-update]   Quantization failed (non-fatal): {exc}", flush=True)
                 quant_results = {}
-            
+
             _update_fed_job(job_id, "quantizing", progress={
                 "current_file": "GGUF Conversion Complete",
                 "percentage": 100,
@@ -1120,6 +1307,9 @@ def _run_federated_job(job_id: str) -> None:
             # ── 6. Upload aggregated model + GGUFs as new version ─────────────
             def _up_progress(fname: str, cur: int, tot: Optional[int]) -> None:
                 pct = (cur / tot * 100) if tot else 0
+                _fed_state["filename"] = fname
+                _fed_state["bytes"] = cur
+                _fed_state["total_bytes"] = tot or 0
                 _update_fed_job(job_id, "uploading", progress={
                     "current_file": fname,
                     "percentage": round(pct, 1),
@@ -1129,14 +1319,45 @@ def _run_federated_job(job_id: str) -> None:
 
             _update_fed_job(job_id, "uploading")
             new_version = latest + 1
-            seaweed.upload_hf_model(agg_dir, new_version, progress_callback=_up_progress)
+            _fed_state["filename"] = ""
+            _fed_state["bytes"] = 0
+            _fed_state["total_bytes"] = 0
+            _t0_up = time.time()
+            print(
+                f"[global-update] ══ Step 5/5 ══ Uploading aggregated model v{new_version} → Azure Blob …",
+                flush=True,
+            )
+
+            def _up_hb(ver=new_version, t0=_t0_up):
+                elapsed = int(time.time() - t0)
+                fname = _fed_state["filename"]
+                cur   = _fed_state["bytes"]
+                tot   = _fed_state["total_bytes"]
+                if tot and cur:
+                    return (
+                        f"[global-update]   Uploading v{ver} → {fname} | "
+                        f"{cur/1e9:.2f}/{tot/1e9:.2f} GB ({cur/tot*100:.0f}%) | {elapsed}s elapsed"
+                    )
+                if fname:
+                    return f"[global-update]   Uploading v{ver} → {fname} | {elapsed}s elapsed"
+                return f"[global-update]   Uploading aggregated model v{ver} | {elapsed}s elapsed"
+
+            with _PeriodicLogger(10, _up_hb):
+                seaweed.upload_hf_model(agg_dir, new_version, progress_callback=_up_progress)
+            print(f"[global-update]   HF model upload complete. ({int(time.time()-_t0_up)}s)", flush=True)
+
             gguf_s3_keys: List[str] = []
             if quant_results:
                 try:
-                    gguf_s3_keys = seaweed.upload_quantized(gguf_dir, new_version, progress_callback=_up_progress)
-                    print(f"[federated] GGUF(s) uploaded for v{new_version}")
+                    print(f"[global-update]   Uploading GGUF artifacts for v{new_version} …", flush=True)
+                    _fed_state["filename"] = ""
+                    _fed_state["bytes"] = 0
+                    _fed_state["total_bytes"] = 0
+                    with _PeriodicLogger(10, _up_hb):
+                        gguf_s3_keys = seaweed.upload_quantized(gguf_dir, new_version, progress_callback=_up_progress)
+                    print(f"[global-update]   GGUF(s) uploaded for v{new_version} ✓", flush=True)
                 except Exception as exc:
-                    print(f"[federated] GGUF upload failed (non-fatal): {exc}")
+                    print(f"[global-update]   GGUF upload failed (non-fatal): {exc}", flush=True)
 
             # Register GGUFs in Supabase adapter_registry so Electron devices
             # can discover and download the globally aggregated model.
@@ -1146,6 +1367,15 @@ def _run_federated_job(job_id: str) -> None:
                     _register_gguf_in_supabase(gguf_s3_keys, new_version, gguf_dir)
                 except Exception as exc:
                     print(f"[federated] adapter_registry registration failed (non-fatal): {exc}")
+
+            # ── Mark input versions as consumed so future Global Updates skip them ──
+            # Without this, every subsequent run re-aggregates the same input versions
+            # because quantized/v{input}/ has no .gguf (the output was v{new_version}).
+            for v in downloaded_versions:
+                try:
+                    seaweed.mark_version_consumed(v, new_version)
+                except Exception as _mark_exc:
+                    print(f"[global-update]   Warning: could not mark v{v} consumed: {_mark_exc}")
 
             # ── Done ──────────────────────────────────────────────────────────
             _set_fed_job(job_id, {
@@ -1157,7 +1387,11 @@ def _run_federated_job(job_id: str) -> None:
                 "versions_aggregated": downloaded_versions,
                 "versions_skipped": skipped_versions,
             })
-            print(f"[federated] Aggregation complete — new version v{new_version} uploaded to storage.")
+            print(
+                f"[global-update] ✓ Global Update complete — "
+                f"aggregated model v{new_version} is now live in Azure Blob.",
+                flush=True,
+            )
         finally:
             _shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -1187,8 +1421,14 @@ def _run_share_job(job_id: str, pending_entries: List[tuple]) -> None:
                 _share_jobs[job_id]["phase"] = phase
                 _share_jobs[job_id].update(kw)
 
+    # Shared state dict read by the periodic heartbeat thread
+    _state: Dict[str, Any] = {"filename": "", "bytes": 0, "total_bytes": 0}
+
     def _progress_cb(filename: str, current: int, total: Optional[int]) -> None:
         pct = (current / total * 100) if total else 0
+        _state["filename"] = filename
+        _state["bytes"] = current
+        _state["total_bytes"] = total or 0
         with _share_jobs_lock:
             if job_id in _share_jobs:
                 _share_jobs[job_id]["progress"] = {
@@ -1204,11 +1444,19 @@ def _run_share_job(job_id: str, pending_entries: List[tuple]) -> None:
 
         uploaded_versions: List[int] = []
         failed_versions: List[tuple] = []   # (version, error_str)
+        total_versions = len(pending_entries)
 
-        for file_path, pending in pending_entries:
+        for idx, (file_path, pending) in enumerate(pending_entries, 1):
             version = pending.get("version", "?")
             _upd(f"uploading_v{version}", current_version=version)
-            print(f"[share-gradients] Uploading v{version} ({file_path.name})…")
+            print(
+                f"[share-gradients] ══ Version {idx}/{total_versions} ══ "
+                f"Starting upload for v{version} …",
+                flush=True,
+            )
+            _state["filename"] = ""
+            _state["bytes"] = 0
+            _state["total_bytes"] = 0
 
             try:
                 # Validate paths exist before calling promote_adapter
@@ -1224,17 +1472,48 @@ def _run_share_job(job_id: str, pending_entries: List[tuple]) -> None:
                         f"adapter_path missing or not on disk: '{adapter_path}'."
                     )
 
-                promote_adapter(
-                    adapter_id=pending["job_id"],
-                    registry_path=pending["registry_path"],
-                    version=pending["version"],
-                    merged_model_path=pending["merged_model_path"],
-                    adapter_path=pending["adapter_path"],
-                    eval_scores=pending.get("eval_scores", {}),
-                    training_meta=pending.get("training_meta", {}),
-                    base_model=pending.get("base_model", ""),
-                    progress_callback=_progress_cb,
+                _t0_ver = time.time()
+
+                def _heartbeat(ver=version, t0=_t0_ver):
+                    elapsed = int(time.time() - t0)
+                    fname = _state["filename"]
+                    cur   = _state["bytes"]
+                    tot   = _state["total_bytes"]
+                    if tot and cur:
+                        gb_cur = cur / 1e9
+                        gb_tot = tot / 1e9
+                        pct    = cur / tot * 100
+                        return (
+                            f"[share-gradients] Uploading v{ver} → {fname} | "
+                            f"{gb_cur:.2f}/{gb_tot:.2f} GB ({pct:.0f}%) | {elapsed}s elapsed"
+                        )
+                    if fname:
+                        return f"[share-gradients] Processing v{ver} → {fname} | {elapsed}s elapsed"
+                    return f"[share-gradients] Uploading v{ver} to Azure Blob | {elapsed}s elapsed"
+
+                print(
+                    f"[share-gradients] Step 1/3 — Uploading merged model + running quantization …",
+                    flush=True,
                 )
+                with _PeriodicLogger(10, _heartbeat):
+                    promote_adapter(
+                        adapter_id=pending["job_id"],
+                        registry_path=pending["registry_path"],
+                        version=pending["version"],
+                        merged_model_path=pending["merged_model_path"],
+                        adapter_path=pending["adapter_path"],
+                        eval_scores=pending.get("eval_scores", {}),
+                        training_meta=pending.get("training_meta", {}),
+                        base_model=pending.get("base_model", ""),
+                        progress_callback=_progress_cb,
+                        skip_quantization=True,  # raw weights only — Global Update quantizes after FedAvg
+                    )
+                print(
+                    f"[share-gradients] Step 2/3 — Upload complete ({int(time.time()-_t0_ver)}s). "
+                    f"Removing local copies …",
+                    flush=True,
+                )
+
                 # Delete pending-share manifest only after confirmed upload success
                 file_path.unlink(missing_ok=True)
 
@@ -1242,19 +1521,22 @@ def _run_share_job(job_id: str, pending_entries: List[tuple]) -> None:
                 _merged = Path(merged_model_path)
                 if _merged.exists():
                     _shutil.rmtree(_merged, ignore_errors=True)
-                    print(f"[share-gradients] Deleted local merged model: {_merged}")
+                    print(f"[share-gradients]   Deleted local merged model: {_merged}", flush=True)
                 # GGUF dir sits next to the merged dir as {version}-gguf/
                 _gguf_dir = _merged.parent / f"{version}-gguf"
                 if _gguf_dir.exists():
                     _shutil.rmtree(_gguf_dir, ignore_errors=True)
-                    print(f"[share-gradients] Deleted local GGUF dir: {_gguf_dir}")
+                    print(f"[share-gradients]   Deleted local GGUF dir: {_gguf_dir}", flush=True)
                 _adapter = Path(adapter_path)
                 if _adapter.exists():
                     _shutil.rmtree(_adapter, ignore_errors=True)
-                    print(f"[share-gradients] Deleted local adapter: {_adapter}")
+                    print(f"[share-gradients]   Deleted local adapter: {_adapter}", flush=True)
 
                 uploaded_versions.append(version)
-                print(f"[share-gradients] v{version} uploaded, local weights cleared.")
+                print(
+                    f"[share-gradients] Step 3/3 — v{version} ✓ Weights shared and local copies cleared.",
+                    flush=True,
+                )
 
             except Exception as ver_exc:
                 import traceback as _tb
@@ -1424,8 +1706,17 @@ async def start_federated(body: Dict[str, Any] = Body(default={})) -> Dict[str, 
                        "Set STORAGE_BACKEND=azure + AZURE_BLOB_* vars, "
                        "or STORAGE_BACKEND=seaweedfs + SEAWEEDFS_ENDPOINT.",
         }
+
+    loop = asyncio.get_event_loop()
     try:
-        seaweed.probe()
+        # Run probe() off the event loop so it never blocks incoming requests.
+        # Hard 15s timeout prevents Cloudflare 524 if Azure is slow/unreachable.
+        await asyncio.wait_for(loop.run_in_executor(None, seaweed.probe), timeout=15.0)
+    except asyncio.TimeoutError:
+        return {
+            "status": "storage_unreachable",
+            "message": f"Storage probe timed out after 15s at {seaweed._endpoint}.",
+        }
     except Exception as _conn_exc:
         return {
             "status": "storage_unreachable",
@@ -1435,7 +1726,7 @@ async def start_federated(body: Dict[str, Any] = Body(default={})) -> Dict[str, 
             ),
         }
 
-    latest = seaweed.get_latest_finetuned_version()
+    latest = await loop.run_in_executor(None, seaweed.get_latest_finetuned_version)
     if latest is None:
         return {
             "status": "no_weights",

@@ -139,6 +139,7 @@ def promote_adapter(
     actor: str = "pipeline",
     force: bool = False,
     progress_callback: Optional[Any] = None,
+    skip_quantization: bool = False,
 ) -> Dict[str, Any]:
     """
     Finalise promotion of a merged model version.
@@ -146,16 +147,20 @@ def promote_adapter(
     Steps
     -----
     1. Upload merged HF model   → Azure Blob  finetuned/v{version}/
-    2. Quantize                 → GGUF Q5_K_M + Q4_K_M (skipped if llama.cpp absent)
-    3. Upload quantized GGUFs   → Azure Blob  quantized/v{version}/
+    2. Quantize                 → GGUF Q5_K_M + Q4_K_M  (skipped when skip_quantization=True)
+    3. Upload quantized GGUFs   → Azure Blob  quantized/v{version}/  (skipped when skip_quantization=True)
     4. Register GGUFs           → Supabase adapter_registry (Electron delivery)
     5. Update registry          → promote_version() with all storage paths
     6. Write model card
     7. Send alert
+
+    skip_quantization=True is used by Share Gradients: only the raw HF weights are
+    uploaded so that Global Update's filter (has_successful_quantization) can correctly
+    identify these versions as fresh/unquantized and include them in FedAvg.
+    Quantization of the aggregated model is done exclusively by Global Update.
     """
     from fine_tuning.registry.version_registry import VersionRegistry
     from fine_tuning.registry.model_card import write_model_card
-    from fine_tuning.quantization.quantizer import run_quantization
 
     registry = VersionRegistry(registry_path)
     storage  = get_storage_client()
@@ -164,25 +169,32 @@ def promote_adapter(
     storage_quantized_keys:   List[str]     = []
 
     # ── 1. Upload merged HF model → finetuned/v{N}/ ─────────────────────────
+    # Fatal — if this fails, we must NOT delete the local manifest or weights.
+    # The exception propagates to _run_share_job which keeps the manifest for retry.
     print(f"[orchestrator] Uploading merged HF model (v{version}) to Azure Blob …")
-    try:
-        storage_finetuned_prefix = storage.upload_hf_model(
-            merged_model_path, version, progress_callback=progress_callback
-        )
-    except Exception as exc:
-        print(f"[orchestrator] HF model upload failed (non-fatal): {exc}")
+    storage_finetuned_prefix = storage.upload_hf_model(
+        merged_model_path, version, progress_callback=progress_callback
+    )
 
     # ── 2. Quantize merged model → GGUF ─────────────────────────────────────
-    gguf_output_dir = str(Path(merged_model_path).parent / f"{version}-gguf")
-    print(f"[orchestrator] Running quantization → {gguf_output_dir}")
-    try:
-        quant_results = run_quantization(merged_model_path, gguf_output_dir, version)
-    except Exception as exc:
-        print(f"[orchestrator] Quantization failed (non-fatal): {exc}")
+    # Skipped during Share Gradients so that quantized/v{N}/ is NOT created here.
+    # Global Update detects fresh versions by the absence of quantized/v{N}/*.gguf.
+    if skip_quantization:
+        print(f"[orchestrator] Skipping quantization (Share Gradients mode — Global Update will quantize after FedAvg).")
         quant_results = {}
+    else:
+        from fine_tuning.quantization.quantizer import run_quantization
+        gguf_output_dir = str(Path(merged_model_path).parent / f"{version}-gguf")
+        print(f"[orchestrator] Running quantization → {gguf_output_dir}")
+        try:
+            quant_results = run_quantization(merged_model_path, gguf_output_dir, version)
+        except Exception as exc:
+            print(f"[orchestrator] Quantization failed (non-fatal): {exc}")
+            quant_results = {}
 
     # ── 3. Upload quantized GGUFs → quantized/v{N}/ ─────────────────────────
     if quant_results:
+        gguf_output_dir = str(Path(merged_model_path).parent / f"{version}-gguf")
         print(f"[orchestrator] Uploading {len(quant_results)} GGUF(s) to Azure Blob …")
         try:
             storage_quantized_keys = storage.upload_quantized(
@@ -191,7 +203,8 @@ def promote_adapter(
         except Exception as exc:
             print(f"[orchestrator] Quantized upload failed (non-fatal): {exc}")
     else:
-        print("[orchestrator] No GGUF artifacts — skipping quantized upload.")
+        if not skip_quantization:
+            print("[orchestrator] No GGUF artifacts — skipping quantized upload.")
 
     # ── 4. Register GGUFs in Supabase adapter_registry → Electron delivery ──
     if storage_quantized_keys:
@@ -200,7 +213,8 @@ def promote_adapter(
         except Exception as exc:
             print(f"[orchestrator] adapter_registry registration failed (non-fatal): {exc}")
     else:
-        print("[orchestrator] No GGUF blob keys — skipping adapter_registry registration.")
+        if not skip_quantization:
+            print("[orchestrator] No GGUF blob keys — skipping adapter_registry registration.")
 
     # ── 5. Update local registry ─────────────────────────────────────────────
     registry.promote_version(
