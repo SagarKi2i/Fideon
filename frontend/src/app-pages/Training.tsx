@@ -832,6 +832,8 @@ export default function Training() {
       case "evaluating":          return "Evaluating model quality…";
       case "gate_checked":        return "Quality gate passed ✓";
       case "merging":             return "Merging LoRA adapter…";
+      case "reloading_model":     return "Loading fine-tuned model for extraction…";
+      case "pending_share":       return "Preparing weights for sharing…";
       case "promoting":           return "Uploading to SeaweedFS & registering…";
       case "done":                return "Complete — model registered";
       default:                    return phase ? `${phase}…` : "Processing…";
@@ -1584,7 +1586,9 @@ export default function Training() {
                         <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
                         Running PDF through fine-tuned model v{trainedModelVersion ?? "?"} — this takes 1–5 minutes…
                       </div>
-                      <Progress value={undefined} className="h-1 animate-pulse" />
+                      <div className="h-1 w-full rounded-full bg-blue-500/20 overflow-hidden">
+                        <div className="h-full w-1/3 bg-blue-500 rounded-full animate-[pulse_1.5s_ease-in-out_infinite]" />
+                      </div>
                     </div>
                   )}
 
