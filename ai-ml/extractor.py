@@ -613,6 +613,14 @@ Additional Rules:
 """
 
 
+# ── Ollama system prompt (matches ingest.py training format exactly) ─────────
+_OLLAMA_SYSTEM_PROMPT = (
+    "You are an expert insurance document parser specialising in ACORD forms. "
+    "Given raw OCR text from an ACORD form, extract ALL fields and return a single "
+    "valid JSON object. Use \"\" for blank fields. Represent checkboxes as true/false. "
+    "Represent table rows as arrays of objects. Output ONLY the JSON — no commentary."
+)
+
 # ── Ollama inference (USE_OLLAMA=true) ───────────────────────────────────────
 
 def _run_ollama_extraction(
@@ -624,49 +632,46 @@ def _run_ollama_extraction(
     """
     Route VLM inference through Ollama (GGUF served locally on the pod).
 
-    Uses the same prompt as _run_qwen_extraction and the same _parse_qwen_output
-    parser so the rest of the pipeline is unchanged.  Supports vision (base64 JPEG)
-    when the loaded GGUF is a vision-capable model (e.g. Qwen2-VL GGUF).
+    Uses the exact prompt format the fine-tuned model was trained on:
+      System: _OLLAMA_SYSTEM_PROMPT
+      User:   "ACORD Form {form_type}\\n\\nOCR TEXT:\\n{surya_ocr_text}"
+    The model outputs plain JSON which _parse_qwen_output handles via its
+    JSON-scan fallback (no FIELDS: marker needed).
     """
     from ollama_client import OllamaClient  # lazy import — only loaded when needed
 
     client = OllamaClient()
 
-    page_images = images[:4] if images else []
-    if not surya_ocr_text or not surya_ocr_text.strip():
-        surya_ocr_text = "(no OCR text available)"
+    ocr_text = surya_ocr_text.strip() if surya_ocr_text else ""
 
-    context_parts: List[str] = []
-    if surya_ocr_text.strip() and surya_ocr_text != "(no OCR text available)":
-        context_parts.append(
-            f"=== Surya OCR text (line-by-line) ===\n{surya_ocr_text[:2500]}"
-        )
-    if docling_result.get("markdown", "").strip():
-        context_parts.append(
-            f"=== Docling structured markdown (tables + layout) ===\n{docling_result['markdown'][:2500]}"
-        )
+    # Supplement Surya OCR with Docling KV pairs when available — gives the model
+    # richer text coverage without changing the trained prompt structure.
+    extra_lines: List[str] = []
     if docling_result.get("kv_pairs"):
-        kv_str = "\n".join(f"{k}: {v}" for k, v in list(docling_result["kv_pairs"].items())[:60])
-        context_parts.append(f"=== Docling KV pairs ===\n{kv_str}")
-    if docling_result.get("tables"):
-        tables_str = "\n\n".join(docling_result["tables"][:5])
-        context_parts.append(f"=== Docling extracted tables ===\n{tables_str[:1500]}")
+        for k, v in list(docling_result["kv_pairs"].items())[:60]:
+            if k and v:
+                extra_lines.append(f"{k}: {v}")
+    if extra_lines:
+        ocr_text = ocr_text + "\n\n" + "\n".join(extra_lines)
 
-    prompt = _PROMPT_TEMPLATE
-    if context_parts:
-        prompt += "\n\n" + "\n\n".join(context_parts)
-    else:
-        prompt += (
-            "\n\nNote: Surya OCR and Docling outputs are unavailable. "
-            "Extract all fields directly from the page images."
-        )
+    if not ocr_text:
+        ocr_text = "(no OCR text available)"
 
-    logger.info("[ollama] Sending extraction request — pages=%d context_parts=%d",
-                len(page_images), len(context_parts))
+    # Trim to fit within the model's context window (8 192 tokens ≈ ~6 000 chars safe)
+    if len(ocr_text) > 6000:
+        ocr_text = ocr_text[:6000]
 
-    output_text = client.extract_acord_fields(
+    prompt = f"ACORD Form {form_type}\n\nOCR TEXT:\n{ocr_text}"
+
+    logger.info("[ollama] Sending extraction request — ocr_chars=%d", len(ocr_text))
+
+    output_text = client.chat(
         prompt=prompt,
-        images=page_images if page_images else None,
+        system=_OLLAMA_SYSTEM_PROMPT,
+        images=None,          # fine-tuned model is text-only; images not in training data
+        num_ctx=8192,
+        max_tokens=4096,
+        temperature=0.1,
     )
 
     logger.info("[ollama] Response received — %d chars", len(output_text))
