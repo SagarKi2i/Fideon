@@ -1042,23 +1042,7 @@ def _run_federated_job(job_id: str) -> None:
 
         versions_available: List[int] = []
         try:
-            if hasattr(seaweed, "list_finetuned_versions"):
-                # Full scan — discovers ALL stored versions, not just the last N
-                versions_available = seaweed.list_finetuned_versions(latest)
-            else:
-                # SeaweedFS fallback — paginate through ALL finetuned/v* prefixes
-                client = seaweed._boto_client()
-                paginator = client.get_paginator("list_objects_v2")
-                seen: set[int] = set()
-                for page in paginator.paginate(Bucket=seaweed._bucket, Prefix="finetuned/v", Delimiter="/"):
-                    for cp in page.get("CommonPrefixes", []):
-                        seg = cp.get("Prefix", "").rstrip("/").split("/")[-1]
-                        if seg.startswith("v"):
-                            try:
-                                seen.add(int(seg[1:]))
-                            except ValueError:
-                                pass
-                versions_available = sorted(seen)
+            versions_available = seaweed.list_finetuned_versions(latest)
         except Exception as exc:
             print(f"[federated] Version discovery error (using latest only): {exc}")
             versions_available = [latest]
@@ -1624,8 +1608,17 @@ async def start_federated(body: Dict[str, Any] = Body(default={})) -> Dict[str, 
                        "Set STORAGE_BACKEND=azure + AZURE_BLOB_* vars, "
                        "or STORAGE_BACKEND=seaweedfs + SEAWEEDFS_ENDPOINT.",
         }
+
+    loop = asyncio.get_event_loop()
     try:
-        seaweed.probe()
+        # Run probe() off the event loop so it never blocks incoming requests.
+        # Hard 15s timeout prevents Cloudflare 524 if Azure is slow/unreachable.
+        await asyncio.wait_for(loop.run_in_executor(None, seaweed.probe), timeout=15.0)
+    except asyncio.TimeoutError:
+        return {
+            "status": "storage_unreachable",
+            "message": f"Storage probe timed out after 15s at {seaweed._endpoint}.",
+        }
     except Exception as _conn_exc:
         return {
             "status": "storage_unreachable",
@@ -1635,7 +1628,7 @@ async def start_federated(body: Dict[str, Any] = Body(default={})) -> Dict[str, 
             ),
         }
 
-    latest = seaweed.get_latest_finetuned_version()
+    latest = await loop.run_in_executor(None, seaweed.get_latest_finetuned_version)
     if latest is None:
         return {
             "status": "no_weights",
