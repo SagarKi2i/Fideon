@@ -83,6 +83,100 @@ WRAPPER
     chmod +x /usr/local/bin/llama-convert-hf-to-gguf
 fi
 
+# ── Ollama: install → serve → load GGUF from Azure Blob ───────────────────────
+# Activated only when USE_OLLAMA=true is set in the pod environment vars.
+# Sequence: install binary → start service → wait ready → python model_loader.py
+if [ "${USE_OLLAMA:-false}" = "true" ]; then
+
+    # 0. Log GPU visibility — Ollama's install script auto-detects NVIDIA drivers;
+    #    this confirms the GPU is visible to the container before we proceed.
+    if command -v nvidia-smi &>/dev/null; then
+        log "NVIDIA GPU detected:"
+        nvidia-smi --query-gpu=name,memory.total,driver_version \
+            --format=csv,noheader 2>/dev/null | while IFS= read -r line; do
+            log "  GPU: $line"
+        done
+    else
+        log_err "nvidia-smi not found — Ollama may run on CPU only (check RunPod GPU allocation)"
+    fi
+
+    # 1. Install Ollama binary if not present
+    #    The official install script detects NVIDIA drivers and installs the CUDA-enabled binary.
+    if ! command -v ollama &>/dev/null; then
+        log "Ollama not found — installing (CUDA-enabled build)..."
+        curl -fsSL https://ollama.com/install.sh | sh >> "$LOG" 2>&1
+        if command -v ollama &>/dev/null; then
+            log "Ollama installed: $(ollama --version 2>/dev/null)"
+        else
+            log_err "Ollama installation failed — Ollama features unavailable"
+        fi
+    else
+        log "Ollama already installed: $(ollama --version 2>/dev/null)"
+    fi
+
+    # 2. Start ollama serve in background (models persisted in /workspace)
+    if command -v ollama &>/dev/null; then
+        mkdir -p /workspace/.ollama
+        export OLLAMA_MODELS=/workspace/.ollama
+
+        if pgrep -x ollama &>/dev/null; then
+            log "Ollama service already running"
+        else
+            log "Starting Ollama service (models: /workspace/.ollama, host: 0.0.0.0:11434)..."
+            # OLLAMA_HOST   — scoped to this process only; Python clients need http:// and must
+            #                 not inherit the bare host:port format the daemon expects.
+            # OLLAMA_NUM_GPU=999 — load ALL transformer layers onto GPU; Ollama caps this at the
+            #                 real layer count automatically. Without this, Ollama's conservative
+            #                 VRAM estimate can silently offload some layers to CPU.
+            OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_GPU=999 ollama serve >> "$LOG" 2>&1 &
+            OLLAMA_PID=$!
+            log "Ollama PID: $OLLAMA_PID"
+
+            # Wait up to 30 s for the Ollama HTTP API to respond
+            OLLAMA_READY=0
+            for i in $(seq 1 30); do
+                if curl -sf http://localhost:11434/api/tags -o /dev/null 2>/dev/null; then
+                    OLLAMA_READY=1
+                    log "Ollama API ready (${i}s)"
+                    break
+                fi
+                sleep 1
+            done
+            if [ $OLLAMA_READY -eq 0 ]; then
+                log_err "Ollama API did not respond within 30s — model_loader.py may fail"
+            else
+                # Confirm Ollama is running on GPU (appears in /api/tags response or ps output)
+                GPU_PROCS=$(nvidia-smi --query-compute-apps=pid,used_memory \
+                    --format=csv,noheader 2>/dev/null | grep -c "$OLLAMA_PID" || true)
+                if [ "$GPU_PROCS" -gt 0 ] 2>/dev/null; then
+                    log "Ollama confirmed on GPU (PID $OLLAMA_PID has GPU memory allocation)"
+                else
+                    log "Ollama API ready — GPU allocation will appear after first model load"
+                fi
+            fi
+        fi
+
+        # 3. Download latest GGUF from Azure Blob and register with Ollama
+        if [ -n "${AZURE_BLOB_ACCOUNT_URL}" ] && [ -n "${AZURE_BLOB_SAS_TOKEN}" ]; then
+            log "Running model_loader.py — downloading GGUF from Azure Blob into Ollama..."
+            "$PY" /app/model_loader.py --skip-if-loaded >> "$LOG" 2>&1
+            if [ $? -eq 0 ]; then
+                log "GGUF model loaded into Ollama successfully"
+            else
+                log_err "model_loader.py failed — check Azure Blob credentials in pod env vars"
+                log_err "USE_OLLAMA=true but no model loaded — extraction requests will fail until resolved"
+                log_err "To use transformers instead, set USE_OLLAMA=false and restart the pod"
+            fi
+        else
+            log_err "AZURE_BLOB_ACCOUNT_URL or AZURE_BLOB_SAS_TOKEN not set"
+            log_err "Set these env vars in RunPod pod config to enable Ollama GGUF inference"
+        fi
+    fi
+
+else
+    log "USE_OLLAMA=false — skipping Ollama (using transformers/Qwen2-VL directly)"
+fi
+
 # ── Start FastAPI ──────────────────────────────────────────────────────────────
 _start_fastapi() {
     cd /app
