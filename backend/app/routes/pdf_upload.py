@@ -431,12 +431,15 @@ async def extract_acord_from_upload(
     # internal extraction missed them (e.g. truncated context, partial model output).
     llm_fields = await _llm_extract_from_raw_text(raw_text, form_type_hint=form_type)
     if llm_fields:
-        # RunPod values win over LLM when both exist and RunPod value is non-null.
+        # RunPod (fine-tuned model) values win — start with LLM fields as a base,
+        # then overwrite with any non-null RunPod value so the fine-tuned model's
+        # corrections are never silently replaced by the backend LLM.
+        merged = dict(llm_fields)
         for k, v in runpod_fields.items():
-            if k not in llm_fields or llm_fields[k] is None:
-                llm_fields[k] = v
-        result["extracted_json"] = llm_fields
-        log.info("acord_extract.llm_supplement_done", upload_id=upload_id, field_count=len(llm_fields))
+            if v is not None and v != "":
+                merged[k] = v
+        result["extracted_json"] = merged
+        log.info("acord_extract.llm_supplement_done", upload_id=upload_id, field_count=len(merged))
     else:
         result["extracted_json"] = runpod_fields
         log.info("acord_extract.llm_supplement_skipped", upload_id=upload_id)
