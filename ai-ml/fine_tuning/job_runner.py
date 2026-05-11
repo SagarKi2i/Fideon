@@ -194,6 +194,9 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
         def _cache_is_complete(p: Path) -> bool:
             if not p.exists() or not (p / "config.json").exists():
                 return False
+            if not (p / "preprocessor_config.json").exists():
+                print(f"[job_runner] Cache v{seaweed_version} missing preprocessor_config.json — treating as incomplete")
+                return False
             index_file = p / "model.safetensors.index.json"
             if index_file.exists():
                 try:
@@ -228,8 +231,15 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
             )
             try:
                 storage.download_finetuned_model(seaweed_version, cache_dir)
-                print(f"[job_runner] Storage model v{seaweed_version} ready at {cache_dir}")
-                return cache_dir
+                if _cache_is_complete(cache_path):
+                    print(f"[job_runner] Storage model v{seaweed_version} ready at {cache_dir}")
+                    return cache_dir
+                else:
+                    print(
+                        f"[job_runner] Downloaded model v{seaweed_version} is incomplete "
+                        f"(missing processor files in SeaweedFS) — falling back to local model."
+                    )
+                    shutil.rmtree(cache_path, ignore_errors=True)
             except Exception as exc:
                 print(f"[job_runner] Storage download failed (non-fatal): {exc}")
                 # Remove partial download to reclaim space
