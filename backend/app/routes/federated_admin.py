@@ -12,8 +12,8 @@ Endpoints (all require admin or global_admin role):
       Query params: model_id (optional), status (optional), limit (default 20)
 
   POST /api/v1/admin/federated/rounds/{round_id}/aggregate
-      Trigger FedAvg + SeaweedFS upload + quantization for a round that is
-      in 'aggregating' status. Runs in a background thread; returns immediately.
+      Trigger FedAvg + Azure Blob upload + quantization for a round that is
+      in 'aggregating' status. Proxies to the RunPod AI/ML server; returns immediately.
 
   POST /api/v1/admin/federated/rounds/{round_id}/close
       Force-close a round without aggregating (e.g. insufficient contributions).
@@ -62,27 +62,29 @@ def _run_aggregation_bg(
     model_id: str,
     round_number: int,
     log_lines: list[str],
+    runpod_url: str,
 ) -> None:
-    """Runs in a thread via asyncio.to_thread. Logs to in-memory list."""
-    from fine_tuning.federated_aggregator import run_aggregation
+    """Runs in a thread — proxies FedAvg to the RunPod AI/ML server pipeline."""
+    import requests as _requests
 
-    def _append(msg: str) -> None:
-        log_lines.append(msg)
-
-    result = run_aggregation(round_id, model_id, round_number, log_fn=_append)
-    if result.success:
+    log_lines.append(f"[federated_admin] Proxying aggregation to RunPod: {runpod_url}/federated/start\n")
+    try:
+        resp = _requests.post(f"{runpod_url}/federated/start", json={}, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        log_lines.append(f"[federated_admin] RunPod response: {data}\n")
         log.info(
-            "federated_admin.aggregation_complete",
+            "federated_admin.aggregation_proxied",
             round_id=round_id,
-            new_version=result.new_version,
-            artifacts=len(result.quant_artifacts),
+            runpod_job=data.get("job_id"),
         )
-    else:
+    except Exception as exc:
         log.error(
-            "federated_admin.aggregation_failed",
+            "federated_admin.aggregation_proxy_failed",
             round_id=round_id,
-            error=result.error,
+            error=str(exc),
         )
+        log_lines.append(f"[federated_admin] ERROR: {exc}\n")
 
 
 # ---------------------------------------------------------------------------
@@ -181,13 +183,17 @@ async def trigger_aggregation(
     The round must be in 'aggregating' status (reached min_participants).
     The pipeline runs in the background; this endpoint returns immediately.
 
-    Steps executed in background:
-      FedAvg of all device LoRA adapters ->
-      Merge into base model ->
-      Upload to SeaweedFS (adapters/federated/vN + finetuned/vN) ->
-      Quantize -> GGUF -> adapter_registry ->
+    Steps executed in background via RunPod AI/ML server:
+      FedAvg of all uploaded weight versions in Azure Blob ->
+      Quantize -> GGUF -> upload back to Azure Blob -> adapter_registry ->
       Round marked completed
     """
+    from app.core.config import RUNPOD_PROXY_BASE_URL
+    if not RUNPOD_PROXY_BASE_URL:
+        raise HTTPException(
+            status_code=503,
+            detail="RUNPOD_PROXY_BASE_URL is not configured — cannot reach the AI/ML server",
+        )
     await _require_admin(authorization)
 
     rows = await postgrest_get(
@@ -233,6 +239,7 @@ async def trigger_aggregation(
         model_id,
         round_number,
         log_lines,
+        RUNPOD_PROXY_BASE_URL,
     )
 
     log.info(

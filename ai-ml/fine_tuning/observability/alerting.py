@@ -27,7 +27,8 @@ class Alerter:
         version: int,
         status: str,
         base_model: str,
-        seaweedfs_path: Optional[str] = None,
+        seaweedfs_path: Optional[str] = None,  # kept for backward compat; value is Azure Blob path
+        storage_path: Optional[str] = None,
         eval_scores: Optional[dict] = None,
     ) -> None:
         scores_str = ""
@@ -40,8 +41,9 @@ class Alerter:
             f"(adapter `{adapter_id[:8]}…`)  "
             f"status=`{status}`{scores_str}"
         )
-        if seaweedfs_path:
-            msg += f"\n> S3: `{seaweedfs_path}`"
+        blob_path = storage_path or seaweedfs_path
+        if blob_path:
+            msg += f"\n> Azure Blob: `{blob_path}`"
 
         print(f"[alerting] {msg}")
 

@@ -194,6 +194,9 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
         def _cache_is_complete(p: Path) -> bool:
             if not p.exists() or not (p / "config.json").exists():
                 return False
+            if not (p / "preprocessor_config.json").exists():
+                print(f"[job_runner] Cache v{seaweed_version} missing preprocessor_config.json — treating as incomplete")
+                return False
             index_file = p / "model.safetensors.index.json"
             if index_file.exists():
                 try:
@@ -228,8 +231,15 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
             )
             try:
                 storage.download_finetuned_model(seaweed_version, cache_dir)
-                print(f"[job_runner] Storage model v{seaweed_version} ready at {cache_dir}")
-                return cache_dir
+                if _cache_is_complete(cache_path):
+                    print(f"[job_runner] Storage model v{seaweed_version} ready at {cache_dir}")
+                    return cache_dir
+                else:
+                    print(
+                        f"[job_runner] Downloaded model v{seaweed_version} is incomplete "
+                        f"(missing processor files in SeaweedFS) — falling back to local model."
+                    )
+                    shutil.rmtree(cache_path, ignore_errors=True)
             except Exception as exc:
                 print(f"[job_runner] Storage download failed (non-fatal): {exc}")
                 # Remove partial download to reclaim space
@@ -475,15 +485,22 @@ def run_cycle(
             )
 
             # ── 8b. Hot-swap the running extractor to the fine-tuned model ────
-            # This ensures any re-extraction request after this job uses the
-            # newly trained weights instead of the original base Qwen2-VL.
+            # Only applies when USE_OLLAMA=false (transformers path). When Ollama
+            # is active, inference uses the GGUF loaded by model_loader.py — the
+            # HF weights are not in-process, so hot-swapping them is a no-op and
+            # would wastefully load the full weights into VRAM alongside Ollama.
             _update("reloading_model")
-            try:
-                from extractor import reload_qwen
-                reload_qwen(merge_result.output_path)
-                print(f"[job_runner] Extractor reloaded → now serving fine-tuned model v{new_version}", flush=True)
-            except Exception as _reload_exc:
-                print(f"[job_runner] Warning: model reload failed (non-fatal — extraction still works with base model): {_reload_exc}", flush=True)
+            import os as _os
+            _use_ollama = _os.getenv("USE_OLLAMA", "false").lower() in ("1", "true", "yes")
+            if _use_ollama:
+                print(f"[job_runner] USE_OLLAMA=true — skipping HF hot-swap (Ollama serves GGUF independently)", flush=True)
+            else:
+                try:
+                    from extractor import reload_qwen
+                    reload_qwen(merge_result.output_path)
+                    print(f"[job_runner] Extractor reloaded → now serving fine-tuned model v{new_version}", flush=True)
+                except Exception as _reload_exc:
+                    print(f"[job_runner] Warning: model reload failed (non-fatal — extraction still works with base model): {_reload_exc}", flush=True)
 
             # ── 9. Write pending-share manifest (Share Gradients uploads later) ─
             # Do NOT upload to storage here — let the user click Share Gradients
