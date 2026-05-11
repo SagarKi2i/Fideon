@@ -4,7 +4,7 @@ WORKDIR /app
 
 # System deps + cloudflared
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl git build-essential cmake libgomp1 && \
+        curl git build-essential cmake libgomp1 zstd lshw && \
     mkdir -p --mode=0755 /usr/share/keyrings && \
     curl -fsSL https://pkg.cloudflare.com/cloudflare-public-v2.gpg | \
         tee /usr/share/keyrings/cloudflare-public-v2.gpg >/dev/null && \
@@ -13,6 +13,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tee /etc/apt/sources.list.d/cloudflared.list && \
     apt-get update && apt-get install -y cloudflared && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Pre-install Ollama with CUDA libraries baked into the image.
+# zstd (extraction) and lshw (GPU detection) are already installed above.
+# The install script bundles cuda_v12/cuda_v13 libs in the main tarball so they
+# are present in the image regardless of whether a GPU is visible at build time.
+# This eliminates the runtime download and the "Ollama not found" delay on pod start.
+RUN curl -fsSL https://ollama.com/install.sh | sh && \
+    ls /usr/local/lib/ollama/ | grep -q "cuda" && \
+    echo "Ollama CUDA libs verified" || echo "WARNING: CUDA libs not found in image"
 
 # FileBrowser (port 8080)
 RUN curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
