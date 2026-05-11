@@ -7,6 +7,7 @@ const useStandalone =
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   ...(useStandalone ? { output: "standalone" } : {}),
+  turbopack: {},
   webpack: (config) => {
     // Treat the PDF.js worker as a file asset so it isn't parsed/minified as JS.
     config.module.rules.push({
