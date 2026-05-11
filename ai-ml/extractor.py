@@ -360,6 +360,33 @@ def _load_docling() -> None:
         print(f"[docling] ✓ Docling loaded successfully in {_elapsed}s", flush=True)
 
 
+def reload_qwen(merged_model_path: str) -> None:
+    """
+    Hot-swap the Qwen2-VL singleton to a newly fine-tuned merged model.
+    Called by job_runner after every successful training cycle so that
+    subsequent extraction requests use the trained weights, not the base model.
+    Safe to call from a background thread — acquires _qwen_lock internally.
+    """
+    global _qwen_model, _qwen_processor, _qwen_loaded, QWEN_MODEL_ID
+    print(f"[extractor] Reloading Qwen2-VL from fine-tuned weights: {merged_model_path}", flush=True)
+    with _qwen_lock:
+        # Release current model and free VRAM before loading new weights
+        _qwen_model = None
+        _qwen_processor = None
+        _qwen_loaded = False
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        QWEN_MODEL_ID = merged_model_path
+    # Load outside the lock so extraction requests don't deadlock during the
+    # ~5-10 min reload — they will wait on _qwen_lock inside _load_qwen().
+    _load_qwen()
+    print(f"[extractor] ✓ Qwen2-VL reloaded — now using fine-tuned model v{merged_model_path}", flush=True)
+
+
 def _load_qwen() -> None:
     global _qwen_model, _qwen_processor, _qwen_loaded
     with _qwen_lock:
