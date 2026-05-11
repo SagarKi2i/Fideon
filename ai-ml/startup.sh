@@ -100,18 +100,26 @@ if [ "${USE_OLLAMA:-false}" = "true" ]; then
         log_err "nvidia-smi not found — Ollama may run on CPU only (check RunPod GPU allocation)"
     fi
 
-    # 1. Install Ollama binary if not present
-    #    The official install script detects NVIDIA drivers and installs the CUDA-enabled binary.
+    # 1. Verify Ollama binary + CUDA libraries (both pre-baked in the Docker image).
+    #    Reinstall only if something is genuinely missing — guards against accidental
+    #    image downgrades or manual removals; should be a no-op on normal boots.
+    _OLLAMA_OK=0
     if ! command -v ollama &>/dev/null; then
-        log "Ollama not found — installing (CUDA-enabled build)..."
+        log "Ollama binary missing — installing..."
+    elif [ ! -d /usr/local/lib/ollama/cuda_v12 ] && [ ! -d /usr/local/lib/ollama/cuda_v13 ]; then
+        log "Ollama binary present but CUDA libraries missing — reinstalling for GPU support..."
+    else
+        log "Ollama ready: $(ollama --version 2>/dev/null) | CUDA: $(ls /usr/local/lib/ollama/ | grep cuda | tr '\n' ' ')"
+        _OLLAMA_OK=1
+    fi
+
+    if [ $_OLLAMA_OK -eq 0 ]; then
         curl -fsSL https://ollama.com/install.sh | sh >> "$LOG" 2>&1
         if command -v ollama &>/dev/null; then
             log "Ollama installed: $(ollama --version 2>/dev/null)"
         else
             log_err "Ollama installation failed — Ollama features unavailable"
         fi
-    else
-        log "Ollama already installed: $(ollama --version 2>/dev/null)"
     fi
 
     # 2. Start ollama serve in background (models persisted in /workspace)
@@ -128,7 +136,8 @@ if [ "${USE_OLLAMA:-false}" = "true" ]; then
             # OLLAMA_NUM_GPU=999 — load ALL transformer layers onto GPU; Ollama caps this at the
             #                 real layer count automatically. Without this, Ollama's conservative
             #                 VRAM estimate can silently offload some layers to CPU.
-            OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_GPU=999 ollama serve >> "$LOG" 2>&1 &
+            OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_GPU=999 ollama serve \
+                >> /workspace/logs/ollama.log 2>&1 &
             OLLAMA_PID=$!
             log "Ollama PID: $OLLAMA_PID"
 
@@ -175,6 +184,36 @@ if [ "${USE_OLLAMA:-false}" = "true" ]; then
 
 else
     log "USE_OLLAMA=false — skipping Ollama (using transformers/Qwen2-VL directly)"
+fi
+
+# ── Fine-tuned HF model (non-quantized): download + set QWEN_MODEL_ID ─────────
+# Activated when USE_FINETUNED=true is set in the pod environment vars.
+# Downloads finetuned/v{N}/ HF weights from Azure Blob and points QWEN_MODEL_ID
+# at them so extractor.py uses the fine-tuned model without quantization.
+# USE_OLLAMA must be false (HF inference path) for this to have any effect.
+if [ "${USE_FINETUNED:-false}" = "true" ] && [ "${USE_OLLAMA:-false}" != "true" ]; then
+    if [ -n "${AZURE_BLOB_ACCOUNT_URL}" ] && [ -n "${AZURE_BLOB_SAS_TOKEN}" ]; then
+        log "USE_FINETUNED=true — downloading fine-tuned HF weights from Azure Blob..."
+        "$PY" /app/finetuned_model_loader.py --skip-if-loaded >> "$LOG" 2>&1
+        if [ $? -eq 0 ]; then
+            PATH_FILE="${FINETUNED_MODEL_DIR:-/workspace/models/finetuned}/loaded_path.txt"
+            if [ -f "$PATH_FILE" ]; then
+                FINETUNED_PATH="$(cat "$PATH_FILE")"
+                if [ -d "$FINETUNED_PATH" ]; then
+                    export QWEN_MODEL_ID="$FINETUNED_PATH"
+                    log "QWEN_MODEL_ID set to fine-tuned model: $QWEN_MODEL_ID"
+                else
+                    log_err "Fine-tuned path not found: $FINETUNED_PATH — falling back to base model"
+                fi
+            else
+                log_err "loaded_path.txt not written — falling back to base model"
+            fi
+        else
+            log_err "finetuned_model_loader.py failed — falling back to base model at $QWEN_PATH"
+        fi
+    else
+        log_err "AZURE_BLOB_ACCOUNT_URL or AZURE_BLOB_SAS_TOKEN not set — cannot download fine-tuned model"
+    fi
 fi
 
 # ── Start FastAPI ──────────────────────────────────────────────────────────────
@@ -285,13 +324,26 @@ log "Public:       https://gpu-api.fideonai.fyi"
 log "Logs:         /workspace/logs/startup.log"
 log "========================================"
 
-# ── Keep container alive, auto-restart FastAPI on crash ───────────────────────
+# ── Keep container alive, auto-restart FastAPI + Ollama on crash ──────────────
 MAX_RESTARTS=5
 RESTART_COUNT=0
 STABLE_CYCLES=0
 STABLE_THRESHOLD=10
 while true; do
     sleep 30
+
+    # Auto-restart Ollama if it crashed (only when USE_OLLAMA=true)
+    if [ "${USE_OLLAMA:-false}" = "true" ] && [ -n "${OLLAMA_PID:-}" ]; then
+        if ! kill -0 $OLLAMA_PID 2>/dev/null; then
+            log_err "Ollama process died — restarting..."
+            export OLLAMA_MODELS=/workspace/.ollama
+            OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_GPU=999 ollama serve \
+                >> /workspace/logs/ollama.log 2>&1 &
+            OLLAMA_PID=$!
+            log "Ollama restarted (PID $OLLAMA_PID)"
+        fi
+    fi
+
     if ! kill -0 $UVICORN_PID 2>/dev/null; then
         STABLE_CYCLES=0
         RESTART_COUNT=$((RESTART_COUNT + 1))
