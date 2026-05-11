@@ -1,8 +1,8 @@
 """
-Storage client factory.
+Storage client factory — returns AzureBlobClient (active) or SeaweedFSClient (legacy).
 
-Reads STORAGE_BACKEND env var (default: "seaweedfs") and returns the
-appropriate client. Both clients expose the same interface:
+Active backend: Azure Blob Storage (STORAGE_BACKEND=azure or auto-detected via AZURE_BLOB_ACCOUNT_URL).
+All clients expose the same interface:
   - probe()
   - upload_hf_model(local_dir, version, progress_callback=None) -> str
   - download_finetuned_model(version, local_dir, progress_callback=None) -> str
@@ -16,10 +16,10 @@ import os
 
 
 def get_storage_client():
-    """Return AzureBlobClient or SeaweedFSClient based on STORAGE_BACKEND env var.
+    """Return AzureBlobClient (default) or SeaweedFSClient based on STORAGE_BACKEND env var.
 
     Auto-detection: if STORAGE_BACKEND is not set, uses Azure when
-    AZURE_BLOB_ACCOUNT_URL is present, otherwise falls back to SeaweedFS.
+    AZURE_BLOB_ACCOUNT_URL is present, otherwise falls back to SeaweedFS (legacy).
     """
     backend = os.getenv("STORAGE_BACKEND", "").strip().lower()
     if not backend:

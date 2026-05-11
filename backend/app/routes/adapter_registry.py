@@ -11,19 +11,13 @@ import hashlib
 from typing import Optional
 from urllib.parse import quote
 
-import boto3
 import structlog
-from botocore.config import Config
 from fastapi import APIRouter, Header, HTTPException
 
 from app.core.config import (
     AZURE_BLOB_ACCOUNT_URL,
     AZURE_BLOB_CONTAINER,
     AZURE_BLOB_SAS_TOKEN,
-    SEAWEEDFS_ACCESS_KEY,
-    SEAWEEDFS_BUCKET,
-    SEAWEEDFS_ENDPOINT,
-    SEAWEEDFS_SECRET_KEY,
 )
 from app.core.supabase import postgrest_get
 from app.routes.device import _resolve_device_from_bearer, _load_active_device_row, _enforce_not_revoked
@@ -31,25 +25,12 @@ from app.routes.device import _resolve_device_from_bearer, _load_active_device_r
 log = structlog.get_logger("adapter_registry")
 router = APIRouter()
 
-# Presigned URL TTL — 1 hour is enough for a download to start (SeaweedFS only)
-_URL_TTL = 3600
-
-
 def _build_download_url(blob_key: str, sig: bool = False) -> str:
-    """
-    Return a download URL for blob_key.
-    - Azure Blob: direct SAS URL (no SDK needed, valid for SAS token lifetime)
-    - SeaweedFS: S3 presigned URL via boto3 (1-hour TTL)
-    """
+    """Return an Azure Blob SAS URL for blob_key (valid for SAS token lifetime)."""
     object_key = f"{blob_key}.sig" if sig else blob_key
-    if AZURE_BLOB_ACCOUNT_URL and AZURE_BLOB_SAS_TOKEN:
-        return f"{AZURE_BLOB_ACCOUNT_URL}/{AZURE_BLOB_CONTAINER}/{object_key}?{AZURE_BLOB_SAS_TOKEN}"
-    s3 = _s3()
-    return s3.generate_presigned_url(
-        "get_object",
-        Params={"Bucket": SEAWEEDFS_BUCKET, "Key": object_key},
-        ExpiresIn=_URL_TTL,
-    )
+    if not (AZURE_BLOB_ACCOUNT_URL and AZURE_BLOB_SAS_TOKEN):
+        raise HTTPException(status_code=503, detail="Azure Blob storage is not configured on this server")
+    return f"{AZURE_BLOB_ACCOUNT_URL}/{AZURE_BLOB_CONTAINER}/{object_key}?{AZURE_BLOB_SAS_TOKEN}"
 
 
 def _in_canary_cohort(device_id: str, version: str, canary_pct: int) -> bool:
@@ -67,16 +48,6 @@ def _in_canary_cohort(device_id: str, version: str, canary_pct: int) -> bool:
     return bucket < canary_pct
 
 
-def _s3():
-    if not all([SEAWEEDFS_ENDPOINT, SEAWEEDFS_ACCESS_KEY, SEAWEEDFS_SECRET_KEY, SEAWEEDFS_BUCKET]):
-        raise HTTPException(status_code=503, detail="SeaweedFS is not configured on this server")
-    return boto3.client(
-        "s3",
-        endpoint_url=SEAWEEDFS_ENDPOINT,
-        aws_access_key_id=SEAWEEDFS_ACCESS_KEY,
-        aws_secret_access_key=SEAWEEDFS_SECRET_KEY,
-        config=Config(signature_version="s3v4"),
-    )
 
 
 async def _verify_device(authorization: Optional[str]) -> str:

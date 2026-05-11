@@ -64,6 +64,8 @@ class CycleResult:
     error: Optional[str]
     started_at: str
     finished_at: str
+    upload_ids: List[str] = field(default_factory=list)
+    original_fields_map: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 # ── In-memory job store (server.py reads this for status polling) ─────────────
@@ -192,6 +194,9 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
         def _cache_is_complete(p: Path) -> bool:
             if not p.exists() or not (p / "config.json").exists():
                 return False
+            if not (p / "preprocessor_config.json").exists():
+                print(f"[job_runner] Cache v{seaweed_version} missing preprocessor_config.json — treating as incomplete")
+                return False
             index_file = p / "model.safetensors.index.json"
             if index_file.exists():
                 try:
@@ -226,8 +231,15 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
             )
             try:
                 storage.download_finetuned_model(seaweed_version, cache_dir)
-                print(f"[job_runner] Storage model v{seaweed_version} ready at {cache_dir}")
-                return cache_dir
+                if _cache_is_complete(cache_path):
+                    print(f"[job_runner] Storage model v{seaweed_version} ready at {cache_dir}")
+                    return cache_dir
+                else:
+                    print(
+                        f"[job_runner] Downloaded model v{seaweed_version} is incomplete "
+                        f"(missing processor files in SeaweedFS) — falling back to local model."
+                    )
+                    shutil.rmtree(cache_path, ignore_errors=True)
             except Exception as exc:
                 print(f"[job_runner] Storage download failed (non-fatal): {exc}")
                 # Remove partial download to reclaim space
@@ -253,6 +265,8 @@ def run_cycle(
     new_data_path: str,
     job_id: str,
     registry_lock_timeout_seconds: int = 30,
+    upload_ids: Optional[List[str]] = None,
+    original_fields_map: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> CycleResult:
     """
     Run one complete continuous-learning cycle.
@@ -279,19 +293,23 @@ def run_cycle(
     from fine_tuning.evaluation.forgetting_eval import ForgettingEvaluator
     from fine_tuning.evaluation.eval_gate import run_eval_gate
 
+    upload_ids = upload_ids or []
+    original_fields_map = original_fields_map or {}
     started_at = _utc_now()
     cycle_id   = str(uuid.uuid4())[:12]
 
     _set_job(job_id, {
-        "job_id":     job_id,
-        "cycle_id":   cycle_id,
-        "status":     "running",
-        "phase":      "starting",
-        "started_at": started_at,
-        "finished_at": None,
-        "error":      None,
-        "version":    None,
-        "gate_passed": None,
+        "job_id":              job_id,
+        "cycle_id":            cycle_id,
+        "status":              "running",
+        "phase":               "starting",
+        "started_at":          started_at,
+        "finished_at":         None,
+        "error":               None,
+        "version":             None,
+        "gate_passed":         None,
+        "upload_ids":          upload_ids,
+        "original_fields_map": original_fields_map,
     })
 
     def _update(phase: str, **kwargs: Any) -> None:
@@ -466,6 +484,24 @@ def run_cycle(
                 flush=True,
             )
 
+            # ── 8b. Hot-swap the running extractor to the fine-tuned model ────
+            # Only applies when USE_OLLAMA=false (transformers path). When Ollama
+            # is active, inference uses the GGUF loaded by model_loader.py — the
+            # HF weights are not in-process, so hot-swapping them is a no-op and
+            # would wastefully load the full weights into VRAM alongside Ollama.
+            _update("reloading_model")
+            import os as _os
+            _use_ollama = _os.getenv("USE_OLLAMA", "false").lower() in ("1", "true", "yes")
+            if _use_ollama:
+                print(f"[job_runner] USE_OLLAMA=true — skipping HF hot-swap (Ollama serves GGUF independently)", flush=True)
+            else:
+                try:
+                    from extractor import reload_qwen
+                    reload_qwen(merge_result.output_path)
+                    print(f"[job_runner] Extractor reloaded → now serving fine-tuned model v{new_version}", flush=True)
+                except Exception as _reload_exc:
+                    print(f"[job_runner] Warning: model reload failed (non-fatal — extraction still works with base model): {_reload_exc}", flush=True)
+
             # ── 9. Write pending-share manifest (Share Gradients uploads later) ─
             # Do NOT upload to storage here — let the user click Share Gradients
             # so they control when weights leave the pod.
@@ -502,14 +538,16 @@ def run_cycle(
         finished_at = _utc_now()
         _set_job(job_id, {
             **(_jobs.get(job_id) or {}),
-            "status":             "completed",
-            "phase":              "done",
-            "finished_at":        finished_at,
-            "gate_passed":        True,
-            "version":            new_version,
-            "adapter_path":       adapter_path,
-            "merged_model_path":  merge_result.output_path,
-            "eval_scores":        gate.scores,
+            "status":              "completed",
+            "phase":               "done",
+            "finished_at":         finished_at,
+            "gate_passed":         True,
+            "version":             new_version,
+            "adapter_path":        adapter_path,
+            "merged_model_path":   merge_result.output_path,
+            "eval_scores":         gate.scores,
+            "upload_ids":          upload_ids,
+            "original_fields_map": original_fields_map,
         })
         print(f"[job_runner] Cycle complete — SLM v1.{new_version} promoted.")
 
@@ -524,6 +562,8 @@ def run_cycle(
             error=None,
             started_at=started_at,
             finished_at=finished_at,
+            upload_ids=upload_ids,
+            original_fields_map=original_fields_map,
         )
 
     except Exception as exc:
@@ -557,11 +597,17 @@ def launch_cycle_background(
     config_path: str,
     new_data_path: str,
     job_id: str,
+    upload_ids: Optional[List[str]] = None,
+    original_fields_map: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> None:
     """Spawn run_cycle() in a daemon thread so server.py can return immediately."""
     t = threading.Thread(
         target=run_cycle,
         args=(config_path, new_data_path, job_id),
+        kwargs={
+            "upload_ids":          upload_ids or [],
+            "original_fields_map": original_fields_map or {},
+        },
         daemon=True,
         name=f"finetune-{job_id[:8]}",
     )
