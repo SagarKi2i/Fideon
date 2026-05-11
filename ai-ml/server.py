@@ -746,7 +746,7 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
     import asyncio
     from fine_tuning.continuous_learning.ingest import build_training_sample_from_correction
     from fine_tuning.continuous_learning.version_store import append_training_sample
-    from fine_tuning.job_runner import launch_cycle_background
+    from fine_tuning.job_runner import launch_cycle_background, launch_auto_refine_background
 
     # acord_run_ids are passed by the frontend for reference only.
     # Runs are marked approved AFTER training completes (not here) so that
@@ -868,25 +868,44 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
         encoding="utf-8",
     )
 
-    # Collect upload_ids + original_fields per PDF — returned to frontend for re-extraction comparison
+    # Collect upload_ids + original_fields + corrected_fields + form_type per PDF
     _seen_uploads: dict = {}
+    _corrected_map: dict = {}
+    _form_type_map: dict = {}
     for s in samples:
         uid = s.get("upload_id", "")
         if uid and s.get("sample_id") in ingested_ids:
             # Last corrected sample per upload_id wins (if multiple corrections per PDF)
-            _seen_uploads[uid] = s.get("original_fields") or {}
+            _seen_uploads[uid]  = s.get("original_fields") or {}
+            _corrected_map[uid] = s.get("corrected_fields") or {}
+            _form_type_map[uid] = s.get("form_type") or "25"
 
-    upload_ids: List[str] = list(_seen_uploads.keys())
-    original_fields_map: dict = _seen_uploads  # {upload_id: original_fields}
+    upload_ids: List[str]          = list(_seen_uploads.keys())
+    original_fields_map: dict      = _seen_uploads    # {upload_id: original_fields}
+    corrected_fields_map: dict     = _corrected_map   # {upload_id: corrected_fields} — ground truth for convergence
+    form_type_map: dict            = _form_type_map   # {upload_id: form_type}
+    max_refine_iterations: int     = int(
+        body.get("max_refine_iterations",
+                 os.getenv("AUTO_REFINE_MAX_ITERATIONS", "5"))
+    )
 
-    # ── Launch cycle in background thread ─────────────────────────────────────
+    # ── Launch auto-refine loop in background thread ───────────────────────────
+    # run_cycle() is called once per iteration inside the loop.
+    # The loop re-extracts each PDF after training, compares against the user's
+    # corrected_fields (ground truth), and trains again if fields still diverge.
+    # Falls back to a single cycle when no PDFs are on disk (digital-only PDFs).
     job_id = str(uuid.uuid4())
-    launch_cycle_background(
+    launch_auto_refine_background(
         config_path=ft_config_path,
         new_data_path=snapshot_path,
         job_id=job_id,
         upload_ids=upload_ids,
         original_fields_map=original_fields_map,
+        corrected_fields_map=corrected_fields_map,
+        form_type_map=form_type_map,
+        upload_dir=str(UPLOAD_DIR),
+        max_iterations=max_refine_iterations,
+        gpu_semaphore=_gpu_semaphore,
     )
 
     return {
@@ -894,12 +913,14 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
         "job_id": job_id,
         "message": (
             f"Fine-tuning started with {ingested} sample(s). "
+            f"Auto-refine loop will run up to {max_refine_iterations} iteration(s). "
             f"Poll GET /finetune/jobs/{job_id} for progress."
         ),
-        "total_samples": ingested,
-        "snapshot_path": snapshot_path,
-        "upload_ids": upload_ids,
+        "total_samples":      ingested,
+        "snapshot_path":      snapshot_path,
+        "upload_ids":         upload_ids,
         "original_fields_map": original_fields_map,
+        "max_refine_iterations": max_refine_iterations,
     }
 
 
