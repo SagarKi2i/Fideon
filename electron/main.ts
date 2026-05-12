@@ -27,7 +27,14 @@ import {
   getMachineId,
   getMachineName,
   clearStoredDeviceJwtAsync,
+  isServiceRunning,
+  notifyServiceReauth,
 } from "./device-client";
+import {
+  installService,
+  uninstallService,
+  isServiceInstalled,
+} from "./installer/service-installer";
 import { checkForModelUpdate, downloadAndInstall } from "./model-updater";
 
 let mainWindow: BrowserWindow | null = null;
@@ -226,6 +233,28 @@ if (isProd) {
     hostname: "localhost",
     port: 3000,
   });
+}
+
+// ── NSIS installer hooks ──────────────────────────────────────────────────────
+// electron-builder's custom-installer.nsh launches the exe with --install-service
+// or --uninstall-service so the service is registered/removed with admin privileges
+// during install/uninstall without needing a separate helper executable.
+if (process.argv.includes("--install-service")) {
+  (async () => {
+    const result = await installService({
+      resourcesPath: process.resourcesPath,
+      appPath: app.getAppPath(),
+    });
+    process.exit(result.success ? 0 : 1);
+  })();
+} else if (process.argv.includes("--uninstall-service")) {
+  (async () => {
+    const result = await uninstallService({
+      resourcesPath: process.resourcesPath,
+      appPath: app.getAppPath(),
+    });
+    process.exit(result.success ? 0 : 1);
+  })();
 }
 
 // Ensure a single running instance; focus existing window on second launch.
@@ -441,20 +470,27 @@ app.whenReady().then(async () => {
     await nextRsc.createInterceptor({ session: session.defaultSession });
   }
 
-  try {
-    const runner = await ensureDeviceAuthAndStartHeartbeat({
-      log,
-      heartbeatSeconds: 60,
-      onDeactivated: () => {
-        log(`[device] device deactivated by admin — notifying renderer`);
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send("device:deactivated");
-        }
-      },
-    });
-    deviceHeartbeatStopper = runner.stop;
-  } catch (err) {
-    log(`[device] ensureDeviceAuthAndStartHeartbeat failed: ${formatUnknownError(err)}`);
+  // If the Windows service is already running, it owns the heartbeat —
+  // skip the in-process loop to avoid double-heartbeating.
+  const serviceActive = await isServiceRunning();
+  log(`[device] service running: ${serviceActive}`);
+
+  if (!serviceActive) {
+    try {
+      const runner = await ensureDeviceAuthAndStartHeartbeat({
+        log,
+        heartbeatSeconds: 60,
+        onDeactivated: () => {
+          log(`[device] device deactivated by admin — notifying renderer`);
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send("device:deactivated");
+          }
+        },
+      });
+      deviceHeartbeatStopper = runner.stop;
+    } catch (err) {
+      log(`[device] ensureDeviceAuthAndStartHeartbeat failed: ${formatUnknownError(err)}`);
+    }
   }
 
   await createWindow();
@@ -568,17 +604,25 @@ ipcMain.handle("device:ensureAuth", async () => {
     // Calling ensureDeviceAuthAndStartHeartbeat here would invoke ensureDeviceAuthAsync a
     // second time, potentially re-registering and producing a different JWT than what we
     // return to the renderer — causing the heartbeat loop and renderer to be out of sync.
-    const runner = startHeartbeatLoop(auth.device_jwt, {
-      log,
-      heartbeatSeconds: 60,
-      onDeactivated: () => {
-        log(`[device] device deactivated by admin — notifying renderer`);
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send("device:deactivated");
-        }
-      },
-    });
-    deviceHeartbeatStopper = runner.stop;
+    // Tell the service to reload credentials from ProgramData (if it's running).
+    // This is non-blocking — fire and forget.
+    void notifyServiceReauth().catch(() => {});
+
+    // Only start our own heartbeat loop if the service isn't handling it.
+    const svcRunning = await isServiceRunning();
+    if (!svcRunning) {
+      const runner = startHeartbeatLoop(auth.device_jwt, {
+        log,
+        heartbeatSeconds: 60,
+        onDeactivated: () => {
+          log(`[device] device deactivated by admin — notifying renderer`);
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send("device:deactivated");
+          }
+        },
+      });
+      deviceHeartbeatStopper = runner.stop;
+    }
     return { success: true, device_id: auth.device_id, device_jwt: auth.device_jwt };
   } catch (err) {
     const raw = formatUnknownError(err);
@@ -725,6 +769,41 @@ ipcMain.handle("settings:setAutoLaunch", async (_event, enabled: boolean) => {
     return { success: true }; // no-op on other platforms
   } catch (error) {
     return { success: false, error: String(error) };
+  }
+});
+
+// IPC: Windows service management
+ipcMain.handle("fideon:service-status", async () => {
+  try {
+    const running = await isServiceRunning();
+    const installed = await isServiceInstalled();
+    return { success: true, running, installed };
+  } catch (err) {
+    return { success: false, error: String(err) };
+  }
+});
+
+ipcMain.handle("fideon:install-service", async () => {
+  try {
+    const result = await installService({
+      resourcesPath: process.resourcesPath,
+      appPath: app.getAppPath(),
+    });
+    return result;
+  } catch (err) {
+    return { success: false, error: String(err) };
+  }
+});
+
+ipcMain.handle("fideon:uninstall-service", async () => {
+  try {
+    const result = await uninstallService({
+      resourcesPath: process.resourcesPath,
+      appPath: app.getAppPath(),
+    });
+    return result;
+  } catch (err) {
+    return { success: false, error: String(err) };
   }
 });
 
