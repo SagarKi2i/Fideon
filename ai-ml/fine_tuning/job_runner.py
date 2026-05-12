@@ -4,36 +4,38 @@ Fine-tuning job runner for the Fideon RunPod pod.
 run_cycle() is the top-level entry point called by server.py when a user
 clicks "Fine-tune" or when the correction threshold is crossed automatically.
 
-Full pipeline (mirrors the ACORD pipeline document STEP 6):
+Full pipeline:
 
   load_and_validate_config()
       ↓
-  check_eval_files()          — pre-flight (non-fatal)
+  check_eval_files()              — pre-flight (non-fatal)
       ↓
-  RegistryLock                — prevent concurrent cycles
+  RegistryLock                    — prevent concurrent cycles
       ↓
-  DatasetBuilder.build()      — new JSONL + replay rows → train.jsonl
+  DatasetBuilder.build()          — new JSONL + replay rows → train.jsonl
       ↓
-  resolve_base_model_path()   — SeaweedFS latest → registry → base model
+  resolve_base_model_path()       — Azure Blob latest → local registry → base model
       ↓
   registry.create_pending_entry()
       ↓
-  run_training()              — QLoRA SFT → LoRA adapter
+  run_training()                  — QLoRA SFT → LoRA adapter
       ↓
-  run_local_eval()            — field F1/recall on eval examples
+  run_local_eval()                — field F1/recall on eval examples
       ↓
-  run_deepeval()              — optional LLM-judge metrics
+  run_deepeval()                  — optional LLM-judge metrics
       ↓
   ForgettingEvaluator.evaluate()
       ↓
-  run_eval_gate()             — promote / block decision
+  run_eval_gate()                 — promote / block decision
       ↓
   [gate passed]
-  AdapterMerger.merge()       — merge adapter → full weights
+  AdapterMerger.merge()           — merge adapter → full weights (saved locally)
       ↓
-  promote_adapter()           — SeaweedFS upload + registry + model card + alert
+  registry.promote_version()      — SLM v1.N is now the active model (local registry)
       ↓
-  registry.promote_version()  — SLM v1.N is now the active model
+  reload_qwen()                   — hot-swap running extractor to fine-tuned model
+      ↓
+  write pending_shares/v{N}.json  — ready for POST /share-gradients (Azure upload)
 """
 from __future__ import annotations
 
@@ -807,7 +809,6 @@ def run_auto_refine_loop(
     # falling back to the last Azure-uploaded version.
     prev_merged_path: Optional[str] = None
     # For no-progress early-stop: track total mismatched fields per iteration.
-    prev_total_mismatched: Optional[int] = None
     consecutive_no_progress: int = 0
 
     for iteration in range(1, max_iterations + 1):
@@ -970,8 +971,6 @@ def run_auto_refine_loop(
                 return
         else:
             consecutive_no_progress = 0  # reset streak on any improvement
-
-        prev_total_mismatched = total_mismatched_iter
 
         # ── E: Build next iteration's training snapshot ───────────────────
         _upd(f"auto_refine_iter_{iteration}_of_{max_iterations}_preparing_next")
