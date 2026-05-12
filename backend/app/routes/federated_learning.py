@@ -265,15 +265,12 @@ async def _action_upload_gradient(device: dict[str, Any], request: Request) -> d
       round_number  — federated round number
       filename      — target filename (e.g. adapter_model.safetensors)
 
-    Body: raw binary file content (multipart or raw bytes)
+    Body: raw binary file content
 
-    The file is stored in SeaweedFS at:
+    The file is stored in Azure Blob at:
       gradients/{model_id}/round-{N}/{device_id}/{filename}
     """
-    import os
-    from app.core.config import SEAWEEDFS_BUCKET, SEAWEEDFS_ENDPOINT, SEAWEEDFS_ACCESS_KEY, SEAWEEDFS_SECRET_KEY
-    import boto3
-    from botocore.config import Config
+    from app.core.config import AZURE_BLOB_ACCOUNT_URL, AZURE_BLOB_SAS_TOKEN, AZURE_BLOB_CONTAINER
 
     model_id = request.query_params.get("model_id", "").strip()
     round_number = request.query_params.get("round_number", "").strip()
@@ -295,34 +292,30 @@ async def _action_upload_gradient(device: dict[str, Any], request: Request) -> d
     if not rounds or rounds[0].get("status") not in {"collecting", "aggregating"}:
         raise HTTPException(status_code=404, detail="No active round for this model/round_number")
 
-    if not all([SEAWEEDFS_ENDPOINT, SEAWEEDFS_ACCESS_KEY, SEAWEEDFS_SECRET_KEY, SEAWEEDFS_BUCKET]):
-        raise HTTPException(status_code=503, detail="SeaweedFS not configured on this server")
+    if not all([AZURE_BLOB_ACCOUNT_URL, AZURE_BLOB_SAS_TOKEN, AZURE_BLOB_CONTAINER]):
+        raise HTTPException(status_code=503, detail="Azure Blob storage is not configured on this server")
 
     body_bytes = await request.body()
     if not body_bytes:
         raise HTTPException(status_code=400, detail="Request body is empty")
 
-    key = f"gradients/{model_id}/round-{round_number}/{device['id']}/{filename}"
-    s3 = boto3.client(
-        "s3",
-        endpoint_url=SEAWEEDFS_ENDPOINT,
-        aws_access_key_id=SEAWEEDFS_ACCESS_KEY,
-        aws_secret_access_key=SEAWEEDFS_SECRET_KEY,
-        config=Config(signature_version="s3v4"),
-    )
-    s3.put_object(Bucket=SEAWEEDFS_BUCKET, Key=key, Body=body_bytes)
+    blob_name = f"gradients/{model_id}/round-{round_number}/{device['id']}/{filename}"
+    from azure.storage.blob import BlobServiceClient
+    svc = BlobServiceClient(account_url=f"{AZURE_BLOB_ACCOUNT_URL}?{AZURE_BLOB_SAS_TOKEN}")
+    blob_client = svc.get_blob_client(container=AZURE_BLOB_CONTAINER, blob=blob_name)
+    blob_client.upload_blob(body_bytes, overwrite=True)
 
     log.info(
         "federated.gradient_uploaded",
         device_id=device["id"],
         model_id=model_id,
         round_number=round_number,
-        key=key,
+        blob=blob_name,
         size=len(body_bytes),
     )
     return {
         "success": True,
-        "storage_key": key,
+        "storage_key": blob_name,
         "size_bytes": len(body_bytes),
     }
 

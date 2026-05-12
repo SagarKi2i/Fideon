@@ -2,15 +2,18 @@
 Training orchestrator — top-level promote_adapter() called after run_cycle().
 
 Responsibilities (in order):
-  1. Upload merged HF model   → SeaweedFS finetuned/v{N}/
+  1. Upload merged HF model   → Azure Blob finetuned/v{N}/
   2. Quantize merged model    → GGUF Q5_K_M + Q4_K_M
-  3. Upload quantized GGUFs   → SeaweedFS quantized/v{N}/
+  3. Upload quantized GGUFs   → Azure Blob quantized/v{N}/
   4. Register GGUF artifacts  → Supabase adapter_registry (so Electron can download)
-  5. Update version_registry.json with all SeaweedFS paths
+  5. Update version_registry.json with all Azure Blob paths
   6. Write model card
   7. Send promotion alert
 
-Required env vars for Electron delivery (set on the pod):
+Required env vars (set on the pod):
+  AZURE_BLOB_ACCOUNT_URL    — Azure Blob account URL
+  AZURE_BLOB_SAS_TOKEN      — SAS token
+  AZURE_BLOB_CONTAINER      — container name (default: fideon-models)
   SUPABASE_URL              — e.g. https://xxx.supabase.co
   SUPABASE_SERVICE_ROLE_KEY — service role key
   FT_DOMAIN                 — domain tag written to adapter_registry (default: "acord")
@@ -365,7 +368,7 @@ def promote_adapter(
         version=version,
         status="promoted",
         base_model=base_model or merged_model_path,
-        seaweedfs_path=storage_finetuned_prefix,
+        storage_path=storage_finetuned_prefix,
         eval_scores=eval_scores,
     )
 

@@ -115,21 +115,29 @@ def _compute_fingerprint(rows: List[Dict[str, Any]]) -> str:
 # ── Replay sampler ────────────────────────────────────────────────────────────
 
 class ReplaySampler:
-    """Sample rows from all previous versioned JSONL snapshots."""
+    """Load rows from all previous versioned JSONL snapshots for anti-forgetting replay."""
 
     def __init__(self, feedback_datasets_dir: str) -> None:
         self._root = Path(feedback_datasets_dir)
 
-    def sample(self, n: int, seed: int = 42) -> List[Dict[str, Any]]:
-        """Return up to *n* rows sampled uniformly from all versioned snapshots."""
-        if n <= 0:
-            return []
+    def _all_versioned_rows(self) -> List[Dict[str, Any]]:
         versions_dir = self._root / "versions"
         if not versions_dir.exists():
             return []
         all_rows: List[Dict[str, Any]] = []
         for vf in sorted(versions_dir.glob("v*.jsonl")):
             all_rows.extend(_read_jsonl(vf))
+        return all_rows
+
+    def sample_all(self) -> List[Dict[str, Any]]:
+        """Return ALL rows from all versioned snapshots — no cap."""
+        return self._all_versioned_rows()
+
+    def sample(self, n: int, seed: int = 42) -> List[Dict[str, Any]]:
+        """Return up to *n* rows sampled uniformly from all versioned snapshots."""
+        if n <= 0:
+            return []
+        all_rows = self._all_versioned_rows()
         if not all_rows:
             return []
         rng = random.Random(seed)
@@ -159,15 +167,12 @@ class DatasetBuilder:
         cycle_dir = datasets_dir / f"cycle-{cycle_id}"
         cycle_dir.mkdir(parents=True, exist_ok=True)
 
-        replay_fraction = float(
-            self._cfg.get("training", {}).get("replay_fraction", 0.30)
-        )
         feedback_dir = self._cl.get(
             "feedback_datasets_dir",
             "/workspace/fine_tuning/datasets/feedback_learning",
         )
 
-        # 1. Load new rows
+        # 1. Load new rows — ALL of them; rejected ones are logged but not skipped silently
         new_rows: List[Dict[str, Any]] = []
         rejected = 0
         for i, row in enumerate(_read_jsonl(Path(new_data_path))):
@@ -176,11 +181,13 @@ class DatasetBuilder:
                 new_rows.append(row)
             except InvalidChatFormatError:
                 rejected += 1
+                print(f"[dataset_builder] Row {i} rejected (invalid chat format) — check ingest pipeline")
 
-        # 2. Replay rows from previous versions
-        n_replay = max(0, int(len(new_rows) * replay_fraction))
+        # 2. Replay ALL rows from previous versioned snapshots (no cap) so that no
+        #    historical sample is ever excluded from training.
         sampler = ReplaySampler(feedback_dir)
-        replay_rows = sampler.sample(n_replay, seed=replay_seed)
+        replay_rows = sampler.sample_all()
+        print(f"[dataset_builder] Replay: {len(replay_rows)} historical sample(s) from previous versions")
 
         # 3. Combine and shuffle
         combined = new_rows + replay_rows

@@ -746,7 +746,7 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
     import asyncio
     from fine_tuning.continuous_learning.ingest import build_training_sample_from_correction
     from fine_tuning.continuous_learning.version_store import append_training_sample
-    from fine_tuning.job_runner import launch_cycle_background
+    from fine_tuning.job_runner import launch_cycle_background, launch_auto_refine_background
 
     # acord_run_ids are passed by the frontend for reference only.
     # Runs are marked approved AFTER training completes (not here) so that
@@ -781,7 +781,9 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
     threshold    = int(cl_cfg.get("retrain_threshold", 25))
 
     # ── Build chat-format samples and append to version store ─────────────────
-    snapshot_path: Optional[str] = None
+    # Collect ALL snapshot paths created in this cycle — a single run can cross
+    # the threshold multiple times (e.g. 75 samples / threshold 25 = 3 snapshots).
+    snapshot_paths: List[str] = []
     ingested = 0
     ingested_ids: set = set()   # only successfully processed samples get marked "used"
     for sample in samples:
@@ -798,40 +800,58 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
             ingested += 1
             ingested_ids.add(sample.get("sample_id"))
             if outcome.version_snapshot_path:
-                snapshot_path = outcome.version_snapshot_path
+                snapshot_paths.append(outcome.version_snapshot_path)
         except Exception as exc:
             print(f"[finetune/start] skipping sample {sample.get('sample_id')} (stays pending for retry): {exc}")
 
-    if not snapshot_path:
-        # Force a snapshot from whatever is pending now (manual trigger bypasses threshold)
-        import json as _json
-        pending_file = feedback_dir / "pending.jsonl"
-        if pending_file.exists() and pending_file.stat().st_size > 0:
-            from fine_tuning.continuous_learning.version_store import (
-                _load_manifest, _save_manifest, _version_path, _pending_path,
-            )
-            manifest = _load_manifest(feedback_dir)
-            version  = int(manifest.get("next_version", 1))
-            vp = _version_path(feedback_dir, version)
-            vp.parent.mkdir(parents=True, exist_ok=True)
-            vp.write_bytes(pending_file.read_bytes())
-            pending_file.write_text("", encoding="utf-8")
-            manifest["pending_count"]  = 0
-            manifest["next_version"]   = version + 1
-            manifest.setdefault("snapshots", []).append({
-                "version":    version,
-                "path":       str(vp),
-                "rows":       ingested,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            })
-            _save_manifest(feedback_dir, manifest)
-            snapshot_path = str(vp)
-        else:
-            return {
-                "status": "no_data",
-                "message": "Samples ingested but no training data in pending store.",
-                "ingested": ingested,
-            }
+    # Always force-promote any remaining pending samples that did not reach the
+    # threshold (e.g. 30 samples / threshold 25 → first 25 promoted, 5 left over).
+    from fine_tuning.continuous_learning.version_store import (
+        _load_manifest, _save_manifest, _version_path,
+    )
+    pending_file = feedback_dir / "pending.jsonl"
+    if pending_file.exists() and pending_file.stat().st_size > 0:
+        manifest = _load_manifest(feedback_dir)
+        version  = int(manifest.get("next_version", 1))
+        vp = _version_path(feedback_dir, version)
+        vp.parent.mkdir(parents=True, exist_ok=True)
+        vp.write_bytes(pending_file.read_bytes())
+        leftover_count = sum(1 for ln in pending_file.read_text(encoding="utf-8").splitlines() if ln.strip())
+        pending_file.write_text("", encoding="utf-8")
+        manifest["pending_count"] = 0
+        manifest["next_version"]  = version + 1
+        manifest.setdefault("snapshots", []).append({
+            "version":    version,
+            "path":       str(vp),
+            "rows":       leftover_count,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        _save_manifest(feedback_dir, manifest)
+        snapshot_paths.append(str(vp))
+        print(f"[finetune/start] Force-promoted {leftover_count} leftover sample(s) → {vp.name}")
+
+    if not snapshot_paths:
+        return {
+            "status": "no_data",
+            "message": "Samples ingested but no training data in pending store.",
+            "ingested": ingested,
+        }
+
+    # Combine all snapshot files from this cycle into one training JSONL so that
+    # every sample in this run is present regardless of how many threshold crossings occurred.
+    if len(snapshot_paths) == 1:
+        snapshot_path: str = snapshot_paths[0]
+    else:
+        combined_path = feedback_dir / f"combined-{str(uuid.uuid4())[:8]}.jsonl"
+        combined_path.parent.mkdir(parents=True, exist_ok=True)
+        with combined_path.open("w", encoding="utf-8") as _cf:
+            for _sp in snapshot_paths:
+                _content = Path(_sp).read_text(encoding="utf-8", errors="replace")
+                _cf.write(_content)
+                if _content and not _content.endswith("\n"):
+                    _cf.write("\n")
+        snapshot_path = str(combined_path)
+        print(f"[finetune/start] Combined {len(snapshot_paths)} snapshot(s) → {combined_path.name} ({ingested} total samples)")
 
     # ── Mark successfully ingested samples as "used" — skipped ones stay pending ──
     used_ids = ingested_ids
@@ -848,25 +868,44 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
         encoding="utf-8",
     )
 
-    # Collect upload_ids + original_fields per PDF — returned to frontend for re-extraction comparison
+    # Collect upload_ids + original_fields + corrected_fields + form_type per PDF
     _seen_uploads: dict = {}
+    _corrected_map: dict = {}
+    _form_type_map: dict = {}
     for s in samples:
         uid = s.get("upload_id", "")
         if uid and s.get("sample_id") in ingested_ids:
             # Last corrected sample per upload_id wins (if multiple corrections per PDF)
-            _seen_uploads[uid] = s.get("original_fields") or {}
+            _seen_uploads[uid]  = s.get("original_fields") or {}
+            _corrected_map[uid] = s.get("corrected_fields") or {}
+            _form_type_map[uid] = s.get("form_type") or "25"
 
-    upload_ids: List[str] = list(_seen_uploads.keys())
-    original_fields_map: dict = _seen_uploads  # {upload_id: original_fields}
+    upload_ids: List[str]          = list(_seen_uploads.keys())
+    original_fields_map: dict      = _seen_uploads    # {upload_id: original_fields}
+    corrected_fields_map: dict     = _corrected_map   # {upload_id: corrected_fields} — ground truth for convergence
+    form_type_map: dict            = _form_type_map   # {upload_id: form_type}
+    max_refine_iterations: int     = int(
+        body.get("max_refine_iterations",
+                 os.getenv("AUTO_REFINE_MAX_ITERATIONS", "5"))
+    )
 
-    # ── Launch cycle in background thread ─────────────────────────────────────
+    # ── Launch auto-refine loop in background thread ───────────────────────────
+    # run_cycle() is called once per iteration inside the loop.
+    # The loop re-extracts each PDF after training, compares against the user's
+    # corrected_fields (ground truth), and trains again if fields still diverge.
+    # Falls back to a single cycle when no PDFs are on disk (digital-only PDFs).
     job_id = str(uuid.uuid4())
-    launch_cycle_background(
+    launch_auto_refine_background(
         config_path=ft_config_path,
         new_data_path=snapshot_path,
         job_id=job_id,
         upload_ids=upload_ids,
         original_fields_map=original_fields_map,
+        corrected_fields_map=corrected_fields_map,
+        form_type_map=form_type_map,
+        upload_dir=str(UPLOAD_DIR),
+        max_iterations=max_refine_iterations,
+        gpu_semaphore=_gpu_semaphore,
     )
 
     return {
@@ -874,12 +913,14 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
         "job_id": job_id,
         "message": (
             f"Fine-tuning started with {ingested} sample(s). "
+            f"Auto-refine loop will run up to {max_refine_iterations} iteration(s). "
             f"Poll GET /finetune/jobs/{job_id} for progress."
         ),
-        "total_samples": ingested,
-        "snapshot_path": snapshot_path,
-        "upload_ids": upload_ids,
+        "total_samples":      ingested,
+        "snapshot_path":      snapshot_path,
+        "upload_ids":         upload_ids,
         "original_fields_map": original_fields_map,
+        "max_refine_iterations": max_refine_iterations,
     }
 
 
@@ -1094,18 +1135,18 @@ def _run_federated_job(job_id: str) -> None:
 
     try:
         from fine_tuning.storage_client import get_storage_client
-        seaweed = get_storage_client()
+        storage = get_storage_client()
 
         # ── 1. Discover all available fine-tuned versions ────────────────────
         _update_fed_job(job_id, "discovering_versions")
         print("[global-update] ══ Step 1/5 ══ Discovering available model versions in Azure Blob …", flush=True)
-        latest = seaweed.get_latest_finetuned_version()
+        latest = storage.get_latest_finetuned_version()
         if latest is None:
             raise RuntimeError("No fine-tuned weights found in storage. Run Local Training first.")
 
         versions_available: List[int] = []
         try:
-            versions_available = seaweed.list_finetuned_versions(latest)
+            versions_available = storage.list_finetuned_versions(latest)
         except Exception as exc:
             print(f"[federated] Version discovery error (using latest only): {exc}")
             versions_available = [latest]
@@ -1121,7 +1162,7 @@ def _run_federated_job(job_id: str) -> None:
         fresh_versions: List[int] = []
         already_quantized: List[int] = []
         for v in versions_available:
-            if seaweed.has_successful_quantization(v):
+            if storage.has_successful_quantization(v):
                 already_quantized.append(v)
                 print(f"[global-update]   Skipping v{v} — already quantized successfully", flush=True)
             else:
@@ -1211,7 +1252,7 @@ def _run_federated_job(job_id: str) -> None:
 
                 try:
                     with _PeriodicLogger(10, _dl_hb):
-                        seaweed.download_finetuned_model(v, local_dir, progress_callback=_progress_cb)
+                        storage.download_finetuned_model(v, local_dir, progress_callback=_progress_cb)
                     model_dirs.append(local_dir)
                     downloaded_versions.append(v)
                     print(f"[global-update]   v{v} downloaded ✓ ({int(time.time()-_t0_dl)}s)", flush=True)
@@ -1222,7 +1263,7 @@ def _run_federated_job(job_id: str) -> None:
             if not model_dirs:
                 raise RuntimeError(
                     f"All {len(versions_available)} version(s) failed to download from storage. "
-                    f"Check that {seaweed._endpoint} is reachable from the pod. "
+                    f"Check that {storage._endpoint} is reachable from the pod. "
                     f"Versions attempted: {versions_available}"
                 )
 
@@ -1279,6 +1320,12 @@ def _run_federated_job(job_id: str) -> None:
                 raise RuntimeError(
                     f"FedAvg output at {agg_dir} is missing config.json — "
                     "aggregation may have failed silently. Aborting upload."
+                )
+            if not (_agg_path / "preprocessor_config.json").exists():
+                raise RuntimeError(
+                    f"FedAvg output at {agg_dir} is missing preprocessor_config.json — "
+                    "the source models may have been uploaded without processor files. "
+                    "Re-run Share Gradients after a successful Local Training cycle."
                 )
 
             # ── 5. Quantize aggregated model → GGUF ──────────────────────────
@@ -1358,7 +1405,7 @@ def _run_federated_job(job_id: str) -> None:
                 return f"[global-update]   Uploading aggregated model v{ver} | {elapsed}s elapsed"
 
             with _PeriodicLogger(10, _up_hb):
-                seaweed.upload_hf_model(agg_dir, new_version, progress_callback=_up_progress)
+                storage.upload_hf_model(agg_dir, new_version, progress_callback=_up_progress)
             print(f"[global-update]   HF model upload complete. ({int(time.time()-_t0_up)}s)", flush=True)
 
             gguf_s3_keys: List[str] = []
@@ -1369,7 +1416,7 @@ def _run_federated_job(job_id: str) -> None:
                     _fed_state["bytes"] = 0
                     _fed_state["total_bytes"] = 0
                     with _PeriodicLogger(10, _up_hb):
-                        gguf_s3_keys = seaweed.upload_quantized(gguf_dir, new_version, progress_callback=_up_progress)
+                        gguf_s3_keys = storage.upload_quantized(gguf_dir, new_version, progress_callback=_up_progress)
                     print(f"[global-update]   GGUF(s) uploaded for v{new_version} ✓", flush=True)
                 except Exception as exc:
                     print(f"[global-update]   GGUF upload failed (non-fatal): {exc}", flush=True)
@@ -1388,7 +1435,7 @@ def _run_federated_job(job_id: str) -> None:
             # because quantized/v{input}/ has no .gguf (the output was v{new_version}).
             for v in downloaded_versions:
                 try:
-                    seaweed.mark_version_consumed(v, new_version)
+                    storage.mark_version_consumed(v, new_version)
                 except Exception as _mark_exc:
                     print(f"[global-update]   Warning: could not mark v{v} consumed: {_mark_exc}")
 
@@ -1425,7 +1472,7 @@ def _run_federated_job(job_id: str) -> None:
 
 def _run_share_job(job_id: str, pending_entries: List[tuple]) -> None:
     """
-    Background thread: upload all pending weight versions to storage (Azure Blob / SeaweedFS).
+    Background thread: upload all pending weight versions to Azure Blob storage.
     pending_entries: list of (file_path: Path, pending: Dict) tuples, one per training run.
     Processes sequentially. Deletes each file after successful upload.
     Stops on first failure (undeleted file stays for retry).
@@ -1597,7 +1644,7 @@ def _run_share_job(job_id: str, pending_entries: List[tuple]) -> None:
 @app.post("/share-gradients")
 async def share_gradients_endpoint(body: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     """
-    Upload ALL locally-merged fine-tuned weight versions to storage (Azure Blob / SeaweedFS).
+    Upload ALL locally-merged fine-tuned weight versions to Azure Blob storage.
     Must be called manually by the user after Local Training completes.
     Reads every *.json file from /workspace/fine_tuning/pending_shares/ written by job_runner.
     Each version gets its own file — none are overwritten, all are uploaded.
@@ -1705,43 +1752,42 @@ def get_share_gradients_job(job_id: str) -> Dict[str, Any]:
 @app.post("/federated/start")
 async def start_federated(body: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
     """
-    Collect all fine-tuned weight versions from SeaweedFS and run FedAvg aggregation.
+    Collect all fine-tuned weight versions from Azure Blob and run FedAvg aggregation.
     Returns immediately with job_id; poll GET /federated/jobs/{job_id} for status.
     """
     import asyncio
     from fine_tuning.storage_client import get_storage_client
 
-    seaweed = get_storage_client()
+    storage = get_storage_client()
 
     # ── Pre-flight: verify storage is reachable before queuing the job ───────
-    if not seaweed._configured:
+    if not storage._configured:
         return {
             "status": "error",
             "message": "Storage backend is not configured on the pod. "
-                       "Set STORAGE_BACKEND=azure + AZURE_BLOB_* vars, "
-                       "or STORAGE_BACKEND=seaweedfs + SEAWEEDFS_ENDPOINT.",
+                       "Set STORAGE_BACKEND=azure + AZURE_BLOB_ACCOUNT_URL/AZURE_BLOB_SAS_TOKEN/AZURE_BLOB_CONTAINER.",
         }
 
     loop = asyncio.get_event_loop()
     try:
         # Run probe() off the event loop so it never blocks incoming requests.
         # Hard 15s timeout prevents Cloudflare 524 if Azure is slow/unreachable.
-        await asyncio.wait_for(loop.run_in_executor(None, seaweed.probe), timeout=15.0)
+        await asyncio.wait_for(loop.run_in_executor(None, storage.probe), timeout=15.0)
     except asyncio.TimeoutError:
         return {
             "status": "storage_unreachable",
-            "message": f"Storage probe timed out after 15s at {seaweed._endpoint}.",
+            "message": f"Storage probe timed out after 15s at {storage._endpoint}.",
         }
     except Exception as _conn_exc:
         return {
             "status": "storage_unreachable",
             "message": (
-                f"Cannot reach storage at {seaweed._endpoint} (container/bucket={seaweed._bucket}). "
+                f"Cannot reach storage at {storage._endpoint} (container/bucket={storage._bucket}). "
                 f"Error: {_conn_exc}."
             ),
         }
 
-    latest = await loop.run_in_executor(None, seaweed.get_latest_finetuned_version)
+    latest = await loop.run_in_executor(None, storage.get_latest_finetuned_version)
     if latest is None:
         return {
             "status": "no_weights",

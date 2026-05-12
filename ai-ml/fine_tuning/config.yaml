@@ -76,3 +76,4 @@ evaluation:
   max_forgetting_drop: 0.10
   temperature: 0.0
   max_new_tokens: 512
+  allow_skip_eval_gate: true

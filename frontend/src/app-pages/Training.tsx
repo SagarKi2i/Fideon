@@ -22,6 +22,7 @@ import {
   XCircle,
   Clock,
   Upload,
+  Download,
   Shield,
   Users,
   BarChart3,
@@ -834,7 +835,7 @@ export default function Training() {
       case "merging":             return "Merging LoRA adapter…";
       case "reloading_model":     return "Loading fine-tuned model for extraction…";
       case "pending_share":       return "Preparing weights for sharing…";
-      case "promoting":           return "Uploading to SeaweedFS & registering…";
+      case "promoting":           return "Uploading to Azure Blob & registering…";
       case "done":                return "Complete — model registered";
       default:                    return phase ? `${phase}…` : "Processing…";
     }
@@ -865,22 +866,44 @@ export default function Training() {
   const getFederatedPhaseLabel = (phase: string | undefined): string => {
     switch (phase) {
       case "starting":             return "Initialising…";
-      case "discovering_versions": return "Discovering weight versions in Azure Blob…";
+      case "discovering_versions": return "Discovering available weight versions in Azure Blob…";
       case "downloading_weights":  return "Downloading weights from Azure Blob…";
       case "aggregating":          return "Running FedAvg aggregation…";
-      case "quantizing":           return "Quantizing model…";
+      case "quantizing":           return "Quantizing model to GGUF…";
       case "uploading":            return "Uploading aggregated model to Azure Blob…";
-      case "done":                 return "Aggregation complete — new model version registered";
+      case "done":                 return "New model version registered in Azure Blob";
       default:                     return phase ? `${phase}…` : "Processing…";
     }
   };
 
+  const getFederatedSectionTitle = (phase: string | undefined, status: string, didAggregate: boolean): string => {
+    if (status === "completed") return didAggregate ? "Global Update Complete" : "Nothing New to Aggregate";
+    if (status === "failed")    return "Global Update Failed";
+    switch (phase) {
+      case "starting":
+      case "discovering_versions": return "Collecting Available Weights…";
+      case "downloading_weights":  return "Downloading Weights from Azure Blob…";
+      case "aggregating":          return "Running FedAvg Aggregation…";
+      case "quantizing":           return "Quantizing Model…";
+      case "uploading":            return "Uploading to Azure Blob…";
+      case "done":                 return "Global Update Complete";
+      default:                     return "Global Update Running…";
+    }
+  };
+
   const getFederatedPipelineStep = (phase: string | undefined, status: string): number => {
-    if (status === "completed") return 2;
+    if (status === "completed") return 4;
     if (!phase) return 0;
-    if (["uploading", "done"].includes(phase)) return 2;
-    if (["starting", "discovering_versions", "downloading_weights", "aggregating", "quantizing"].includes(phase)) return 1;
-    return 0;
+    switch (phase) {
+      case "starting":
+      case "discovering_versions":
+      case "downloading_weights":  return 1;
+      case "aggregating":          return 2;
+      case "quantizing":           return 3;
+      case "uploading":
+      case "done":                 return 4;
+      default:                     return 0;
+    }
   };
 
   // Derived pipeline state
@@ -1754,144 +1777,147 @@ export default function Training() {
             </CardContent>
           </Card>
 
-          {/* Global Update — FedAvg aggregation trigger */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Globe className="h-5 w-5" />
-                Global Update
-              </CardTitle>
-              <CardDescription>
-                Collect all weight versions from Azure Blob, run FedAvg aggregation,
-                quantize the result, and register a new global model version.
-                Run this after all participants have shared their gradients.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <Button onClick={handleStartFederated} disabled={isFederatedRunning} className="gap-2">
-                {isFederatedRunning
-                  ? <><Loader2 className="h-4 w-4 animate-spin" />Aggregating…</>
-                  : <><Globe className="h-4 w-4" />Global Update</>}
-              </Button>
-              {!federatedStatus && !federatedJobStatus && !isFederatedRunning && (
-                <div className="flex items-start gap-2 p-3 rounded-lg bg-muted/50 border text-sm text-muted-foreground">
-                  <Info className="h-4 w-4 shrink-0 mt-0.5 text-blue-500" />
-                  <span>No weights available for aggregation yet. Share Gradients first, then run Global Update.</span>
-                </div>
-              )}
-              {isFederatedRunning && federatedStatus && (
-                <div className="flex items-center gap-2 p-3 rounded-lg bg-blue-500/10 border border-blue-500/20 text-sm text-blue-600 dark:text-blue-400">
-                  <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
-                  {federatedStatus}
-                </div>
-              )}
-              {federatedStatus && !isFederatedRunning && !federatedJobStatus && (
-                <div className={`flex items-start gap-2 p-3 rounded-lg border text-sm ${
-                  federatedStatus.includes("No weights")
-                    ? "bg-amber-500/10 border-amber-500/20 text-amber-600 dark:text-amber-400"
-                    : "bg-red-500/10 border-red-500/20 text-red-600 dark:text-red-400"
-                }`}>
-                  {federatedStatus.includes("No weights")
-                    ? <Info className="h-4 w-4 shrink-0 mt-0.5" />
-                    : <XCircle className="h-4 w-4 shrink-0 mt-0.5" />}
-                  <span>{federatedStatus}</span>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Federated job pipeline status */}
-          {federatedJobStatus && (() => {
-            const isFedDone     = federatedJobStatus.status === "completed";
-            const isFedFailed   = federatedJobStatus.status === "failed";
-            const isFedActive   = !isFedDone && !isFedFailed;
-            const didAggregate  = (federatedJobStatus.versions_aggregated?.length ?? 0) > 0;
-            // "completed" with no versions aggregated = nothing new to process
-            const isFedNoWork   = isFedDone && !didAggregate;
+          {/* Global Update — single card with inline pipeline status */}
+          {(() => {
+            const isFedDone    = federatedJobStatus?.status === "completed";
+            const isFedFailed  = federatedJobStatus?.status === "failed";
+            const isFedActive  = !!federatedJobStatus && !isFedDone && !isFedFailed;
+            const didAggregate = (federatedJobStatus?.versions_aggregated?.length ?? 0) > 0;
+            const isFedNoWork  = isFedDone && !didAggregate;
             const fedSteps = [
-              { label: "Collect & Aggregate", desc: "Download weights from Azure Blob and run FedAvg", icon: Globe },
-              { label: "New Model Ready",     desc: "Aggregated model pushed to Azure Blob",           icon: CheckCircle2 },
+              { label: "Collecting Weights",      desc: "Discovering & downloading versions from Azure Blob", icon: Download },
+              { label: "FedAvg Aggregation",      desc: "Averaging weights across all shared versions",       icon: Globe    },
+              { label: "Quantizing Model",        desc: "Converting aggregated model to GGUF format",         icon: Cpu      },
+              { label: "Uploading to Azure Blob", desc: "Registering new global model version",               icon: Upload   },
             ];
             return (
               <Card>
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2">
                     <Globe className="h-5 w-5" />
-                    Federated Learning — Pipeline Status
-                    {isFedActive  && <Loader2 className="h-4 w-4 ml-1 animate-spin text-blue-500" />}
-                    {isFedDone && didAggregate  && <CheckCircle2 className="h-4 w-4 ml-1 text-green-500" />}
-                    {isFedNoWork                && <Info className="h-4 w-4 ml-1 text-amber-500" />}
-                    {isFedFailed                && <XCircle className="h-4 w-4 ml-1 text-red-500" />}
+                    {federatedJobStatus
+                      ? getFederatedSectionTitle(federatedJobStatus.phase, federatedJobStatus.status, didAggregate)
+                      : "Global Update"}
+                    {isFedActive             && <Loader2      className="h-4 w-4 ml-1 animate-spin text-blue-500"  />}
+                    {isFedDone && didAggregate && <CheckCircle2 className="h-4 w-4 ml-1 text-green-500"            />}
+                    {isFedNoWork             && <Info         className="h-4 w-4 ml-1 text-amber-500"              />}
+                    {isFedFailed             && <XCircle      className="h-4 w-4 ml-1 text-red-500"               />}
                   </CardTitle>
-                  {federatedJobStatus.phase && (
-                    <CardDescription className="flex items-center gap-1.5">
-                      <span className="inline-block h-1.5 w-1.5 rounded-full bg-blue-500 animate-pulse" />
-                      {getFederatedPhaseLabel(federatedJobStatus.phase)}
-                    </CardDescription>
-                  )}
+                  <CardDescription className="flex items-center gap-1.5">
+                    {isFedActive && federatedJobStatus?.phase ? (
+                      <>
+                        <span className="inline-block h-1.5 w-1.5 rounded-full bg-blue-500 animate-pulse" />
+                        {getFederatedPhaseLabel(federatedJobStatus.phase)}
+                      </>
+                    ) : (
+                      "Collect all weight versions from Azure Blob, run FedAvg aggregation, quantize the result, and register a new global model version. Run this after all participants have shared their gradients."
+                    )}
+                  </CardDescription>
                 </CardHeader>
-                <CardContent>
-                  <div className="grid grid-cols-2 gap-3 mb-4">
-                    {fedSteps.map((s, i) => {
-                      const stepNum = i + 1;
-                      const done   = (isFedDone && didAggregate) ? true : fedPipelineStep > stepNum;
-                      const active = !isFedFailed && !isFedNoWork && fedPipelineStep === stepNum;
-                      const failed = isFedFailed && fedPipelineStep === stepNum;
-                      return (
-                        <div key={s.label} className={`flex flex-col items-center text-center p-3 rounded-lg border transition-colors ${
-                          done ? "border-green-500/40 bg-green-500/5" :
-                          active ? "border-blue-500/40 bg-blue-500/5" :
-                          failed ? "border-red-500/40 bg-red-500/5" :
-                          "border-border/40 bg-muted/20 opacity-50"
-                        }`}>
-                          <div className={`mb-2 h-9 w-9 rounded-full flex items-center justify-center ${
-                            done ? "bg-green-500/15" : active ? "bg-blue-500/15" : failed ? "bg-red-500/15" : "bg-muted"
-                          }`}>
-                            {done   ? <CheckCircle2 className="h-5 w-5 text-green-500" /> :
-                             active ? <Loader2 className="h-5 w-5 text-blue-500 animate-spin" /> :
-                             failed ? <XCircle className="h-5 w-5 text-red-500" /> :
-                             <s.icon className="h-5 w-5 text-muted-foreground" />}
-                          </div>
-                          <span className={`text-[10px] font-bold uppercase tracking-wide mb-0.5 ${
-                            done ? "text-green-500" : active ? "text-blue-500" : failed ? "text-red-500" : "text-muted-foreground"
-                          }`}>Step {stepNum}</span>
-                          <p className="text-xs font-medium leading-tight">{s.label}</p>
-                          <p className="text-[10px] text-muted-foreground mt-0.5 leading-tight">{s.desc}</p>
-                        </div>
-                      );
-                    })}
-                  </div>
-                  <Progress
-                    value={
-                      isFedNoWork ? 0 :
-                      (isFedDone && didAggregate) ? 100 :
-                      isFedFailed ? (fedPipelineStep / 2) * 100 :
-                      ((fedPipelineStep - 0.5) / 2) * 100
-                    }
-                    className="h-1.5 mb-3"
-                  />
-                  {isFedDone && didAggregate && (
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2 p-3 rounded-lg bg-green-500/10 border border-green-500/20 text-sm text-green-600 dark:text-green-400">
-                        <CheckCircle2 className="h-4 w-4 shrink-0" />
-                        Federated model v{federatedJobStatus.version} registered in Fideon Weights — available for Electron download.
+                <CardContent className="space-y-3">
+                  <Button onClick={handleStartFederated} disabled={isFederatedRunning} className="gap-2">
+                    {isFederatedRunning
+                      ? <><Loader2 className="h-4 w-4 animate-spin" />Aggregating…</>
+                      : <><Globe className="h-4 w-4" />Global Update</>}
+                  </Button>
+
+                  {/* Idle — no job yet */}
+                  {!federatedStatus && !federatedJobStatus && !isFederatedRunning && (
+                    <div className="flex items-start gap-2 p-3 rounded-lg bg-muted/50 border text-sm text-muted-foreground">
+                      <Info className="h-4 w-4 shrink-0 mt-0.5 text-blue-500" />
+                      <span>No weights available for aggregation yet. Share Gradients first, then run Global Update.</span>
+                    </div>
+                  )}
+                  {/* Pre-job running message */}
+                  {isFederatedRunning && federatedStatus && (
+                    <div className="flex items-center gap-2 p-3 rounded-lg bg-blue-500/10 border border-blue-500/20 text-sm text-blue-600 dark:text-blue-400">
+                      <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                      {federatedStatus}
+                    </div>
+                  )}
+                  {/* Pre-job error (failed before job created) */}
+                  {federatedStatus && !isFederatedRunning && !federatedJobStatus && (
+                    <div className={`flex items-start gap-2 p-3 rounded-lg border text-sm ${
+                      federatedStatus.includes("No weights")
+                        ? "bg-amber-500/10 border-amber-500/20 text-amber-600 dark:text-amber-400"
+                        : "bg-red-500/10 border-red-500/20 text-red-600 dark:text-red-400"
+                    }`}>
+                      {federatedStatus.includes("No weights")
+                        ? <Info className="h-4 w-4 shrink-0 mt-0.5" />
+                        : <XCircle className="h-4 w-4 shrink-0 mt-0.5" />}
+                      <span>{federatedStatus}</span>
+                    </div>
+                  )}
+
+                  {/* Pipeline steps + progress (shown once job exists) */}
+                  {federatedJobStatus && (
+                    <>
+                      <div className="grid grid-cols-4 gap-2">
+                        {fedSteps.map((s, i) => {
+                          const stepNum = i + 1;
+                          const done   = (isFedDone && didAggregate) ? true : fedPipelineStep > stepNum;
+                          const active = !isFedFailed && !isFedNoWork && fedPipelineStep === stepNum;
+                          const failed = isFedFailed && fedPipelineStep === stepNum;
+                          return (
+                            <div key={s.label} className={`flex flex-col items-center text-center p-3 rounded-lg border transition-colors ${
+                              done   ? "border-green-500/40 bg-green-500/5" :
+                              active ? "border-blue-500/40 bg-blue-500/5"  :
+                              failed ? "border-red-500/40 bg-red-500/5"    :
+                              "border-border/40 bg-muted/20 opacity-50"
+                            }`}>
+                              <div className={`mb-2 h-9 w-9 rounded-full flex items-center justify-center ${
+                                done ? "bg-green-500/15" : active ? "bg-blue-500/15" : failed ? "bg-red-500/15" : "bg-muted"
+                              }`}>
+                                {done   ? <CheckCircle2 className="h-5 w-5 text-green-500"            /> :
+                                 active ? <Loader2      className="h-5 w-5 text-blue-500 animate-spin" /> :
+                                 failed ? <XCircle      className="h-5 w-5 text-red-500"               /> :
+                                          <s.icon       className="h-5 w-5 text-muted-foreground"      />}
+                              </div>
+                              <span className={`text-[10px] font-bold uppercase tracking-wide mb-0.5 ${
+                                done ? "text-green-500" : active ? "text-blue-500" : failed ? "text-red-500" : "text-muted-foreground"
+                              }`}>Step {stepNum}</span>
+                              <p className="text-xs font-medium leading-tight">{s.label}</p>
+                              <p className="text-[10px] text-muted-foreground mt-0.5 leading-tight">{s.desc}</p>
+                            </div>
+                          );
+                        })}
                       </div>
-                      <p className="text-xs text-muted-foreground px-1">
-                        Aggregated from versions: {federatedJobStatus.versions_aggregated!.map(v => `v${v}`).join(", ")}
-                      </p>
-                    </div>
-                  )}
-                  {isFedNoWork && (
-                    <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-sm text-amber-600 dark:text-amber-400">
-                      <Info className="h-4 w-4 shrink-0 mt-0.5" />
-                      <span>{federatedJobStatus.message ?? "No new weights to aggregate — all versions already processed. Share Gradients first to add new weights."}</span>
-                    </div>
-                  )}
-                  {isFedFailed && (
-                    <div className="flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-sm text-red-600 dark:text-red-400">
-                      <XCircle className="h-4 w-4 shrink-0 mt-0.5" />
-                      <span>{federatedJobStatus.error || "Aggregation failed. Check RunPod logs."}</span>
-                    </div>
+                      <Progress
+                        value={
+                          isFedNoWork ? 0 :
+                          (isFedDone && didAggregate) ? 100 :
+                          isFedFailed ? (fedPipelineStep / 4) * 100 :
+                          ((fedPipelineStep - 0.5) / 4) * 100
+                        }
+                        className="h-1.5"
+                      />
+                      {isFedDone && didAggregate && (
+                        <div className="space-y-2">
+                          <div className="flex items-start gap-2 p-3 rounded-lg bg-green-500/10 border border-green-500/20 text-sm text-green-600 dark:text-green-400">
+                            <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
+                            <span>
+                              <strong>v{federatedJobStatus.version}</strong> is now registered on Azure Blob and ready to use.
+                              {" "}Run Global Update again only after new gradients have been shared.
+                            </span>
+                          </div>
+                          <p className="text-xs text-muted-foreground px-1">
+                            Aggregated from: {federatedJobStatus.versions_aggregated!.map(v => `v${v}`).join(", ")}
+                          </p>
+                        </div>
+                      )}
+                      {isFedNoWork && (
+                        <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-sm text-amber-600 dark:text-amber-400">
+                          <Info className="h-4 w-4 shrink-0 mt-0.5" />
+                          <span>{federatedJobStatus.message ?? "No new weights to aggregate — all versions already processed. Share Gradients first to add new weights."}</span>
+                        </div>
+                      )}
+                      {isFedFailed && (
+                        <div className="flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-sm text-red-600 dark:text-red-400">
+                          <XCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                          <span>{federatedJobStatus.error || "Aggregation failed. Check RunPod logs."}</span>
+                        </div>
+                      )}
+                    </>
                   )}
                 </CardContent>
               </Card>
