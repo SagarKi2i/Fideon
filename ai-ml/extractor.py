@@ -460,11 +460,11 @@ def _pdf_to_images_and_save(
     images_base_dir: str,
     dpi: int = 300,
 ) -> tuple:
-    """Render PDF pages at *dpi*, save each as PNG, return (pil_images, rel_paths).
+    """Render PDF pages at *dpi*, save each as JPEG, return (pil_images, abs_paths).
 
-    Saved to: {images_base_dir}/{upload_id}/page_N.png
-    Relative paths returned: "images/{upload_id}/page_N.png"
-    (relative to the workspace root, usable as dataset image references).
+    Saved to: {images_base_dir}/{upload_id}/page_N.jpg
+    Absolute paths are returned so LLaMA-Factory can always resolve them
+    regardless of which directory the dataset_info.json lives in.
     """
     import fitz
     from PIL import Image
@@ -474,25 +474,32 @@ def _pdf_to_images_and_save(
 
     doc = fitz.open(pdf_path)
     pil_images: List = []
-    rel_paths: List[str] = []
+    abs_paths: List[str] = []
     for i, page in enumerate(doc):
         pix = page.get_pixmap(dpi=dpi)
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        filename = f"page_{i + 1}.png"
-        img.save(str(save_dir / filename), format="PNG")
+        filename = f"page_{i + 1}.jpg"
+        abs_path = str(save_dir / filename)
+        img.save(abs_path, format="JPEG", quality=95)
         pil_images.append(img)
-        rel_paths.append(f"images/{upload_id}/{filename}")
+        abs_paths.append(abs_path)
     doc.close()
     logger.info(
-        "[extractor] Saved %d page image(s) for upload %s at %d DPI → %s",
+        "[extractor] Saved %d page image(s) for upload %s at %d DPI (JPEG) → %s",
         len(pil_images), upload_id, dpi, save_dir,
     )
-    return pil_images, rel_paths
+    return pil_images, abs_paths
 
 
 # ── Arm A: Surya OCR ──────────────────────────────────────────────────────────
 
-def _run_surya_ocr(images: List) -> str:
+def _run_surya_ocr(images: List) -> tuple:
+    """Run Surya OCR; returns (combined_text: str, page_texts: List[str]).
+
+    combined_text  — all pages joined with newlines (for backward compat).
+    page_texts     — one string per page, used for the per-page OCR sections
+                     in the training data format (=== PAGE N ===).
+    """
     import traceback as _tb
     _load_surya()
     logger.info("[surya] Running OCR on %d page(s)...", len(images))
@@ -506,18 +513,23 @@ def _run_surya_ocr(images: List) -> str:
         logger.error("[surya] OCR inference failed: %s\n%s", exc, _tb.format_exc())
         raise
 
-    lines: List[str] = []
+    page_texts: List[str] = []
+    total_lines = 0
     for page_idx, result in enumerate(ocr_results):
         page_lines = getattr(result, "text_lines", []) or []
         if not page_lines:
             logger.warning("[surya] Page %d: no text lines detected (blank or very sparse page)", page_idx + 1)
+        lines: List[str] = []
         for tl in page_lines:
             text = (tl.text or "").strip()
             if text:
                 lines.append(text)
+        page_texts.append("\n".join(lines))
+        total_lines += len(lines)
 
-    logger.info("[surya] OCR complete — %d text lines extracted across %d page(s)", len(lines), len(images))
-    return "\n".join(lines)
+    combined = "\n".join(page_texts)
+    logger.info("[surya] OCR complete — %d text lines across %d page(s)", total_lines, len(images))
+    return combined, page_texts
 
 
 # ── Arm B: Docling ────────────────────────────────────────────────────────────
@@ -1034,6 +1046,7 @@ def run_full_extraction(
 
     # ── Step 1: Surya + Docling in parallel (failures are non-fatal) ─────────
     surya_ocr_text: str = ""
+    surya_page_texts: List[str] = []
     docling_result: Dict[str, Any] = {"markdown": "", "tables": [], "kv_pairs": {}}
     arm_warnings: List[str] = []
 
@@ -1044,7 +1057,7 @@ def run_full_extraction(
         for future in as_completed([future_surya, future_docling]):
             if future is future_surya:
                 try:
-                    surya_ocr_text = future.result()
+                    surya_ocr_text, surya_page_texts = future.result()
                 except Exception as exc:
                     logger.warning("Surya OCR arm failed — Qwen2-VL will extract from images only: %s", exc)
                     arm_warnings.append(f"Surya OCR unavailable: {exc}")
@@ -1093,6 +1106,8 @@ def run_full_extraction(
         "full_text": qwen_result["qwen_raw_text"] or surya_ocr_text,
         "markdown": qwen_result["qwen_markdown"] or docling_result.get("markdown", ""),
         "page_count": len(images),
+        "surya_page_texts": surya_page_texts,
+        "docling_data": docling_result,
     }
     if image_paths:
         result["image_paths"] = image_paths
@@ -1167,7 +1182,7 @@ def extract_policy_text(pdf_path: str) -> Dict[str, Any]:
         for future in as_completed([fut_surya, fut_docling]):
             if future is fut_surya:
                 try:
-                    ocr_text = future.result()
+                    ocr_text, _ = future.result()  # per-page list not needed here
                 except Exception as exc:
                     logger.warning("Surya OCR arm failed in extract_policy_text — continuing: %s", exc)
                     arm_warnings.append(f"Surya OCR unavailable: {exc}")

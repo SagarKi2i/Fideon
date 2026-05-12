@@ -4,7 +4,7 @@ Fine-tuning job runner for the Fideon RunPod pod.
 run_cycle() is the top-level entry point called by server.py when a user
 clicks "Fine-tune" or when the correction threshold is crossed automatically.
 
-Full pipeline (mirrors the ACORD pipeline document STEP 6):
+Full pipeline for insurance document extraction model training:
 
   load_and_validate_config()
       ↓
@@ -163,6 +163,40 @@ def _check_convergence(
         else:
             mismatched.append(k)
     return len(mismatched) == 0, matched, mismatched
+
+
+def _check_document_diversity(doc_type_counts: Dict[str, int]) -> List[str]:
+    """
+    Return a list of warning strings for imbalanced or single-type training data.
+    Input is the {document_type: count} dict from DatasetBuilder's quality report.
+    Never raises — always returns a (possibly empty) list.
+    """
+    if not doc_type_counts:
+        return []
+    warnings: List[str] = []
+    total     = sum(doc_type_counts.values())
+    max_count = max(doc_type_counts.values())
+
+    if max_count > total * 0.8:
+        dominant = next(k for k, v in doc_type_counts.items() if v == max_count)
+        warnings.append(
+            f"Training data dominated by '{dominant}' "
+            f"({max_count}/{total} = {max_count * 100 // total}%) — "
+            f"model may overfit to this document type"
+        )
+    if len(doc_type_counts) == 1:
+        warnings.append(
+            "Only one document type in training data — "
+            "model may not generalise to other insurance documents"
+        )
+    else:
+        for dt, count in doc_type_counts.items():
+            if count < max_count * 0.1:
+                warnings.append(
+                    f"Document type '{dt}' is underrepresented: "
+                    f"{count} sample(s) vs {max_count} in the largest category"
+                )
+    return warnings
 
 
 def _check_eval_files(config: Dict[str, Any]) -> None:
@@ -418,6 +452,21 @@ def run_cycle(
                 f"{build_result.rejected_records} rejected)"
             )
 
+            # Log document type distribution from the quality report computed
+            # by DatasetBuilder (covers both new + replay rows).
+            doc_type_distribution: Dict[str, int] = (
+                build_result.quality_report.get("document_types") or {}
+            )
+            if doc_type_distribution:
+                dist_str = ", ".join(
+                    f"{dt}:{n}" for dt, n in sorted(doc_type_distribution.items())
+                )
+                print(f"[job_runner] Document types in training set: {dist_str}", flush=True)
+                for warning in _check_document_diversity(doc_type_distribution):
+                    print(f"[job_runner] WARNING (diversity): {warning}", flush=True)
+            else:
+                doc_type_distribution = {}
+
             # ── 4. Resolve base model ─────────────────────────────────────────
             _update("resolving_base_model")
             if base_model_override and Path(base_model_override).exists():
@@ -448,7 +497,15 @@ def run_cycle(
 
             # ── 6. Train (QLoRA SFT) ──────────────────────────────────────────
             _update("training")
-            print(f"[job_runner] Starting QLoRA training — version={new_version} …")
+            _doc_type_str = (
+                ", ".join(sorted(doc_type_distribution.keys()))
+                if doc_type_distribution else "unknown"
+            )
+            print(
+                f"[job_runner] Starting QLoRA training — version={new_version}"
+                f"  document types: {_doc_type_str}",
+                flush=True,
+            )
             adapter_path = run_training(
                 config=config,
                 dataset_path=build_result.train_jsonl_path,
@@ -514,6 +571,24 @@ def run_cycle(
                 f"[job_runner] Gate: passed={gate.passed}  "
                 f"scores={gate.scores}  failures={gate.failures}"
             )
+
+            # Warn if this cycle covers very few document types — the model will
+            # train correctly but may not generalise beyond what it has seen.
+            if doc_type_distribution:
+                if len(doc_type_distribution) < 2:
+                    print(
+                        "[job_runner] NOTE: training data contains only one document type. "
+                        "Consider adding samples from other insurance document types.",
+                        flush=True,
+                    )
+                _critical = {"ACORD_25", "POLICY_DEC", "CERTIFICATE"}
+                _missing  = _critical - set(doc_type_distribution.keys())
+                if _missing:
+                    print(
+                        f"[job_runner] NOTE: critical document types absent from this cycle: "
+                        f"{sorted(_missing)}",
+                        flush=True,
+                    )
 
             if not gate.passed:
                 registry.mark_failed(new_version, "; ".join(gate.failures))
@@ -589,11 +664,12 @@ def run_cycle(
             # can return the locally-trained model on the next iteration instead
             # of always falling back to the Azure-uploaded version.
             training_meta = {
-                "backend":         "qlora_hf",
-                "fingerprint":     build_result.fingerprint,
-                "job_id":          job_id,
-                "base_model":      base_model,
-                "replay_fraction": replay_fraction,
+                "backend":                    "qlora_hf",
+                "fingerprint":                build_result.fingerprint,
+                "job_id":                     job_id,
+                "base_model":                 base_model,
+                "replay_fraction":            replay_fraction,
+                "document_type_distribution": doc_type_distribution,
             }
             registry.promote_version(
                 version=new_version,
@@ -636,15 +712,16 @@ def run_cycle(
             )
             pending_share_dir.mkdir(parents=True, exist_ok=True)
             share_manifest = {
-                "job_id":             job_id,
-                "registry_path":      reg_path,
-                "version":            new_version,
-                "merged_model_path":  merge_result.output_path,
-                "adapter_path":       adapter_path,
-                "eval_scores":        gate.scores,
-                "training_meta":      training_meta,
-                "base_model":         base_model,
-                "created_at":         _utc_now(),
+                "job_id":                     job_id,
+                "registry_path":              reg_path,
+                "version":                    new_version,
+                "merged_model_path":          merge_result.output_path,
+                "adapter_path":               adapter_path,
+                "eval_scores":                gate.scores,
+                "training_meta":              training_meta,
+                "base_model":                 base_model,
+                "document_type_distribution": doc_type_distribution,
+                "created_at":                 _utc_now(),
             }
             share_file = pending_share_dir / f"v{new_version}.json"
             share_file.write_text(
@@ -659,18 +736,26 @@ def run_cycle(
         finished_at = _utc_now()
         _set_job(job_id, {
             **(_jobs.get(job_id) or {}),
-            "status":              "running" if _suppress_completion_status else "completed",
-            "phase":               "cycle_done" if _suppress_completion_status else "done",
-            "finished_at":         finished_at,
-            "gate_passed":         True,
-            "version":             new_version,
-            "adapter_path":        adapter_path,
-            "merged_model_path":   merge_result.output_path,
-            "eval_scores":         gate.scores,
-            "upload_ids":          upload_ids,
-            "original_fields_map": original_fields_map,
+            "status":                     "running" if _suppress_completion_status else "completed",
+            "phase":                      "cycle_done" if _suppress_completion_status else "done",
+            "finished_at":                finished_at,
+            "gate_passed":                True,
+            "version":                    new_version,
+            "adapter_path":               adapter_path,
+            "merged_model_path":          merge_result.output_path,
+            "eval_scores":                gate.scores,
+            "upload_ids":                 upload_ids,
+            "original_fields_map":        original_fields_map,
+            "document_type_distribution": doc_type_distribution,
         })
-        print(f"[job_runner] Cycle complete — SLM v1.{new_version} promoted.")
+        print(
+            f"[job_runner] Cycle complete — insurance extraction model v1.{new_version} promoted."
+            + (
+                f"  Document types: {', '.join(sorted(doc_type_distribution.keys()))}"
+                if doc_type_distribution else ""
+            ),
+            flush=True,
+        )
 
         return CycleResult(
             status="completed",
@@ -992,6 +1077,7 @@ def run_auto_refine_loop(
                 chat_row = build_training_sample_from_correction(
                     run_row=row,
                     corrected_json=sd["corrected_fields"],
+                    docling_data=sd.get("docling_data") or None,
                 )
                 outcome = append_training_sample(
                     root=feedback_dir,
