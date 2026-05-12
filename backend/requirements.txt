@@ -80,7 +80,10 @@ huggingface-hub>=0.24.0
 # Keep commented for cross-platform installs (notably Windows).
 # flash-attn
 
-# --- SeaweedFS / S3-compatible object store (GGUF artifact delivery) ---
+# --- Azure Blob Storage (model artifact delivery) ---
+azure-storage-blob>=12.19.0
+
+# --- boto3/botocore retained for accelerate/SageMaker optional support ---
 boto3>=1.34.0
 botocore>=1.34.0
 

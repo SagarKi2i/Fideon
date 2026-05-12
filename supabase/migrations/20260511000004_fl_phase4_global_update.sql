@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS public.federated_aggregations (
   version             TEXT        NOT NULL,         -- e.g. "v12"
   num_contributions   INTEGER     NOT NULL DEFAULT 0,
 
-  -- SeaweedFS prefixes written by the aggregator
+  -- Azure Blob prefixes written by the aggregator
   adapter_prefix      TEXT        NOT NULL,         -- adapters/federated/v12/
   finetuned_prefix    TEXT        NOT NULL,         -- finetuned/v12/
   gguf_prefix         TEXT        NOT NULL DEFAULT '', -- gguf/federated/v12/  (empty = skipped)
@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS public.global_model_versions (
 
   aggregation_id   UUID        REFERENCES public.federated_aggregations(id) ON DELETE SET NULL,
 
-  -- SeaweedFS locations
+  -- Azure Blob locations
   adapter_prefix   TEXT        NOT NULL,
   finetuned_prefix TEXT        NOT NULL,
   gguf_prefix      TEXT        NOT NULL DEFAULT '',

@@ -19,8 +19,9 @@ CREATE TABLE IF NOT EXISTS public.training_feedback (
 
   rating              SMALLINT    CHECK (rating BETWEEN 1 AND 5),
   context_json        JSONB       NOT NULL DEFAULT '{}'::JSONB,
+  feedback_type       TEXT        NOT NULL DEFAULT 'correction',
 
-  used_in_training    BOOLEAN     NOT NULL DEFAULT false,
+  is_used_for_training BOOLEAN    NOT NULL DEFAULT false,
   training_job_id     UUID,                        -- FK set after job created
 
   tenant_id           UUID        REFERENCES auth.users(id) ON DELETE SET NULL
@@ -28,7 +29,7 @@ CREATE TABLE IF NOT EXISTS public.training_feedback (
 
 CREATE INDEX IF NOT EXISTS idx_tf_device_id       ON public.training_feedback(device_id);
 CREATE INDEX IF NOT EXISTS idx_tf_model_id        ON public.training_feedback(model_id);
-CREATE INDEX IF NOT EXISTS idx_tf_used            ON public.training_feedback(used_in_training);
+CREATE INDEX IF NOT EXISTS idx_tf_used            ON public.training_feedback(is_used_for_training);
 CREATE INDEX IF NOT EXISTS idx_tf_created_at      ON public.training_feedback(created_at DESC);
 
 -- ---------------------------------------------------------------------------
@@ -76,12 +77,20 @@ CREATE TRIGGER trg_fl_ltj_updated_at
   FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 -- Back-fill FK on training_feedback once jobs exist
-ALTER TABLE public.training_feedback
-  ADD CONSTRAINT IF NOT EXISTS fk_tf_training_job
-  FOREIGN KEY (training_job_id)
-  REFERENCES public.fl_local_training_jobs(id)
-  ON DELETE SET NULL
-  DEFERRABLE INITIALLY DEFERRED;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'fk_tf_training_job'
+  ) THEN
+    ALTER TABLE public.training_feedback
+      ADD CONSTRAINT fk_tf_training_job
+      FOREIGN KEY (training_job_id)
+      REFERENCES public.fl_local_training_jobs(id)
+      ON DELETE SET NULL
+      DEFERRABLE INITIALLY DEFERRED;
+  END IF;
+END
+$$;
 
 -- RLS: device rows are service-role only; no direct user access
 ALTER TABLE public.training_feedback       ENABLE ROW LEVEL SECURITY;

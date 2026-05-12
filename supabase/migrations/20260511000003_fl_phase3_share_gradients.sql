@@ -46,19 +46,20 @@ CREATE TRIGGER trg_fl_rounds_updated_at
 -- ---------------------------------------------------------------------------
 -- federated_updates
 -- One row per device submission within a round (the "gradient upload").
--- storage_path points to the LoRA adapter in SeaweedFS:
+-- storage_path points to the LoRA adapter in Azure Blob:
 --   gradients/{model_id}/round-{N}/{device_id}/
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.federated_updates (
   id                    UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  submitted_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
 
   round_id              UUID        NOT NULL REFERENCES public.federated_rounds(id) ON DELETE CASCADE,
   model_id              TEXT        NOT NULL,
   round_number          INTEGER     NOT NULL,
   device_id             TEXT        NOT NULL,
 
-  storage_path          TEXT        NOT NULL,       -- SeaweedFS prefix
+  storage_path          TEXT        NOT NULL,       -- Azure Blob prefix
   gradient_hash         TEXT        NOT NULL,       -- SHA-256 of adapter bytes
   gradient_size_bytes   BIGINT      NOT NULL DEFAULT 0,
 
