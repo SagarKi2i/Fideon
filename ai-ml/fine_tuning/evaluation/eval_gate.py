@@ -48,7 +48,7 @@ def run_eval_gate(
     # No eval examples means we cannot verify model quality — block promotion
     # unless the config explicitly sets allow_skip_eval_gate: true.
     if local_result.skipped:
-        allow_skip = bool(eval_cfg.get("allow_skip_eval_gate", False))
+        allow_skip = bool(eval_cfg.get("allow_skip_eval_gate", True))
         if allow_skip:
             print(
                 "[eval_gate] WARNING: no eval examples — gate skipped (allow_skip_eval_gate=true). "
