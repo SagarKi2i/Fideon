@@ -1030,6 +1030,17 @@ def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
     }
     if arm_warnings:
         result["warnings"] = arm_warnings
+
+    # ── Schema validation (non-blocking) ─────────────────────────────────────
+    try:
+        from insurance_schema_registry import get_registry
+        _registry = get_registry()
+        validation = _registry.validate(extracted_fields)
+        result["schema_validation"] = validation
+        result["suggested_corrections"] = _registry.suggest_corrections(extracted_fields, validation)
+    except Exception as _exc:
+        logger.warning("[extraction] Schema validation skipped: %s", _exc)
+
     return result
 
 
