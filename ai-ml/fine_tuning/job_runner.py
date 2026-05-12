@@ -121,6 +121,50 @@ def _cleanup_old_runs(runs_dir: Path, active_model_path: Optional[str], keep_las
             print(f"[job_runner] Warning: could not clean up {d}: {exc}")
 
 
+def _resolve_pdf_path(upload_id: str, upload_dir: str = "/workspace/uploads") -> Optional[str]:
+    """Find the PDF on disk given an upload_id (files are stored as {upload_id}_*.pdf)."""
+    matches = list(Path(upload_dir).glob(f"{upload_id}_*"))
+    return str(matches[0]) if matches else None
+
+
+def _normalize_field(v: Any) -> str:
+    if v is None:
+        return ""
+    return str(v).lower().strip().replace(",", "").replace(".", "").replace("  ", " ")
+
+
+def _get_originally_wrong_keys(
+    original_fields: Dict[str, Any],
+    ground_truth: Dict[str, Any],
+) -> set:
+    """Return field keys where the original extraction differed from the user's correction."""
+    all_keys = set(original_fields.keys()) | set(ground_truth.keys())
+    return {
+        k for k in all_keys
+        if _normalize_field(original_fields.get(k)) != _normalize_field(ground_truth.get(k))
+    }
+
+
+def _check_convergence(
+    re_extracted: Dict[str, Any],
+    ground_truth: Dict[str, Any],
+    wrong_keys: set,
+) -> tuple:
+    """
+    Returns (converged: bool, matched: list, mismatched: list).
+    Only checks the keys that were originally wrong.
+    """
+    if not wrong_keys:
+        return True, [], []
+    matched, mismatched = [], []
+    for k in wrong_keys:
+        if _normalize_field(re_extracted.get(k)) == _normalize_field(ground_truth.get(k)):
+            matched.append(k)
+        else:
+            mismatched.append(k)
+    return len(mismatched) == 0, matched, mismatched
+
+
 def _check_eval_files(config: Dict[str, Any]) -> None:
     """Warn (non-fatal) if eval JSON files referenced in config are missing."""
     eval_cfg = config.get("evaluation", {})
@@ -267,6 +311,8 @@ def run_cycle(
     registry_lock_timeout_seconds: int = 30,
     upload_ids: Optional[List[str]] = None,
     original_fields_map: Optional[Dict[str, Dict[str, Any]]] = None,
+    extra_job_fields: Optional[Dict[str, Any]] = None,
+    _suppress_completion_status: bool = False,
 ) -> CycleResult:
     """
     Run one complete continuous-learning cycle.
@@ -310,6 +356,7 @@ def run_cycle(
         "gate_passed":         None,
         "upload_ids":          upload_ids,
         "original_fields_map": original_fields_map,
+        **(extra_job_fields or {}),
     })
 
     def _update(phase: str, **kwargs: Any) -> None:
@@ -535,11 +582,14 @@ def run_cycle(
             print(f"[job_runner] Pending share written → {share_file}")
 
         # ── Done ──────────────────────────────────────────────────────────────
+        # When called from run_auto_refine_loop, suppress "completed" so the
+        # frontend keeps seeing "running" until the whole loop converges.
+        # The loop sets the final status itself (completed or failed).
         finished_at = _utc_now()
         _set_job(job_id, {
             **(_jobs.get(job_id) or {}),
-            "status":              "completed",
-            "phase":               "done",
+            "status":              "running" if _suppress_completion_status else "completed",
+            "phase":               "cycle_done" if _suppress_completion_status else "done",
             "finished_at":         finished_at,
             "gate_passed":         True,
             "version":             new_version,
@@ -613,3 +663,313 @@ def launch_cycle_background(
     )
     t.start()
     print(f"[job_runner] Fine-tuning launched in background thread (job_id={job_id})")
+
+
+# ── Auto-refine loop ──────────────────────────────────────────────────────────
+
+def run_auto_refine_loop(
+    config_path: str,
+    new_data_path: str,
+    job_id: str,
+    upload_ids: Optional[List[str]] = None,
+    original_fields_map: Optional[Dict[str, Dict[str, Any]]] = None,
+    corrected_fields_map: Optional[Dict[str, Dict[str, Any]]] = None,
+    form_type_map: Optional[Dict[str, str]] = None,
+    upload_dir: str = "/workspace/uploads",
+    max_iterations: int = 5,
+    gpu_semaphore: Optional[Any] = None,
+) -> None:
+    """
+    Train → re-extract → compare against user's ground truth → repeat until
+    all originally-wrong fields are correct or max_iterations is reached.
+
+    Each iteration reuses the same job_id so the frontend's existing polling
+    sees live phase updates without any frontend changes.
+    """
+    from fine_tuning.continuous_learning.ingest import build_training_sample_from_correction
+    from fine_tuning.continuous_learning.version_store import (
+        append_training_sample,
+        _load_manifest,
+        _save_manifest,
+        _version_path,
+    )
+    from fine_tuning.config_schema import load_and_validate_config
+    from extractor import run_full_extraction
+
+    upload_ids         = upload_ids or []
+    original_fields_map  = original_fields_map or {}
+    corrected_fields_map = corrected_fields_map or {}
+    form_type_map        = form_type_map or {}
+
+    def _upd(phase: str, **kw: Any) -> None:
+        with _jobs_lock:
+            if job_id in _jobs:
+                _jobs[job_id]["phase"] = phase
+                _jobs[job_id].update(kw)
+
+    # Pre-compute which keys were originally wrong per upload_id
+    originally_wrong: Dict[str, set] = {
+        uid: _get_originally_wrong_keys(
+            original_fields_map.get(uid, {}),
+            corrected_fields_map.get(uid, {}),
+        )
+        for uid in upload_ids
+    }
+
+    try:
+        ft_cfg = load_and_validate_config(config_path)
+    except Exception as exc:
+        print(f"[auto_refine] Cannot load config — running single cycle only: {exc}", flush=True)
+        # No suppression here — single cycle, let it set "completed" / "failed" itself
+        run_cycle(config_path, new_data_path, job_id,
+                  upload_ids=upload_ids, original_fields_map=original_fields_map)
+        return
+
+    cl_cfg       = ft_cfg.get("continuous_learning", {})
+    feedback_dir = Path(cl_cfg.get("feedback_datasets_dir",
+                                   "/workspace/fine_tuning/datasets/feedback_learning"))
+    threshold    = int(cl_cfg.get("retrain_threshold", 25))
+
+    current_data_path = new_data_path
+
+    for iteration in range(1, max_iterations + 1):
+        print(
+            f"[auto_refine] ─── Iteration {iteration}/{max_iterations} ───",
+            flush=True,
+        )
+
+        # ── A: Train ─────────────────────────────────────────────────────────
+        # _suppress_completion_status=True keeps status="running" after each
+        # cycle so the frontend does NOT see "completed" prematurely.
+        # The loop sets the definitive final status itself (completed / failed).
+        result = run_cycle(
+            config_path=config_path,
+            new_data_path=current_data_path,
+            job_id=job_id,
+            upload_ids=upload_ids,
+            original_fields_map=original_fields_map,
+            extra_job_fields={
+                "auto_refine_iteration":      iteration,
+                "auto_refine_max_iterations": max_iterations,
+                "auto_refine_converged":      False,
+            },
+            _suppress_completion_status=True,
+        )
+
+        if result.status != "completed":
+            # Gate failure / exception — run_cycle already set the terminal status
+            print(
+                f"[auto_refine] Cycle {iteration} ended with status={result.status} — stopping loop",
+                flush=True,
+            )
+            return
+
+        # ── B: Re-extract each PDF with the freshly trained model ─────────
+        _upd(
+            f"auto_refine_iter_{iteration}_of_{max_iterations}_extracting",
+            auto_refine_iteration=iteration,
+        )
+
+        all_converged   = True
+        pdf_found       = False
+        next_samples: List[Dict[str, Any]] = []
+
+        for uid in upload_ids:
+            pdf_path = _resolve_pdf_path(uid, upload_dir)
+            if not pdf_path:
+                print(f"[auto_refine] No PDF on disk for upload_id={uid} — skipping", flush=True)
+                continue
+
+            pdf_found   = True
+            form_type   = form_type_map.get(uid, "25")
+            ground_truth = corrected_fields_map.get(uid, {})
+            wrong_keys   = originally_wrong.get(uid, set())
+
+            print(f"[auto_refine] Re-extracting upload_id={uid} form_type={form_type}", flush=True)
+            try:
+                if gpu_semaphore is not None:
+                    with gpu_semaphore:
+                        re_result = run_full_extraction(pdf_path, form_type)
+                else:
+                    re_result = run_full_extraction(pdf_path, form_type)
+            except Exception as exc:
+                print(f"[auto_refine] Re-extraction failed for {uid}: {exc}", flush=True)
+                all_converged = False
+                continue
+
+            re_fields = re_result.get("extracted_json", {})
+
+            # ── C: Compare ───────────────────────────────────────────────
+            converged, matched, mismatched = _check_convergence(re_fields, ground_truth, wrong_keys)
+            print(
+                f"[auto_refine] {uid}: converged={converged}  "
+                f"matched={len(matched)}  mismatched={len(mismatched)}"
+                + (f"  still_wrong={mismatched[:5]}" if mismatched else ""),
+                flush=True,
+            )
+
+            if not converged:
+                all_converged = False
+                next_samples.append({
+                    "upload_id":       uid,
+                    "pdf_path":        pdf_path,
+                    "form_type":       form_type,
+                    "original_fields": re_fields,    # what this iteration extracted
+                    "corrected_fields": ground_truth, # user's ground truth stays the same
+                    "raw_text":        re_result.get("full_text", ""),
+                })
+
+        # ── D: Convergence / termination check ───────────────────────────
+        if not pdf_found:
+            # Digital PDFs — no PDF on disk to re-extract, training ran fine
+            print(
+                f"[auto_refine] No PDFs on disk to verify — training completed after {iteration} cycle(s).",
+                flush=True,
+            )
+            _upd("done", status="completed",
+                 auto_refine_converged=None,
+                 auto_refine_iterations_run=iteration,
+                 auto_refine_stopped_reason="no_pdfs_on_disk")
+            return
+
+        if all_converged:
+            print(
+                f"[auto_refine] CONVERGED after {iteration} iteration(s) — "
+                f"all originally-wrong fields now match user corrections.",
+                flush=True,
+            )
+            _upd("done", status="completed",
+                 auto_refine_converged=True,
+                 auto_refine_iterations_run=iteration,
+                 auto_refine_stopped_reason="converged")
+            return
+
+        if iteration >= max_iterations:
+            print(
+                f"[auto_refine] Max iterations ({max_iterations}) reached without convergence.",
+                flush=True,
+            )
+            _upd("done", status="failed",
+                 error="Re-Train the same with more data",
+                 auto_refine_converged=False,
+                 auto_refine_iterations_run=iteration,
+                 auto_refine_stopped_reason="max_iterations")
+            return
+
+        # ── E: Build next iteration's training snapshot ───────────────────
+        _upd(f"auto_refine_iter_{iteration}_of_{max_iterations}_preparing_next")
+
+        snapshot_paths: List[str] = []
+        for sd in next_samples:
+            row = {
+                "sample_id":       str(uuid.uuid4()),
+                "upload_id":       sd["upload_id"],
+                "pdf_path":        sd["pdf_path"],
+                "form_type":       sd["form_type"],
+                "original_fields": sd["original_fields"],
+                "corrected_fields": sd["corrected_fields"],
+                "raw_text":        sd["raw_text"],
+                "status":          "auto_refine",
+            }
+            try:
+                chat_row = build_training_sample_from_correction(
+                    run_row=row,
+                    corrected_json=sd["corrected_fields"],
+                )
+                outcome = append_training_sample(
+                    root=feedback_dir,
+                    row=chat_row,
+                    retrain_threshold=threshold,
+                )
+                if outcome.version_snapshot_path:
+                    snapshot_paths.append(outcome.version_snapshot_path)
+            except Exception as exc:
+                print(f"[auto_refine] Could not build sample for {sd['upload_id']}: {exc}", flush=True)
+
+        # Force-promote any leftover pending samples below the threshold
+        pending_file = feedback_dir / "pending.jsonl"
+        if pending_file.exists() and pending_file.stat().st_size > 0:
+            manifest = _load_manifest(feedback_dir)
+            ver      = int(manifest.get("next_version", 1))
+            vp       = _version_path(feedback_dir, ver)
+            vp.parent.mkdir(parents=True, exist_ok=True)
+            vp.write_bytes(pending_file.read_bytes())
+            leftover = sum(
+                1 for ln in pending_file.read_text(encoding="utf-8").splitlines() if ln.strip()
+            )
+            pending_file.write_text("", encoding="utf-8")
+            manifest["pending_count"] = 0
+            manifest["next_version"]  = ver + 1
+            manifest.setdefault("snapshots", []).append({
+                "version":    ver,
+                "path":       str(vp),
+                "rows":       leftover,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            _save_manifest(feedback_dir, manifest)
+            snapshot_paths.append(str(vp))
+
+        if not snapshot_paths:
+            print("[auto_refine] No training data for next iteration — stopping", flush=True)
+            _upd("done", status="failed",
+                 error="Re-Train the same with more data",
+                 auto_refine_converged=False,
+                 auto_refine_iterations_run=iteration,
+                 auto_refine_stopped_reason="no_new_data")
+            return
+
+        if len(snapshot_paths) == 1:
+            current_data_path = snapshot_paths[0]
+        else:
+            combined = feedback_dir / f"auto-refine-iter{iteration + 1}-{str(uuid.uuid4())[:8]}.jsonl"
+            combined.parent.mkdir(parents=True, exist_ok=True)
+            with combined.open("w", encoding="utf-8") as cf:
+                for sp in snapshot_paths:
+                    content = Path(sp).read_text(encoding="utf-8", errors="replace")
+                    cf.write(content)
+                    if content and not content.endswith("\n"):
+                        cf.write("\n")
+            current_data_path = str(combined)
+
+        print(
+            f"[auto_refine] Iteration {iteration} done — {len(next_samples)} PDF(s) still diverging. "
+            f"Next training data: {Path(current_data_path).name}",
+            flush=True,
+        )
+
+
+def launch_auto_refine_background(
+    config_path: str,
+    new_data_path: str,
+    job_id: str,
+    upload_ids: Optional[List[str]] = None,
+    original_fields_map: Optional[Dict[str, Dict[str, Any]]] = None,
+    corrected_fields_map: Optional[Dict[str, Dict[str, Any]]] = None,
+    form_type_map: Optional[Dict[str, str]] = None,
+    upload_dir: str = "/workspace/uploads",
+    max_iterations: int = 5,
+    gpu_semaphore: Optional[Any] = None,
+) -> None:
+    """Spawn run_auto_refine_loop() in a daemon thread."""
+    t = threading.Thread(
+        target=run_auto_refine_loop,
+        kwargs={
+            "config_path":         config_path,
+            "new_data_path":       new_data_path,
+            "job_id":              job_id,
+            "upload_ids":          upload_ids or [],
+            "original_fields_map": original_fields_map or {},
+            "corrected_fields_map": corrected_fields_map or {},
+            "form_type_map":       form_type_map or {},
+            "upload_dir":          upload_dir,
+            "max_iterations":      max_iterations,
+            "gpu_semaphore":       gpu_semaphore,
+        },
+        daemon=True,
+        name=f"auto-refine-{job_id[:8]}",
+    )
+    t.start()
+    print(
+        f"[job_runner] Auto-refine loop launched (job_id={job_id}, max_iterations={max_iterations})",
+        flush=True,
+    )
