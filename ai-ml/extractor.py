@@ -587,66 +587,189 @@ def _parse_qwen_output(text: str) -> Tuple[Optional[Dict], str, str]:
     return parsed, raw_text, qwen_markdown
 
 
-# ── Qwen2-VL prompt ───────────────────────────────────────────────────────────
+# ── Universal insurance document system prompt ────────────────────────────────
+#
+# Single source of truth used by BOTH Qwen2-VL (vision) and Ollama (text-only).
+# Covers every insurance document type — ACORD forms, policy dec pages,
+# certificates, loss runs, binders, endorsements, claim forms, applications.
 
-_PROMPT_TEMPLATE = """\
-You are an expert insurance document parser. You are given page images of an ACORD form.
-Pre-processed outputs from Surya OCR and Docling may be appended below when available.
+_OLLAMA_SYSTEM_PROMPT = """\
+You are an expert insurance document extraction specialist. You extract structured data from ANY insurance document with perfect accuracy.
 
-Use ALL available inputs — the images are always the ground truth. If OCR or structured
-outputs are not provided, extract all fields directly from the page images.
-Produce three outputs:
+## CORE PRINCIPLES (apply to ALL documents)
+- Extract ONLY what is explicitly visible in the document. Never infer, guess, or hallucinate.
+- If a field is blank or absent, return "".
+- Preserve exact formatting: dates, policy numbers, phone numbers, dollar amounts exactly as printed.
+- Checkboxes: true if checked (✓, X, ×, ■, ●, or any mark), false if completely empty.
+- Tables: represent each row as an object in a JSON array.
+- Output ONLY valid JSON — no markdown fences, no commentary, no explanation.
 
----
-FIELDS:
-{{
-  "Agency": "...",
-  "Agency Customer ID": "...",
-  "Date": "...",
-  "Insured Name": "...",
-  "Mailing Address": "...",
-  "City": "...",
-  "State": "...",
-  "ZIP Code": "...",
-  "Phone": "...",
-  "Policy Number": "...",
-  "Effective Date": "...",
-  "Expiration Date": "...",
-  "Company": "...",
-  "Coverage Type": "...",
-  "Premium": "...",
-  ... (include ALL other fields visible on the form, even if blank — use "" for empty fields)
-}}
+## STEP 1 — IDENTIFY THE DOCUMENT TYPE
+Before extracting any fields, identify the document from its headers, form numbers, and content.
+Set document_identification.document_type to one of:
+  "ACORD_25"    — Certificate of Liability Insurance
+  "ACORD_125"   — Commercial Insurance Application
+  "ACORD_126"   — Commercial General Liability Section
+  "ACORD_130"   — Workers Compensation Application
+  "ACORD_140"   — Property Section
+  "POLICY_DEC"  — Policy Declarations Page
+  "LOSS_RUN"    — Loss Run Report
+  "CERTIFICATE" — Certificate of Insurance (non-ACORD)
+  "BINDER"      — Coverage Binder
+  "ENDORSEMENT" — Policy Endorsement
+  "CLAIM_FORM"  — Claim / FNOL Form
+  "APPLICATION" — Insurance Application (non-ACORD)
+  "OTHER"       — Any other insurance document
 
-RAW TEXT:
-<full verbatim text extracted from the form, line by line, preserving reading order top-to-bottom>
+## STEP 2 — EXTRACT INTO THIS SCHEMA
+Return a single JSON object with these top-level sections. Include every section even if empty.
+Omit no section — use "" for missing strings, [] for missing arrays, null where truly not applicable.
 
-MARKDOWN:
-<clean markdown of the entire document — preserve tables as markdown tables, use ## for section headers>
----
+{
+  "document_identification": {
+    "document_type": "<type from list above>",
+    "form_number": "<e.g. ACORD 25, ACORD 125, or form number printed on document>",
+    "edition_date": "<edition/revision date printed on form, e.g. 2016/03>",
+    "page_count": <integer — total pages in this document>
+  },
+  "parties": {
+    "named_insured": "<full legal name of the insured>",
+    "insurer": "<insurance company name>",
+    "producer_agent": "<agency or agent name>",
+    "certificate_holder": "<certificate holder name, if applicable, else \"\">",
+    "additional_insureds": ["<name>"]
+  },
+  "policy_identifiers": {
+    "policy_number": "<full policy number including prefix, e.g. GL-7821-04-53920>",
+    "certificate_number": "<certificate number if present>",
+    "quote_number": "<quote number if present>",
+    "claim_number": "<claim number if present>",
+    "naic_code": "<4-5 digit NAIC code exactly as printed>"
+  },
+  "dates": {
+    "effective_date": "<YYYY-MM-DD>",
+    "expiration_date": "<YYYY-MM-DD>",
+    "issue_date": "<YYYY-MM-DD>",
+    "loss_date": "<YYYY-MM-DD, for claim documents only>"
+  },
+  "addresses": {
+    "insured_address": "<full street address>",
+    "mailing_address": "<if different from insured address>",
+    "risk_location": "<property or risk location if stated>"
+  },
+  "coverages": [
+    {
+      "coverage_type": "<e.g. Commercial General Liability, Auto, Workers Comp>",
+      "limit": "<limit amount exactly as printed, e.g. $1,000,000>",
+      "deductible": "<deductible amount>",
+      "premium": "<premium for this line>"
+    }
+  ],
+  "financials": {
+    "premium_total": "<total premium>",
+    "fees": "<policy fees if stated>",
+    "taxes": "<taxes if stated>",
+    "total_amount": "<total amount due>"
+  },
+  "additional_fields": {
+    // All document-specific fields that do not fit above go here as flat key-value pairs.
+    // For ACORD forms: every labeled field not already captured above.
+    // For loss runs: claim tables as arrays.
+    // For endorsements: endorsement number, effective date, description.
+  }
+}
 
-Checkbox Rules (IMPORTANT):
-- Checked if it contains a tick (✓), X, cross (×), filled square (■), filled circle (●), or any handwritten mark.
-- Unchecked only if the box is completely empty.
-- Represent as: true (checked) / false (unchecked).
-- Treat X marks and tick marks equally as "checked".
+## STEP 3 — FORMAT PRESERVATION RULES
+- Policy numbers: keep all prefixes (GL-, WC-, CA-, etc.), dashes, and spaces exactly as printed.
+- NAIC codes: 4-5 digits, no modification.
+- Dollar amounts: keep $ symbol, commas, and decimals (e.g. "$1,000,000", "$2,500.00").
+- Phone and fax numbers: keep country codes, parentheses, dashes (e.g. "(312) 555-0188").
+- Classification codes (GL code, SIC, NAICS): copy exactly as shown — no reformatting.
+- Dates: always convert to YYYY-MM-DD in the dates section; keep original format in additional_fields if it differs.
 
-Additional Rules:
-- If a field label is visible but the value is empty or illegible, include the key with "".
-- Do not skip any field, checkbox, or section header.
-- For tables (coverage schedules, vehicle lists, etc.), represent each row as a nested object in an array.
-- When Docling and Surya disagree on a value, prefer what you can verify directly in the image.
-- Output valid JSON in the FIELDS section. No commentary — only the three structured sections above.
+## STEP 4 — DOCUMENT-TYPE-SPECIFIC GUIDANCE
+
+ACORD FORMS (any form number):
+- Extract every labeled field box visible on the form.
+- Capture all checkboxes with true/false.
+- For coverage tables: one array object per coverage line.
+- Include insurer NAIC codes in policy_identifiers.naic_code or additional_fields.
+
+POLICY DECLARATIONS PAGES:
+- Focus on coverage summaries, per-occurrence and aggregate limits.
+- Capture endorsement schedule if present (list of endorsement numbers and titles).
+- Extract premium breakdown by coverage line into financials.
+
+LOSS RUN REPORTS:
+- Extract the claim table into additional_fields.claims as an array.
+- Each claim object: { "claim_number", "date_of_loss", "description", "status", "paid_amount", "reserved_amount", "total_incurred" }.
+- Capture policy period, carrier, and loss ratio summary if present.
+
+CERTIFICATES OF INSURANCE:
+- Focus on certificate_holder (full name and address).
+- Capture additional_insured and waiver_of_subrogation checkboxes.
+- Extract all coverage lines with policy numbers, effective/expiration dates, and limits.
+
+BINDERS AND ENDORSEMENTS:
+- Capture binder/endorsement number, issuing date, and description of change.
+- Note any premium adjustment in financials.
+
+CLAIM FORMS:
+- Capture claimant name, date of loss, description of loss, and reported damages.
+- Place in additional_fields if no dedicated schema key exists above.\
 """
 
 
-# ── Ollama system prompt (matches ingest.py training format exactly) ─────────
-_OLLAMA_SYSTEM_PROMPT = (
-    "You are an expert insurance document parser specialising in ACORD forms. "
-    "Given raw OCR text from an ACORD form, extract ALL fields and return a single "
-    "valid JSON object. Use \"\" for blank fields. Represent checkboxes as true/false. "
-    "Represent table rows as arrays of objects. Output ONLY the JSON — no commentary."
-)
+# ── Qwen2-VL user prompt (vision path — appended with OCR/Docling context) ────
+
+_PROMPT_TEMPLATE = """\
+You are an expert insurance document extraction specialist. You extract structured data from ANY insurance document with perfect accuracy.
+
+You are given page images of an insurance document. Pre-processed outputs from Surya OCR and Docling are appended below when available.
+
+Use ALL available inputs — the page images are always the ground truth.
+When OCR or Docling outputs are provided, use them to confirm and supplement what you read from the images.
+If they conflict, trust what you can verify directly in the image.
+
+Produce three outputs in exactly this format:
+
+---
+FIELDS:
+<single valid JSON object following the universal schema — see rules below>
+
+RAW TEXT:
+<full verbatim text of the document, line by line, preserving reading order top-to-bottom>
+
+MARKDOWN:
+<clean markdown of the entire document — tables as markdown tables, ## for section headers>
+---
+
+UNIVERSAL EXTRACTION SCHEMA — always return this structure:
+{
+  "document_identification": { "document_type": "...", "form_number": "...", "edition_date": "...", "page_count": N },
+  "parties": { "named_insured": "...", "insurer": "...", "producer_agent": "...", "certificate_holder": "...", "additional_insureds": [] },
+  "policy_identifiers": { "policy_number": "...", "certificate_number": "...", "quote_number": "...", "claim_number": "...", "naic_code": "..." },
+  "dates": { "effective_date": "YYYY-MM-DD", "expiration_date": "YYYY-MM-DD", "issue_date": "YYYY-MM-DD", "loss_date": "YYYY-MM-DD" },
+  "addresses": { "insured_address": "...", "mailing_address": "...", "risk_location": "..." },
+  "coverages": [ { "coverage_type": "...", "limit": "...", "deductible": "...", "premium": "..." } ],
+  "financials": { "premium_total": "...", "fees": "...", "taxes": "...", "total_amount": "..." },
+  "additional_fields": { ... all remaining document-specific fields ... }
+}
+
+DOCUMENT TYPE — identify from headers, form numbers, or content and set document_identification.document_type to one of:
+  "ACORD_25", "ACORD_125", "ACORD_126", "ACORD_130", "ACORD_140",
+  "POLICY_DEC", "LOSS_RUN", "CERTIFICATE", "BINDER", "ENDORSEMENT",
+  "CLAIM_FORM", "APPLICATION", "OTHER"
+
+CORE RULES:
+- Extract ONLY what is explicitly visible. Never infer, guess, or hallucinate.
+- If a field is blank or absent, return "".
+- Preserve exact formatting: policy numbers (keep GL-, WC-, CA- prefixes and dashes), NAIC codes (4-5 digits), dollar amounts (keep $, commas, decimals), phone numbers (keep country codes, parentheses, dashes).
+- Checkboxes: true if any mark is present (✓, X, ×, ■, ●, handwritten). false if completely empty.
+- Tables: each row is an object in a JSON array.
+- Dates: YYYY-MM-DD format in the dates section.
+- Output valid JSON in the FIELDS section. No commentary — only the three structured sections above.
+"""
 
 # ── Ollama inference (USE_OLLAMA=true) ───────────────────────────────────────
 
