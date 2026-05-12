@@ -193,6 +193,53 @@ def get_corrected_paths(
     return paths
 
 
+# ── Gap 4: {value, page, confidence} leaf normaliser ─────────────────────────
+
+def _normalize_fields_to_vcf(
+    fields: Any,
+    original: Optional[Any] = None,
+    _depth: int = 0,
+) -> Any:
+    """
+    Recursively wrap every leaf scalar in {"value": v, "page": p, "confidence": "high"}.
+
+    Rules
+    -----
+    - Already-wrapped {value, page, confidence} dicts are kept as-is.
+    - Nested dicts are recursed; lists of dicts are recursed element-wise.
+    - Page number is inherited from the corresponding field in *original* when
+      it was already wrapped; otherwise defaults to null.
+    - Max depth 8 to guard against pathological nesting.
+
+    Used when build_training_sample_from_correction(wrap_values_vcf=True).
+    """
+    if _depth > 8 or not isinstance(fields, dict):
+        return fields
+
+    orig = original if isinstance(original, dict) else {}
+    result: Dict[str, Any] = {}
+    for k, v in fields.items():
+        orig_v = orig.get(k)
+        if isinstance(v, dict):
+            if set(v.keys()) <= {"value", "page", "confidence"}:
+                result[k] = v  # already wrapped
+            else:
+                result[k] = _normalize_fields_to_vcf(v, orig_v, _depth + 1)
+        elif isinstance(v, list):
+            result[k] = [
+                _normalize_fields_to_vcf(item, None, _depth + 1)
+                if isinstance(item, dict) else item
+                for item in v
+            ]
+        else:
+            # Scalar — wrap; inherit page from original if available
+            orig_page: Optional[int] = None
+            if isinstance(orig_v, dict) and "page" in orig_v:
+                orig_page = orig_v.get("page")
+            result[k] = {"value": v, "page": orig_page, "confidence": "high"}
+    return result
+
+
 # ── Public entry point ─────────────────────────────────────────────────────────
 
 def build_training_sample_from_correction(
@@ -237,6 +284,12 @@ def build_training_sample_from_correction(
             original_fields={...},
             corrected_fields={...},
             raw_text="...",
+            image_paths=["images/pdf_abc/page_1.png", ...],  # multimodal
+            page_texts=["Page 1 OCR text...", "Page 2 OCR text..."],
+            page_count=2,
+            dataset_version="v1",
+            preprocessing={"ocr_engine": "surya", "layout_engine": "docling", "dpi": 300},
+            wrap_values_vcf=True,        # wrap leaf values in {value,page,confidence}
             docling_data={               # optional
                 "markdown": "...",
                 "kv_pairs": {"Key": "Value"},
@@ -248,6 +301,8 @@ def build_training_sample_from_correction(
     -------
     {"messages": [...], "domain": "insurance", "metadata": {...}}
     Compatible with Qwen 2.5 VL fine-tuning via LLaMA-Factory.
+    When image_paths is provided, messages[1].content is a list of
+    image + text blocks (multimodal format) rather than a plain string.
     """
     # ── Resolve args — support both calling conventions ───────────────────────
     if run_row is not None:
@@ -270,32 +325,65 @@ def build_training_sample_from_correction(
         _corrected   = corrected_fields or corrected_json or {}
         _feedback_id = feedback_id
 
+    # ── New kwargs ────────────────────────────────────────────────────────────
+    image_paths: List[str]            = kwargs.get("image_paths") or []
+    page_texts: List[str]             = kwargs.get("page_texts") or []
+    page_count: Optional[int]         = kwargs.get("page_count") or None
+    dataset_version: str              = str(kwargs.get("dataset_version") or "v1")
+    preprocessing: Dict[str, Any]     = kwargs.get("preprocessing") or {}
+    wrap_values_vcf: bool             = bool(kwargs.get("wrap_values_vcf", False))
+    docling_data: Optional[Dict[str, Any]] = kwargs.get("docling_data")
+
     # ── Normalise document type ───────────────────────────────────────────────
     doc_type = _canonical_form_key(_form_type)
 
     # ── Merge original + corrections ──────────────────────────────────────────
-    # Deep merge preserves nested siblings; corrected values always win.
     merged = _deep_merge_base_correction(_original, _corrected)
     if not merged:
         raise CorrectionValidationError("corrected_json produced an empty field dict")
 
-    # ── Build user message ────────────────────────────────────────────────────
-    prefix   = _user_text_prefix(doc_type)
-    user_text = f"{prefix}\n\nOCR TEXT:\n{_raw_text or '(no text)'}"
+    # ── Optionally wrap leaf values in {value, page, confidence} ─────────────
+    if wrap_values_vcf:
+        merged = _normalize_fields_to_vcf(merged, _original)
 
-    # Append optional Docling output if caller provided it
-    docling_data: Optional[Dict[str, Any]] = kwargs.get("docling_data")
+    # ── Build OCR text section ────────────────────────────────────────────────
+    prefix = _user_text_prefix(doc_type)
+
+    if page_texts:
+        # Per-page format: --- Page N --- / [Surya OCR] / text
+        ocr_section_parts = []
+        for i, pt in enumerate(page_texts):
+            ocr_section_parts.append(
+                f"--- Page {i + 1} ---\n[Surya OCR]\n{pt.strip()}"
+            )
+        ocr_section = "\n\n".join(ocr_section_parts)
+    else:
+        ocr_section = _raw_text or "(no text)"
+
+    user_text = f"{prefix}\n\nOCR TEXT:\n{ocr_section}"
+
+    # Append optional Docling output
     if isinstance(docling_data, dict):
         if docling_data.get("markdown"):
-            user_text += f"\n\nSTRUCTURED MARKDOWN:\n{docling_data['markdown']}"
+            user_text += f"\n\n[Docling Structured Text]\n{docling_data['markdown']}"
         if docling_data.get("kv_pairs"):
             kv_str = "\n".join(
                 f"{k}: {v}" for k, v in docling_data["kv_pairs"].items()
             )
-            user_text += f"\n\nKEY-VALUE PAIRS:\n{kv_str}"
+            user_text += f"\n\n[Key-Value Pairs]\n{kv_str}"
         if docling_data.get("tables"):
             tables_str = "\n\n".join(docling_data["tables"])
-            user_text += f"\n\nTABLES:\n{tables_str}"
+            user_text += f"\n\n[Tables]\n{tables_str}"
+
+    # ── Build user content (multimodal list or plain string) ─────────────────
+    if image_paths:
+        # LLaMA-Factory / Qwen 2.5 VL multimodal format:
+        # user.content = [{"type": "image", "image": path}, ..., {"type": "text", "text": "..."}]
+        user_content: Any = [
+            {"type": "image", "image": p} for p in image_paths
+        ] + [{"type": "text", "text": user_text}]
+    else:
+        user_content = user_text
 
     assistant_content = json.dumps(merged, ensure_ascii=False, indent=2)
 
@@ -322,7 +410,11 @@ def build_training_sample_from_correction(
     except Exception as exc:
         logger.debug("[ingest] Schema validation skipped: %s", exc)
 
-    # ── Assemble and return ───────────────────────────────────────────────────
+    # ── Assemble metadata ─────────────────────────────────────────────────────
+    _eff_page_count = page_count if page_count is not None else (
+        len(image_paths) or len(page_texts) or None
+    )
+
     metadata: Dict[str, Any] = {
         "form_type":         doc_type,
         "document_type":     doc_type,
@@ -331,15 +423,22 @@ def build_training_sample_from_correction(
         "feedback_id":       _feedback_id,
         "corrected_fields":  corrected_paths,
         "correction_source": "human_review",
+        "dataset_version":   dataset_version,
         "created_at":        datetime.now(timezone.utc).isoformat(),
     }
+    if _eff_page_count is not None:
+        metadata["page_count"] = _eff_page_count
+    if image_paths:
+        metadata["image_manifest"] = image_paths
+    if preprocessing:
+        metadata["preprocessing"] = preprocessing
     if validation_errors:
         metadata["validation_errors"] = validation_errors
 
     return {
         "messages": [
             {"role": "system",    "content": get_universal_system_prompt()},
-            {"role": "user",      "content": user_text},
+            {"role": "user",      "content": user_content},
             {"role": "assistant", "content": assistant_content},
         ],
         "domain": "insurance",

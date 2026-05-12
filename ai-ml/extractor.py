@@ -454,6 +454,42 @@ def _pdf_to_images(pdf_path: str, dpi: int = 150) -> List:
     return images
 
 
+def _pdf_to_images_and_save(
+    pdf_path: str,
+    upload_id: str,
+    images_base_dir: str,
+    dpi: int = 300,
+) -> tuple:
+    """Render PDF pages at *dpi*, save each as PNG, return (pil_images, rel_paths).
+
+    Saved to: {images_base_dir}/{upload_id}/page_N.png
+    Relative paths returned: "images/{upload_id}/page_N.png"
+    (relative to the workspace root, usable as dataset image references).
+    """
+    import fitz
+    from PIL import Image
+
+    save_dir = Path(images_base_dir) / upload_id
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    doc = fitz.open(pdf_path)
+    pil_images: List = []
+    rel_paths: List[str] = []
+    for i, page in enumerate(doc):
+        pix = page.get_pixmap(dpi=dpi)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        filename = f"page_{i + 1}.png"
+        img.save(str(save_dir / filename), format="PNG")
+        pil_images.append(img)
+        rel_paths.append(f"images/{upload_id}/{filename}")
+    doc.close()
+    logger.info(
+        "[extractor] Saved %d page image(s) for upload %s at %d DPI → %s",
+        len(pil_images), upload_id, dpi, save_dir,
+    )
+    return pil_images, rel_paths
+
+
 # ── Arm A: Surya OCR ──────────────────────────────────────────────────────────
 
 def _run_surya_ocr(images: List) -> str:
@@ -932,14 +968,27 @@ def _run_qwen_extraction(
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
+def run_full_extraction(
+    pdf_path: str,
+    form_type: str = "25",
+    upload_id: str = "",
+    images_dir: str = "",
+) -> Dict[str, Any]:
     """
-    Full ACORD extraction pipeline.
+    Full insurance document extraction pipeline.
 
     Step 1 (parallel): Surya OCR + Docling run concurrently on separate threads.
     Step 2 (serial):   Qwen2-VL receives page images + both arm outputs.
 
-    Returns: { form_type_detected, pdf_type, extracted_json, full_text, markdown }
+    Parameters
+    ----------
+    upload_id  : When non-empty, page images are saved as 300-DPI PNGs under
+                 {images_dir}/{upload_id}/page_N.png and "image_paths" is
+                 returned in the result dict for downstream multimodal training.
+    images_dir : Base directory for saved images (default: /workspace/fine_tuning/images).
+
+    Returns: { form_type_detected, pdf_type, extracted_json, full_text, markdown
+               [, image_paths, page_count] }
     """
     if not Path(pdf_path).exists():
         return {"error": f"File not found: {pdf_path}"}
@@ -963,7 +1012,23 @@ def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
             "source": "runpod_native",
         }
 
-    images = _pdf_to_images(pdf_path)
+    # ── Render page images — save to disk at 300 DPI when upload_id provided ──
+    image_paths: List[str] = []
+    _img_base = images_dir or "/workspace/fine_tuning/images"
+    if upload_id:
+        try:
+            images, image_paths = _pdf_to_images_and_save(
+                pdf_path, upload_id, _img_base, dpi=300
+            )
+        except Exception as _img_exc:
+            logger.warning(
+                "[extraction] Image save failed (%s) — falling back to in-memory 150 DPI",
+                _img_exc,
+            )
+            images = _pdf_to_images(pdf_path)
+    else:
+        images = _pdf_to_images(pdf_path)
+
     if not images:
         return {"error": "No pages found in PDF"}
 
@@ -1027,7 +1092,10 @@ def run_full_extraction(pdf_path: str, form_type: str = "25") -> Dict[str, Any]:
         "extracted_json": extracted_fields,
         "full_text": qwen_result["qwen_raw_text"] or surya_ocr_text,
         "markdown": qwen_result["qwen_markdown"] or docling_result.get("markdown", ""),
+        "page_count": len(images),
     }
+    if image_paths:
+        result["image_paths"] = image_paths
     if arm_warnings:
         result["warnings"] = arm_warnings
 

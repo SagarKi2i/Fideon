@@ -1,23 +1,43 @@
 """
-QLoRA supervised fine-tuning for Qwen2-VL-7B (text-only task).
+QLoRA supervised fine-tuning for Qwen2-VL-7B.
 
 run_training() is the public entry point called by job_runner.run_cycle().
+
+Training backends
+-----------------
+1. LLaMA-Factory CLI  (preferred — set USE_LLAMA_FACTORY=1 or auto-detected)
+   Writes dataset_info.json + lf_config.yaml, then shells out to:
+       llamafactory-cli train <config>
+
+2. HuggingFace Trainer / PEFT QLoRA  (fallback when LLaMA-Factory not found)
 
 Training format
 ---------------
 Chat-format JSONL with messages: [system, user, assistant].
-The processor applies the Qwen2-VL chat template to produce token sequences.
 Only the assistant turn is used as the training label (SFT).
 """
 from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Use LLaMA-Factory when: env var is set to 1/true, OR the CLI is on PATH
+# and USE_LLAMA_FACTORY is not explicitly disabled.
+_LF_ENV = os.getenv("USE_LLAMA_FACTORY", "").strip().lower()
+USE_LLAMA_FACTORY: bool = (
+    _LF_ENV in {"1", "true", "yes"}
+    or (
+        _LF_ENV not in {"0", "false", "no"}
+        and shutil.which("llamafactory-cli") is not None
+    )
+)
 
 
 # ── Periodic logger ───────────────────────────────────────────────────────────
@@ -112,6 +132,128 @@ def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
     return rows
 
 
+# ── LLaMA-Factory backend ─────────────────────────────────────────────────────
+
+def _dict_to_yaml(d: Dict[str, Any]) -> str:
+    """Minimal dict→YAML serialiser for the scalar types used in lf_config."""
+    lines: List[str] = []
+    for k, v in d.items():
+        if v is None:
+            continue
+        if isinstance(v, bool):
+            lines.append(f"{k}: {'true' if v else 'false'}")
+        elif isinstance(v, (int, float)):
+            lines.append(f"{k}: {v}")
+        elif isinstance(v, str):
+            # Quote strings that contain YAML special characters
+            if any(c in v for c in ": #{}[]|>&*!,@`\"'\\") or not v:
+                safe = v.replace("\\", "\\\\").replace('"', '\\"')
+                lines.append(f'{k}: "{safe}"')
+            else:
+                lines.append(f"{k}: {v}")
+        elif isinstance(v, list):
+            lines.append(f"{k}:")
+            for item in v:
+                lines.append(f"  - {item}")
+    return "\n".join(lines) + "\n"
+
+
+def _run_llamafactory_training(
+    config: Dict[str, Any],
+    dataset_path: str,
+    output_dir: str,
+    job_id: str,
+    base_model: str,
+) -> str:
+    """
+    Invoke LLaMA-Factory CLI for QLoRA SFT.
+
+    Expects the dataset directory to already contain:
+        data/train.jsonl
+        data/dataset_info.json
+    (DatasetBuilder.build() writes this layout automatically.)
+
+    Returns the adapter output directory path (same as output_dir).
+    """
+    lora_cfg  = config.get("lora", {})
+    train_cfg = config.get("training", {})
+    local_only = str(config.get("local_files_only", "true")).lower() in {"1", "true", "yes"}
+
+    dataset_dir = Path(dataset_path).parent
+    lf_data_dir = dataset_dir / "data"
+
+    # If DatasetBuilder didn't create the data/ layout, create it now
+    if not lf_data_dir.exists():
+        lf_data_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy(dataset_path, lf_data_dir / "train.jsonl")
+        _lf_info = {
+            "fideon_insurance": {
+                "file_name": "train.jsonl",
+                "formatting": "sharegpt",
+                "columns": {"messages": "messages"},
+            }
+        }
+        (lf_data_dir / "dataset_info.json").write_text(
+            json.dumps(_lf_info, indent=2), encoding="utf-8"
+        )
+
+    lf_config: Dict[str, Any] = {
+        "model_name_or_path": base_model,
+        "stage": "sft",
+        "do_train": True,
+        "finetuning_type": "lora",
+        "lora_rank": int(lora_cfg.get("r", 16)),
+        "lora_alpha": float(lora_cfg.get("lora_alpha", 32)),
+        "lora_dropout": float(lora_cfg.get("lora_dropout", 0.05)),
+        "lora_target": "all",
+        "visual_inputs": True,   # enable multimodal (Qwen2-VL)
+        "dataset": "fideon_insurance",
+        "dataset_dir": str(lf_data_dir),
+        "template": "qwen2_vl",
+        "cutoff_len": int(train_cfg.get("max_seq_length", 2048)),
+        "overwrite_cache": True,
+        "output_dir": str(output_dir),
+        "logging_dir": str(Path(output_dir) / "logs"),
+        "per_device_train_batch_size": int(train_cfg.get("per_device_train_batch_size", 1)),
+        "gradient_accumulation_steps": int(train_cfg.get("gradient_accumulation_steps", 4)),
+        "lr_scheduler_type": "cosine",
+        "logging_steps": int(train_cfg.get("logging_steps", 5)),
+        "warmup_ratio": float(train_cfg.get("warmup_ratio", 0.10)),
+        "save_steps": 100,
+        "overwrite_output_dir": True,
+        "learning_rate": float(train_cfg.get("learning_rate", 2e-5)),
+        "num_train_epochs": float(train_cfg.get("num_epochs", 3)),
+        "pure_bf16": bool(train_cfg.get("bf16", True)),
+        "plot_loss": False,
+        "report_to": "none",
+        "run_name": f"fideon-{job_id}",
+    }
+
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    config_path = Path(output_dir) / "lf_config.yaml"
+    config_path.write_text(_dict_to_yaml(lf_config), encoding="utf-8")
+
+    print(
+        f"[train] ── LLaMA-Factory ── Starting: llamafactory-cli train {config_path}",
+        flush=True,
+    )
+    result = subprocess.run(
+        ["llamafactory-cli", "train", str(config_path)],
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"[train] LLaMA-Factory exited with code {result.returncode}. "
+            f"Check logs in {Path(output_dir) / 'logs'}."
+        )
+
+    print(
+        f"[train] LLaMA-Factory training complete. Adapter at {output_dir}",
+        flush=True,
+    )
+    return str(output_dir)
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 def run_training(
@@ -124,8 +266,17 @@ def run_training(
     """
     Run QLoRA fine-tuning on the chat-format JSONL at dataset_path.
 
+    Delegates to LLaMA-Factory CLI when USE_LLAMA_FACTORY=1 or llamafactory-cli
+    is on PATH; otherwise falls back to the built-in HF Trainer / PEFT path.
+
     Returns the adapter output directory path.
     """
+    _use_lf = USE_LLAMA_FACTORY or str(config.get("use_llamafactory", "")).lower() in {"1", "true", "yes"}
+    if _use_lf:
+        print("[train] Backend: LLaMA-Factory CLI", flush=True)
+        return _run_llamafactory_training(config, dataset_path, output_dir, job_id, base_model)
+
+    print("[train] Backend: HuggingFace Trainer (PEFT QLoRA)", flush=True)
     from datasets import Dataset
     from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
     import torch

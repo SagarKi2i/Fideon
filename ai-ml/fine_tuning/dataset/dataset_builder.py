@@ -5,15 +5,20 @@ Workflow
 --------
 1. Load new chat-format rows from new_data_path (the versioned snapshot).
 2. Validate each row (must have messages: system/user/assistant).
-3. Sample replay rows from previous versioned snapshots (anti-forgetting).
-4. Compute SHA-256 fingerprint of the combined train set.
-5. Write train.jsonl + dataset_manifest.json to datasets/cycle-{cycle_id}/.
+3. Soft-validate assistant JSON against the schema registry (log only, never reject).
+4. Sample replay rows from previous versioned snapshots (anti-forgetting).
+5. Stratified interleave — shuffle within each doc type, then interleave
+   round-robin so training batches see diverse document types.
+6. Compute SHA-256 fingerprint of the combined train set.
+7. Write train.jsonl + dataset_manifest.json + dataset_quality_report.json
+   to datasets/cycle-{cycle_id}/.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import random
+from collections import defaultdict
 from dataclasses import dataclass, field as dc_field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,9 +42,10 @@ class DatasetBuildResult:
     replay_records: int
     rejected_records: int
     cycle_id: str
+    quality_report: Dict[str, Any] = dc_field(default_factory=dict)
 
 
-# ── Validation ────────────────────────────────────────────────────────────────
+# ── Hard validation (rejects the row) ────────────────────────────────────────
 
 def validate_chat_format(row: Dict[str, Any], row_index: int) -> None:
     """Raise InvalidChatFormatError if row is not a valid chat sample."""
@@ -54,9 +60,16 @@ def validate_chat_format(row: Dict[str, Any], row_index: int) -> None:
             f"Row {row_index}: 'messages' must contain an 'assistant' turn"
         )
     for i, m in enumerate(msgs):
-        if not isinstance(m.get("content"), str) or not m["content"].strip():
+        content = m.get("content")
+        if isinstance(content, list):
+            # Multimodal content (image + text blocks for user/system messages)
+            if not content:
+                raise InvalidChatFormatError(
+                    f"Row {row_index}, message {i}: 'content' list must be non-empty"
+                )
+        elif not isinstance(content, str) or not content.strip():
             raise InvalidChatFormatError(
-                f"Row {row_index}, message {i}: 'content' must be a non-empty string"
+                f"Row {row_index}, message {i}: 'content' must be a non-empty string or list"
             )
     # Validate assistant turn is parseable JSON — the model is trained to output JSON
     # and training on non-JSON assistant turns teaches the model to produce garbage.
@@ -64,16 +77,15 @@ def validate_chat_format(row: Dict[str, Any], row_index: int) -> None:
         if m.get("role") == "assistant":
             content = m.get("content", "").strip()
             start = content.find("{")
-            end = content.rfind("}")
+            end   = content.rfind("}")
             if start == -1 or end <= start:
                 raise InvalidChatFormatError(
                     f"Row {row_index}: assistant content is not a JSON object "
                     f"(no {{...}} found). Got: {content[:100]!r}"
                 )
             try:
-                import json as _json
-                _json.loads(content[start : end + 1])
-            except _json.JSONDecodeError as exc:
+                json.loads(content[start : end + 1])
+            except json.JSONDecodeError as exc:
                 raise InvalidChatFormatError(
                     f"Row {row_index}: assistant content is not valid JSON: {exc}. "
                     f"Got: {content[:100]!r}"
@@ -148,9 +160,132 @@ class ReplaySampler:
 
 class DatasetBuilder:
     def __init__(self, config: Dict[str, Any]) -> None:
-        self._cfg = config
+        self._cfg   = config
         self._paths = config.get("paths", {})
-        self._cl = config.get("continuous_learning", {})
+        self._cl    = config.get("continuous_learning", {})
+
+    # ── Private helpers ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _doc_type_of(row: Dict[str, Any]) -> str:
+        """Extract document_type from a chat-format row's metadata, with fallback."""
+        meta = row.get("metadata") or {}
+        return (
+            meta.get("document_type")
+            or meta.get("form_type")
+            or "UNKNOWN"
+        )
+
+    @staticmethod
+    def _count_fields(obj: Any, _depth: int = 0) -> int:
+        """Recursively count leaf fields in a JSON object (max depth 10 to guard cycles)."""
+        if _depth > 10 or not isinstance(obj, dict):
+            return 0
+        count = 0
+        for v in obj.values():
+            count += 1
+            if isinstance(v, dict):
+                count += DatasetBuilder._count_fields(v, _depth + 1)
+            elif isinstance(v, list):
+                for item in v:
+                    if isinstance(item, dict):
+                        count += DatasetBuilder._count_fields(item, _depth + 1)
+        return count
+
+    def _validate_sample_extended(self, row: Dict[str, Any], row_index: int) -> None:
+        """
+        Soft-validate assistant JSON against the schema registry.
+        Never raises — only prints warnings so a schema mismatch never
+        blocks a training cycle.
+        """
+        assistant_msg = next(
+            (m for m in row.get("messages", []) if m.get("role") == "assistant"), None
+        )
+        if not assistant_msg:
+            return
+        try:
+            assistant_json = json.loads(assistant_msg["content"])
+        except (json.JSONDecodeError, TypeError):
+            print(
+                f"[dataset_builder] Row {row_index}: assistant content is not "
+                "valid JSON — skipping schema validation",
+                flush=True,
+            )
+            return
+        try:
+            from insurance_schema_registry import get_registry
+            validation = get_registry().validate(assistant_json)
+            if not validation.get("valid"):
+                errs = validation.get("errors", [])
+                sample_id = (row.get("metadata") or {}).get("sample_id", f"row-{row_index}")
+                print(
+                    f"[dataset_builder] Sample {sample_id} schema warning "
+                    f"({len(errs)} issue(s)): {errs[:2]}",
+                    flush=True,
+                )
+        except Exception:
+            pass  # Registry unavailable — silently skip
+
+    def _generate_quality_report(self, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Compute quality metrics for the assembled dataset."""
+        doc_types: Dict[str, int] = {}
+        field_counts: List[int]   = []
+
+        for row in rows:
+            dt = self._doc_type_of(row)
+            doc_types[dt] = doc_types.get(dt, 0) + 1
+            assistant_msg = next(
+                (m for m in row.get("messages", []) if m.get("role") == "assistant"),
+                None,
+            )
+            if assistant_msg:
+                try:
+                    field_counts.append(
+                        self._count_fields(json.loads(assistant_msg["content"]))
+                    )
+                except Exception:
+                    pass
+
+        return {
+            "total_samples":            len(rows),
+            "document_types":           doc_types,
+            "document_type_diversity":  len(doc_types),
+            "avg_fields_per_sample":    (
+                round(sum(field_counts) / len(field_counts), 1)
+                if field_counts else 0
+            ),
+        }
+
+    @staticmethod
+    def _stratified_interleave(
+        rows: List[Dict[str, Any]],
+        seed: int,
+    ) -> List[Dict[str, Any]]:
+        """
+        Shuffle within each document type, then interleave round-robin so
+        every training batch sees a variety of document types rather than
+        long runs of a single type.
+        """
+        rng = random.Random(seed)
+
+        buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            buckets[DatasetBuilder._doc_type_of(row)].append(row)
+
+        for bucket in buckets.values():
+            rng.shuffle(bucket)
+
+        # Deterministic key order so the same seed always yields the same result
+        sorted_types = sorted(buckets.keys())
+        interleaved: List[Dict[str, Any]] = []
+        max_len = max(len(b) for b in buckets.values()) if buckets else 0
+        for i in range(max_len):
+            for dt in sorted_types:
+                if i < len(buckets[dt]):
+                    interleaved.append(buckets[dt][i])
+        return interleaved
+
+    # ── Public method ─────────────────────────────────────────────────────────
 
     def build(
         self,
@@ -161,9 +296,17 @@ class DatasetBuilder:
     ) -> DatasetBuildResult:
         """
         Build a training JSONL for cycle_id.
-        new_data_path: versioned JSONL snapshot (from version_store).
+
+        Parameters
+        ----------
+        new_data_path : versioned JSONL snapshot produced by version_store.
+        cycle_id      : unique identifier for this training cycle.
+        min_records   : raise InsufficientDataError if combined rows < this.
+        replay_seed   : RNG seed for interleaving (same seed → same order).
         """
-        datasets_dir = Path(self._paths.get("datasets_dir", "/workspace/fine_tuning/datasets"))
+        datasets_dir = Path(
+            self._paths.get("datasets_dir", "/workspace/fine_tuning/datasets")
+        )
         cycle_dir = datasets_dir / f"cycle-{cycle_id}"
         cycle_dir.mkdir(parents=True, exist_ok=True)
 
@@ -172,7 +315,12 @@ class DatasetBuilder:
             "/workspace/fine_tuning/datasets/feedback_learning",
         )
 
-        # 1. Load new rows — ALL of them; rejected ones are logged but not skipped silently
+        # Minimum samples per doc type below which a warning is printed.
+        min_samples_per_type: int = int(
+            self._cl.get("min_samples_per_doc_type", 5)
+        )
+
+        # ── 1. Load + hard-validate new rows ─────────────────────────────────
         new_rows: List[Dict[str, Any]] = []
         rejected = 0
         for i, row in enumerate(_read_jsonl(Path(new_data_path))):
@@ -181,50 +329,111 @@ class DatasetBuilder:
                 new_rows.append(row)
             except InvalidChatFormatError:
                 rejected += 1
-                print(f"[dataset_builder] Row {i} rejected (invalid chat format) — check ingest pipeline")
+                print(
+                    f"[dataset_builder] Row {i} rejected (invalid chat format)"
+                    " — check ingest pipeline",
+                    flush=True,
+                )
 
-        # 2. Replay ALL rows from previous versioned snapshots (no cap) so that no
-        #    historical sample is ever excluded from training.
-        sampler = ReplaySampler(feedback_dir)
+        # ── 2. Soft-validate new rows against schema registry ─────────────────
+        for i, row in enumerate(new_rows):
+            self._validate_sample_extended(row, i)
+
+        # ── 3. Replay ALL historical rows (anti-forgetting) ───────────────────
+        sampler     = ReplaySampler(feedback_dir)
         replay_rows = sampler.sample_all()
-        print(f"[dataset_builder] Replay: {len(replay_rows)} historical sample(s) from previous versions")
+        print(
+            f"[dataset_builder] Replay: {len(replay_rows)} historical sample(s)"
+            " from previous versions",
+            flush=True,
+        )
 
-        # 3. Combine and shuffle
+        # ── 4. Combine + stratified interleave ────────────────────────────────
         combined = new_rows + replay_rows
-        random.Random(replay_seed).shuffle(combined)
+        final    = self._stratified_interleave(combined, seed=replay_seed)
 
-        if len(combined) < min_records:
+        if len(final) < min_records:
             raise InsufficientDataError(
-                f"Only {len(combined)} valid training records "
+                f"Only {len(final)} valid training records "
                 f"(need ≥{min_records}). Collect more corrections."
             )
 
-        # 4. Fingerprint + write
-        fingerprint = _compute_fingerprint(combined)
-        train_path = cycle_dir / "train.jsonl"
-        _write_jsonl(train_path, combined)
+        # ── 5. Document-type distribution + low-count warnings ───────────────
+        doc_type_counts: Dict[str, int] = {}
+        for row in final:
+            dt = self._doc_type_of(row)
+            doc_type_counts[dt] = doc_type_counts.get(dt, 0) + 1
+
+        for dt, count in doc_type_counts.items():
+            if count < min_samples_per_type:
+                print(
+                    f"[dataset_builder] WARNING: document type '{dt}' has only "
+                    f"{count} sample(s) (recommended minimum: {min_samples_per_type})",
+                    flush=True,
+                )
+
+        # ── 6. Fingerprint + write train.jsonl ────────────────────────────────
+        fingerprint = _compute_fingerprint(final)
+        train_path  = cycle_dir / "train.jsonl"
+        _write_jsonl(train_path, final)
         (cycle_dir / "train.hash").write_text(fingerprint, encoding="utf-8")
 
+        # ── 7. Manifest ───────────────────────────────────────────────────────
         manifest = {
-            "cycle_id": cycle_id,
-            "new_records": len(new_rows),
-            "replay_records": len(replay_rows),
-            "rejected_records": rejected,
-            "total_records": len(combined),
-            "fingerprint": fingerprint,
-            "new_data_path": new_data_path,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "cycle_id":                   cycle_id,
+            "new_records":                len(new_rows),
+            "replay_records":             len(replay_rows),
+            "rejected_records":           rejected,
+            "total_records":              len(final),
+            "document_type_distribution": doc_type_counts,
+            "fingerprint":                fingerprint,
+            "new_data_path":              new_data_path,
+            "created_at":                 datetime.now(timezone.utc).isoformat(),
         }
         (cycle_dir / "dataset_manifest.json").write_text(
             json.dumps(manifest, indent=2), encoding="utf-8"
         )
 
+        # ── 8. Quality report ─────────────────────────────────────────────────
+        quality_report = self._generate_quality_report(final)
+        (cycle_dir / "dataset_quality_report.json").write_text(
+            json.dumps(quality_report, indent=2), encoding="utf-8"
+        )
+        print(
+            f"[dataset_builder] Quality: {quality_report['total_samples']} samples, "
+            f"{quality_report['document_type_diversity']} doc type(s), "
+            f"avg {quality_report['avg_fields_per_sample']} fields/sample",
+            flush=True,
+        )
+
+        # ── 9. LLaMA-Factory data/ layout ─────────────────────────────────────
+        # LLaMA-Factory expects a data/ subdirectory with dataset_info.json +
+        # train.jsonl so its --dataset flag resolves the file correctly.
+        lf_data_dir = cycle_dir / "data"
+        lf_data_dir.mkdir(parents=True, exist_ok=True)
+        _write_jsonl(lf_data_dir / "train.jsonl", final)
+        _lf_dataset_info = {
+            "fideon_insurance": {
+                "file_name": "train.jsonl",
+                "formatting": "sharegpt",
+                "columns": {"messages": "messages"},
+            }
+        }
+        (lf_data_dir / "dataset_info.json").write_text(
+            json.dumps(_lf_dataset_info, indent=2), encoding="utf-8"
+        )
+        print(
+            f"[dataset_builder] LLaMA-Factory data/ layout written: {lf_data_dir}",
+            flush=True,
+        )
+
         return DatasetBuildResult(
             train_jsonl_path=str(train_path),
             fingerprint=fingerprint,
-            total_records=len(combined),
+            total_records=len(final),
             new_records=len(new_rows),
             replay_records=len(replay_rows),
             rejected_records=rejected,
             cycle_id=cycle_id,
+            quality_report=quality_report,
         )
