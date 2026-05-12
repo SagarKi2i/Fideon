@@ -69,5 +69,6 @@ def load_and_validate_config(config_path: str) -> Dict[str, Any]:
     cl.setdefault("feedback_datasets_dir", "/workspace/fine_tuning/datasets/feedback_learning")
 
     cfg.setdefault("training", {}).setdefault("replay_fraction", 0.30)
+    cfg.setdefault("evaluation", {}).setdefault("allow_skip_eval_gate", True)
 
     return cfg
