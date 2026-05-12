@@ -50,7 +50,7 @@ training:
   learning_rate: 2.0e-5
   weight_decay: 0.01
   max_grad_norm: 0.3
-  max_seq_length: 2048
+  max_seq_length: 4096
   fp16: false
   bf16: true
   gradient_checkpointing: true

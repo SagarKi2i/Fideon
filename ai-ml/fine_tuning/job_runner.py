@@ -229,7 +229,24 @@ def _resolve_base_model(config: Dict[str, Any], registry_path: str, runs_dir: Op
         print(f"[job_runner] Free disk after cleanup: {free_gb:.1f} GB")
 
     # ── 1. Storage: latest fine-tuned version ────────────────────────────────
+    # If the local registry has a HIGHER version than storage (common during the
+    # auto-refine loop where new versions accumulate faster than they're uploaded),
+    # use the local promoted model directly and skip the storage download entirely.
+    local_version   = registry.get_current_version()
     seaweed_version = storage.get_latest_finetuned_version()
+    if (
+        seaweed_version is not None
+        and local_version is not None
+        and local_version > seaweed_version
+    ):
+        current = registry.get_current_base()
+        if current and Path(current).exists():
+            print(
+                f"[job_runner] Local registry v{local_version} > storage v{seaweed_version} "
+                f"— using local promoted model: {current}"
+            )
+            return current
+
     if seaweed_version is not None:
         cache_dir = f"/workspace/fine_tuning/models/finetuned/v{seaweed_version}"
         cache_path = Path(cache_dir)
@@ -313,6 +330,7 @@ def run_cycle(
     original_fields_map: Optional[Dict[str, Dict[str, Any]]] = None,
     extra_job_fields: Optional[Dict[str, Any]] = None,
     _suppress_completion_status: bool = False,
+    base_model_override: Optional[str] = None,
 ) -> CycleResult:
     """
     Run one complete continuous-learning cycle.
@@ -402,7 +420,16 @@ def run_cycle(
 
             # ── 4. Resolve base model ─────────────────────────────────────────
             _update("resolving_base_model")
-            base_model = _resolve_base_model(config, reg_path, runs_dir=runs_dir)
+            if base_model_override and Path(base_model_override).exists():
+                # Explicit base provided (e.g., previous auto-refine iteration's
+                # merged model). Still run cleanup to free disk, but protect the
+                # override path so it isn't deleted before training starts.
+                _cleanup_old_runs(runs_dir, active_model_path=base_model_override, keep_last=1)
+                print(f"[job_runner] Free disk after cleanup: {_free_disk_gb():.1f} GB")
+                base_model = base_model_override
+                print(f"[job_runner] Using provided base model override: {base_model}")
+            else:
+                base_model = _resolve_base_model(config, reg_path, runs_dir=runs_dir)
 
             # ── 5. Create pending registry entry ─────────────────────────────
             registry = VersionRegistry(reg_path)
@@ -429,6 +456,32 @@ def run_cycle(
                 job_id=job_id,
                 base_model=base_model,
             )
+
+            # ── 6b. Zero-loss guard ───────────────────────────────────────────
+            # If the adapter manifest reports loss=0 with 0 active labels the
+            # tokenisation was still broken — promote would create a useless clone
+            # of the base model. Fail the cycle early instead of wasting merge time.
+            _manifest_path = Path(adapter_path) / "adapter_manifest.json"
+            if _manifest_path.exists():
+                try:
+                    _m = json.loads(_manifest_path.read_text(encoding="utf-8"))
+                    _tloss      = _m.get("train_loss", None)
+                    _min_active = _m.get("min_active_labels", -1)
+                    if _tloss == 0.0 and _min_active == 0:
+                        raise RuntimeError(
+                            f"Training produced loss=0.0 with min_active_labels=0 — "
+                            f"all label tokens are masked. The assistant boundary "
+                            f"'<|im_start|>assistant\\n' was not found. "
+                            f"Check the JSONL at {build_result.train_jsonl_path}."
+                        )
+                    if _tloss is not None and _tloss == 0.0:
+                        print(
+                            f"[job_runner] WARNING: train_loss=0.0 (min_active_labels={_min_active}). "
+                            f"The model may not have learned — inspect dataset format.",
+                            flush=True,
+                        )
+                except (json.JSONDecodeError, OSError):
+                    pass
 
             # ── 7. Evaluation ─────────────────────────────────────────────────
             _update("evaluating")
@@ -531,6 +584,30 @@ def run_cycle(
                 flush=True,
             )
 
+            # ── 8a. Promote in registry ───────────────────────────────────────
+            # This MUST happen immediately after merge so _resolve_base_model
+            # can return the locally-trained model on the next iteration instead
+            # of always falling back to the Azure-uploaded version.
+            training_meta = {
+                "backend":         "qlora_hf",
+                "fingerprint":     build_result.fingerprint,
+                "job_id":          job_id,
+                "base_model":      base_model,
+                "replay_fraction": replay_fraction,
+            }
+            registry.promote_version(
+                version=new_version,
+                merged_model_path=merge_result.output_path,
+                adapter_path=adapter_path,
+                eval_scores=gate.scores,
+                training_meta=training_meta,
+            )
+            print(
+                f"[job_runner] Registry updated — current_version=v{new_version} "
+                f"current_base={merge_result.output_path}",
+                flush=True,
+            )
+
             # ── 8b. Hot-swap the running extractor to the fine-tuned model ────
             # Only applies when USE_OLLAMA=false (transformers path). When Ollama
             # is active, inference uses the GGUF loaded by model_loader.py — the
@@ -553,13 +630,7 @@ def run_cycle(
             # Do NOT upload to storage here — let the user click Share Gradients
             # so they control when weights leave the pod.
             _update("pending_share")
-            training_meta = {
-                "backend":         "qlora_hf",
-                "fingerprint":     build_result.fingerprint,
-                "job_id":          job_id,
-                "base_model":      base_model,
-                "replay_fraction": replay_fraction,
-            }
+            # training_meta already defined in step 8a above
             pending_share_dir = Path(
                 os.getenv("PENDING_SHARE_DIR", "/workspace/fine_tuning/pending_shares")
             )
@@ -730,7 +801,14 @@ def run_auto_refine_loop(
                                    "/workspace/fine_tuning/datasets/feedback_learning"))
     threshold    = int(cl_cfg.get("retrain_threshold", 25))
 
-    current_data_path = new_data_path
+    current_data_path  = new_data_path
+    # Track the merged model from the previous iteration so each successive
+    # cycle trains on top of the freshly fine-tuned model instead of always
+    # falling back to the last Azure-uploaded version.
+    prev_merged_path: Optional[str] = None
+    # For no-progress early-stop: track total mismatched fields per iteration.
+    prev_total_mismatched: Optional[int] = None
+    consecutive_no_progress: int = 0
 
     for iteration in range(1, max_iterations + 1):
         print(
@@ -754,6 +832,9 @@ def run_auto_refine_loop(
                 "auto_refine_converged":      False,
             },
             _suppress_completion_status=True,
+            # Each iteration trains from the previous iteration's merged model so
+            # learning is cumulative rather than always restarting from base v9.
+            base_model_override=prev_merged_path,
         )
 
         if result.status != "completed":
@@ -764,15 +845,21 @@ def run_auto_refine_loop(
             )
             return
 
+        # Remember this iteration's merged model for the next cycle
+        if result.merged_model_path and Path(result.merged_model_path).exists():
+            prev_merged_path = result.merged_model_path
+
         # ── B: Re-extract each PDF with the freshly trained model ─────────
         _upd(
             f"auto_refine_iter_{iteration}_of_{max_iterations}_extracting",
             auto_refine_iteration=iteration,
         )
 
-        all_converged   = True
-        pdf_found       = False
+        all_converged        = True
+        pdf_found            = False
         next_samples: List[Dict[str, Any]] = []
+        total_matched_iter   = 0
+        total_mismatched_iter = 0
 
         for uid in upload_ids:
             pdf_path = _resolve_pdf_path(uid, upload_dir)
@@ -801,6 +888,8 @@ def run_auto_refine_loop(
 
             # ── C: Compare ───────────────────────────────────────────────
             converged, matched, mismatched = _check_convergence(re_fields, ground_truth, wrong_keys)
+            total_matched_iter    += len(matched)
+            total_mismatched_iter += len(mismatched)
             print(
                 f"[auto_refine] {uid}: converged={converged}  "
                 f"matched={len(matched)}  mismatched={len(mismatched)}"
@@ -855,6 +944,34 @@ def run_auto_refine_loop(
                  auto_refine_iterations_run=iteration,
                  auto_refine_stopped_reason="max_iterations")
             return
+
+        # ── D2: No-progress early stop ────────────────────────────────────
+        # If zero fields improved this iteration, increment the stall counter.
+        # Two consecutive stalled iterations → the model is not learning from
+        # this data; stop rather than burn GPU on more useless cycles.
+        if total_matched_iter == 0:
+            consecutive_no_progress += 1
+            print(
+                f"[auto_refine] No fields improved this iteration "
+                f"(stall streak: {consecutive_no_progress}/2).",
+                flush=True,
+            )
+            if consecutive_no_progress >= 2:
+                print(
+                    "[auto_refine] Stopping — 2 consecutive iterations with zero improvement. "
+                    "Add more varied training samples or check that the model is loading correctly.",
+                    flush=True,
+                )
+                _upd("done", status="failed",
+                     error="No improvement after 2 consecutive iterations — add more training data",
+                     auto_refine_converged=False,
+                     auto_refine_iterations_run=iteration,
+                     auto_refine_stopped_reason="no_progress")
+                return
+        else:
+            consecutive_no_progress = 0  # reset streak on any improvement
+
+        prev_total_mismatched = total_mismatched_iter
 
         # ── E: Build next iteration's training snapshot ───────────────────
         _upd(f"auto_refine_iter_{iteration}_of_{max_iterations}_preparing_next")

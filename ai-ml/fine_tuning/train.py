@@ -240,33 +240,95 @@ def run_training(
     _ASSISTANT_PREFIX = "<|im_start|>assistant\n"
 
     def _tokenise(batch: Dict[str, Any]) -> Dict[str, Any]:
-        enc = tokenizer(
-            batch["text"],
-            truncation=True,
-            max_length=max_seq,
-            padding=False,
-        )
-        labels_list = []
-        for text, input_ids in zip(batch["text"], enc["input_ids"]):
-            labels = [-100] * len(input_ids)
-            # Find where the last (assistant) turn begins and unmask from there
+        input_ids_list, attention_mask_list, labels_list = [], [], []
+
+        for text in batch["text"]:
             prefix_end = text.rfind(_ASSISTANT_PREFIX)
             if prefix_end != -1:
                 prefix_text = text[: prefix_end + len(_ASSISTANT_PREFIX)]
-                prefix_len = len(
-                    tokenizer(prefix_text, add_special_tokens=False)["input_ids"]
-                )
-                for i in range(prefix_len, len(input_ids)):
-                    labels[i] = input_ids[i]
+
+                # Tokenize prefix and full text with IDENTICAL settings so the
+                # split point is consistent. add_special_tokens=False because
+                # the Qwen2 chat template already embeds all special markers
+                # (<|im_start|>, <|im_end|>) as explicit text tokens.
+                prefix_ids = tokenizer(
+                    prefix_text,
+                    add_special_tokens=False,
+                    truncation=False,
+                    padding=False,
+                )["input_ids"]
+                full_ids = tokenizer(
+                    text,
+                    add_special_tokens=False,
+                    truncation=False,
+                    padding=False,
+                )["input_ids"]
+
+                completion_ids = full_ids[len(prefix_ids):]
+
+                # ── Truncate the PREFIX (never the completion) ──────────────
+                # If we truncated from the end (original behaviour) the
+                # assistant response would be cut off entirely, making every
+                # label -100 → loss=0, grad_norm=0, model learns nothing.
+                if len(prefix_ids) + len(completion_ids) > max_seq:
+                    budget     = max(0, max_seq - len(completion_ids))
+                    prefix_ids = prefix_ids[-budget:]   # keep most-recent context
+
+                combined = prefix_ids + completion_ids
+                labels   = [-100] * len(prefix_ids) + list(completion_ids)
             else:
-                # Fallback: train on full sequence if template boundary not found
-                labels = input_ids[:]
+                # No assistant boundary — train on full sequence (rare fallback).
+                combined = tokenizer(
+                    text,
+                    add_special_tokens=False,
+                    truncation=True,
+                    max_length=max_seq,
+                    padding=False,
+                )["input_ids"]
+                labels = list(combined)
+
+            # Safety: if something went wrong and all labels are masked,
+            # fall back to training on the whole sequence rather than silently
+            # producing zero loss.
+            if all(l == -100 for l in labels):
+                labels = list(combined)
+
+            input_ids_list.append(combined)
+            attention_mask_list.append([1] * len(combined))
             labels_list.append(labels)
-        enc["labels"] = labels_list
-        return enc
+
+        return {
+            "input_ids":      input_ids_list,
+            "attention_mask": attention_mask_list,
+            "labels":         labels_list,
+        }
 
     hf_dataset = Dataset.from_dict({"text": texts})
     tokenised  = hf_dataset.map(_tokenise, batched=True, remove_columns=["text"])
+
+    # ── Diagnostic: verify labels are not all masked ──────────────────────────
+    active_counts = [sum(1 for l in ex["labels"] if l != -100) for ex in tokenised]
+    seq_lengths   = [len(ex["input_ids"]) for ex in tokenised]
+    _min_active = min(active_counts) if active_counts else 0
+    _max_active = max(active_counts) if active_counts else 0
+    _avg_active = sum(active_counts) // max(len(active_counts), 1)
+    print(
+        f"[train] Label check — {len(tokenised)} examples | "
+        f"active label tokens: min={_min_active} max={_max_active} avg={_avg_active} | "
+        f"seq len: min={min(seq_lengths)} max={max(seq_lengths)}",
+        flush=True,
+    )
+    if _min_active == 0:
+        # The safety fallback in _tokenise should have prevented this, but if it
+        # still happens the assistant boundary was not found in ANY example —
+        # something is fundamentally wrong with the JSONL format.
+        raise ValueError(
+            f"[train] FATAL: {sum(1 for c in active_counts if c == 0)} example(s) still have "
+            f"0 active label tokens after the safety fallback. "
+            f"The '<|im_start|>assistant\\n' boundary was not found in the chat template output. "
+            f"Check that each JSONL row has a 'messages' list with an 'assistant' role entry. "
+            f"Dataset: {dataset_path}"
+        )
 
     # ── Train ────────────────────────────────────────────────────────────────
     training_args = TrainingArguments(
@@ -350,8 +412,13 @@ def run_training(
         f"({training_args.num_train_epochs} epochs, {len(tokenised)} examples) …",
         flush=True,
     )
-    trainer.train()
-    print(f"[train]   Training complete. ({int(time.time()-_t0_train)}s)", flush=True)
+    train_output = trainer.train()
+    _final_loss = float(train_output.training_loss) if train_output is not None else 0.0
+    print(
+        f"[train]   Training complete. ({int(time.time()-_t0_train)}s) "
+        f"final_loss={_final_loss:.6f}",
+        flush=True,
+    )
 
     adapter_path = output_dir
     print(f"[train] ── Saving ── Writing adapter weights to {adapter_path} …", flush=True)
@@ -368,6 +435,9 @@ def run_training(
         "lora_alpha": lora_config.lora_alpha,
         "num_epochs": training_args.num_train_epochs,
         "learning_rate": training_args.learning_rate,
+        "train_loss": _final_loss,
+        "min_active_labels": _min_active,
+        "max_active_labels": _max_active,
         "trained_at": datetime.now(timezone.utc).isoformat(),
     }
     (Path(adapter_path) / "adapter_manifest.json").write_text(
