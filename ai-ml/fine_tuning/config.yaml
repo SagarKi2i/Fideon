@@ -50,7 +50,7 @@ training:
   learning_rate: 2.0e-5
   weight_decay: 0.01
   max_grad_norm: 0.3
-  max_seq_length: 2048
+  max_seq_length: 4096
   fp16: false
   bf16: true
   gradient_checkpointing: true
@@ -64,9 +64,6 @@ training:
 
 # ── Evaluation / quality gate ─────────────────────────────────────────────────
 evaluation:
-  # Set to true to skip the quality gate when no eval examples are provided.
-  # Safe for development; do NOT use in production.
-  allow_skip_eval_gate: true
   # Minimum absolute scores required to pass the gate.
   absolute_floors:
     field_f1: 0.65
@@ -79,7 +76,4 @@ evaluation:
   max_forgetting_drop: 0.10
   temperature: 0.0
   max_new_tokens: 512
-  # Paths to eval example JSON files (list of {user_content, expected_fields}).
-  # Uncomment and populate these for production quality gating:
-  # seen_questions_path: /workspace/fine_tuning/eval/seen.json
-  # paraphrased_questions_path: /workspace/fine_tuning/eval/paraphrased.json
+  allow_skip_eval_gate: true

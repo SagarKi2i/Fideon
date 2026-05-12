@@ -253,10 +253,10 @@ function toLabel(key: string): string {
  * - Null / empty / "_"-prefixed keys are skipped everywhere
  */
 function buildDynamicSections(extracted: any): {
-  flatFields: Array<{ label: string; value: string }>;
+  flatFields: Array<{ key: string; label: string; value: string }>;
   sections: Array<{ key: string; title: string; fields: Array<{ key: string; label: string; value: string }> }>;
 } {
-  const flatFields: Array<{ label: string; value: string }> = [];
+  const flatFields: Array<{ key: string; label: string; value: string }> = [];
   const sections: Array<{ key: string; title: string; fields: Array<{ key: string; label: string; value: string }> }> = [];
 
   if (!extracted || typeof extracted !== "object") return { flatFields, sections };
@@ -296,7 +296,7 @@ function buildDynamicSections(extracted: any): {
       if (allPrimitive) {
         // Simple array → single flat field
         const s = value.filter(item => item !== null && item !== undefined).map(String).join(", ");
-        if (s.trim()) flatFields.push({ label: toLabel(key), value: s });
+        if (s.trim()) flatFields.push({ key, label: toLabel(key), value: s });
       } else {
         // Array of objects → one numbered section per item
         value.forEach((item, idx) => {
@@ -312,7 +312,7 @@ function buildDynamicSections(extracted: any): {
     } else {
       // Primitive → flat field
       const s = String(value).trim();
-      if (s) flatFields.push({ label: toLabel(key), value: s });
+      if (s) flatFields.push({ key, label: toLabel(key), value: s });
     }
   }
 
@@ -324,7 +324,6 @@ function computeConfidenceLabel(extracted: any): string | null {
   const { flatFields, sections } = buildDynamicSections(extracted);
   const total = flatFields.length + sections.reduce((s, sec) => s + sec.fields.length, 0);
   if (!total) return null;
-  const pct = Math.round((total / Math.max(total, 1)) * 100);
   // Confidence based on how many fields were extracted vs a reasonable baseline (30 fields = 100%)
   const baseline = 30;
   const score = Math.min(Math.round((total / baseline) * 100), 100);
@@ -341,10 +340,11 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
   const [editError, setEditError] = useState<string | null>(null);
   const [trainSubmitted, setTrainSubmitted] = useState(false);
   const [activeTab, setActiveTab] = useState<"json" | "fields" | "edit" | "changes" | "split">("json");
-  const [ocrTab, setOcrTab] = useState<"json" | "fields" | "changes" | "rawtext" | "markdown">("fields");
+  const [ocrTab, setOcrTab] = useState<"json" | "fields" | "changes" | "rawtext">("fields");
   const [markdownEditText, setMarkdownEditText] = useState<string>("");
   const [trainSubmittedRunpod, setTrainSubmittedRunpod] = useState(false);
   const [isSubmittingTrain, setIsSubmittingTrain] = useState(false);
+  const [fieldEdits, setFieldEdits] = useState<Record<string, string>>({});
 
   // Unified pipeline state
   const [processingPhase, setProcessingPhase] = useState<ProcessingPhase>("idle");
@@ -368,6 +368,7 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
     setExtractionState({ phase: "idle" });
     setTrainSubmittedRunpod(false);
     setMarkdownEditText("");
+    setFieldEdits({});
     setOcrTab("fields");
 
   }, [file]);
@@ -403,6 +404,13 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
       setExtractionState({ phase: "completed", result });
       const fields = flattenAcordFields(result);
       setMarkdownEditText(fieldsToMarkdown(fields, result.form_type_detected || formType, result.pdf_type || smartResult.pdf_type));
+      // Seed inline field editor with all extracted values
+      const extractedObj = result.extracted_json ?? result.extracted_fields ?? result.fields ?? {};
+      const { flatFields: initFlat, sections: initSections } = buildDynamicSections(extractedObj);
+      const initEdits: Record<string, string> = {};
+      initFlat.forEach((f) => { initEdits[f.key] = f.value; });
+      initSections.forEach((sec) => sec.fields.forEach((f) => { initEdits[`${sec.key}.${f.key}`] = f.value; }));
+      setFieldEdits(initEdits);
       setProcessingPhase("done");
       const fieldCount = Object.keys(
         result.extracted_json ?? result.extracted_fields ?? result.fields ?? {}
@@ -443,7 +451,7 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
     }
   };
 
-  const handleSubmitAndTrain = async () => {
+  const handleSubmitAndTrain = async (overrideCorrectedFields?: Record<string, string>) => {
     if (extractionState.phase !== "completed") return;
     if (!runId) {
       toast({
@@ -457,7 +465,7 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
     const r = extractionState.result;
     const originalFields = (r.extracted_json ?? r.extracted_fields ?? r.fields ?? {}) as Record<string, any>;
     const rawText = r.full_text ?? r.raw_text ?? "";
-    const correctedFields = parseMarkdownTableToJson(markdownEditText);
+    const correctedFields = overrideCorrectedFields ?? parseMarkdownTableToJson(markdownEditText);
 
     setIsSubmittingTrain(true);
     try {
@@ -799,7 +807,6 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
                     <FileCheck className="h-3.5 w-3.5 mr-1.5" />Fields
                   </TabsTrigger>
                   <TabsTrigger value="rawtext">Raw Text</TabsTrigger>
-                  <TabsTrigger value="markdown">Markdown</TabsTrigger>
                   <TabsTrigger value="changes">
                     <RefreshCw className="h-3.5 w-3.5 mr-1.5" />Changes
                   </TabsTrigger>
@@ -812,7 +819,7 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
                   </pre>
                 </TabsContent>
 
-                {/* Fields Tab — dynamic, only extracted fields */}
+                {/* Fields Tab — dynamic, inline-editable fields */}
                 <TabsContent value="fields" className="mt-3">
                   {(() => {
                     const { flatFields, sections: dynSections } = buildDynamicSections(extractedJson);
@@ -821,39 +828,76 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
                       return <p className="text-xs text-muted-foreground italic">No fields extracted. Check the JSON tab for raw output.</p>;
                     }
                     return (
-                      <div className="space-y-6 max-h-[560px] overflow-y-auto pr-1">
-                        {/* Flat top-level fields (no section header) */}
-                        {flatFields.length > 0 && (
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                            {flatFields.map((f) => (
-                              <div key={f.label} className="space-y-1">
-                                <p className="text-xs text-muted-foreground">{f.label}</p>
-                                <div className="rounded-md border border-border/60 bg-background px-3 py-2 text-sm text-foreground min-h-[36px] flex items-center">
-                                  <span className="break-words leading-snug">{f.value}</span>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                        {/* Nested object sections */}
-                        {dynSections.map((section) => (
-                          <div key={section.key}>
-                            <div className="flex items-center gap-2 mb-3">
-                              <span className="h-2.5 w-2.5 rounded-full bg-green-500 shrink-0" />
-                              <span className="text-sm font-semibold text-foreground">{section.title}</span>
-                            </div>
+                      <div className="space-y-4">
+                        <div className="space-y-6 max-h-[520px] overflow-y-auto pr-1">
+                          {/* Flat top-level fields */}
+                          {flatFields.length > 0 && (
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                              {section.fields.map((f) => (
+                              {flatFields.map((f) => (
                                 <div key={f.key} className="space-y-1">
                                   <p className="text-xs text-muted-foreground">{f.label}</p>
-                                  <div className="rounded-md border border-border/60 bg-background px-3 py-2 text-sm text-foreground min-h-[36px] flex items-center">
-                                    <span className="break-words leading-snug">{f.value}</span>
-                                  </div>
+                                  <Input
+                                    value={fieldEdits[f.key] ?? f.value}
+                                    onChange={(e) => {
+                                      setFieldEdits((prev) => ({ ...prev, [f.key]: e.target.value }));
+                                      setTrainSubmittedRunpod(false);
+                                    }}
+                                    className="h-9 text-sm bg-background"
+                                  />
                                 </div>
                               ))}
                             </div>
-                          </div>
-                        ))}
+                          )}
+                          {/* Nested object sections */}
+                          {dynSections.map((section) => (
+                            <div key={section.key}>
+                              <div className="flex items-center gap-2 mb-3">
+                                <span className="h-2.5 w-2.5 rounded-full bg-green-500 shrink-0" />
+                                <span className="text-sm font-semibold text-foreground">{section.title}</span>
+                              </div>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                {section.fields.map((f) => {
+                                  const editKey = `${section.key}.${f.key}`;
+                                  return (
+                                    <div key={f.key} className="space-y-1">
+                                      <p className="text-xs text-muted-foreground">{f.label}</p>
+                                      <Input
+                                        value={fieldEdits[editKey] ?? f.value}
+                                        onChange={(e) => {
+                                          setFieldEdits((prev) => ({ ...prev, [editKey]: e.target.value }));
+                                          setTrainSubmittedRunpod(false);
+                                        }}
+                                        className="h-9 text-sm bg-background"
+                                      />
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        {/* Save & Train */}
+                        <div className="flex items-center justify-between gap-3 pt-2 border-t border-border/50">
+                          <p className="text-xs text-muted-foreground">
+                            Correct any wrong values above, then save to add a training sample.
+                          </p>
+                          <Button
+                            onClick={async () => {
+                              await handleSubmitAndTrain(fieldEdits);
+                              setTimeout(() => setTrainSubmittedRunpod(false), 2000);
+                            }}
+                            disabled={isSubmittingTrain}
+                            className="shrink-0 bg-gradient-to-r from-green-600 to-emerald-600 hover:opacity-90 text-white"
+                          >
+                            {isSubmittingTrain ? (
+                              <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Saving…</>
+                            ) : trainSubmittedRunpod ? (
+                              <><CheckCircle2 className="h-4 w-4 mr-2" />Saved!</>
+                            ) : (
+                              <><FileCheck className="h-4 w-4 mr-2" />Save &amp; Train</>
+                            )}
+                          </Button>
+                        </div>
                       </div>
                     );
                   })()}
@@ -863,13 +907,6 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
                 <TabsContent value="rawtext" className="mt-3">
                   <pre className="rounded-lg border border-border/70 bg-[#0b1020] p-3 overflow-auto max-h-[480px] text-xs font-mono leading-5 whitespace-pre-wrap text-muted-foreground">
                     {(r.full_text || r.raw_text || "").trim() || "(no raw text available)"}
-                  </pre>
-                </TabsContent>
-
-                {/* Markdown Tab */}
-                <TabsContent value="markdown" className="mt-3">
-                  <pre className="rounded-lg border border-border/70 bg-[#0b1020] p-3 overflow-auto max-h-[480px] text-xs font-mono leading-5 whitespace-pre-wrap text-muted-foreground">
-                    {(r.markdown || "").trim() || "(no markdown available)"}
                   </pre>
                 </TabsContent>
 

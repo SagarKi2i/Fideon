@@ -755,7 +755,10 @@ def _run_qwen_extraction(
     ]
     content.append({"type": "text", "text": prompt})
 
-    messages = [{"role": "user", "content": content}]
+    messages = [
+        {"role": "system", "content": _OLLAMA_SYSTEM_PROMPT},
+        {"role": "user", "content": content},
+    ]
 
     text_input = _qwen_processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
@@ -776,9 +779,7 @@ def _run_qwen_extraction(
         # System prompt is required for Qwen2-VL instruction-following mode;
         # without it the model generates narrative summaries instead of structured output.
         text_input = (
-            "<|im_start|>system\n"
-            "You are an expert insurance document parser. Follow the output format instructions exactly.\n"
-            "<|im_end|>\n"
+            f"<|im_start|>system\n{_OLLAMA_SYSTEM_PROMPT}<|im_end|>\n"
             f"<|im_start|>user\n{vision_tokens}{prompt}<|im_end|>\n<|im_start|>assistant\n"
         )
         logger.info("[qwen] Manual text_input length: %d chars", len(text_input))

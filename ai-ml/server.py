@@ -96,6 +96,40 @@ def _preload_models() -> None:
         _load_surya()
         print("[preload] Loading Docling...", flush=True)
         _load_docling()
+
+        # If USE_OLLAMA=false, check the version registry for a locally promoted
+        # fine-tuned model and point QWEN_MODEL_ID at it before the first load.
+        # Without this, a pod restart always silently reverts to the base model
+        # even though a fine-tuned version was promoted in the previous session.
+        _use_ollama = os.getenv("USE_OLLAMA", "false").lower() in ("1", "true", "yes")
+        if not _use_ollama:
+            _reg_path = os.getenv(
+                "VERSION_REGISTRY_PATH",
+                "/workspace/fine_tuning/registry/version_registry.json",
+            )
+            try:
+                from pathlib import Path as _Path
+                from fine_tuning.registry.version_registry import VersionRegistry as _VR
+                import extractor as _ext
+                _reg = _VR(_reg_path)
+                _base = _reg.get_current_base()
+                _ver  = _reg.get_current_version()
+                if _base and _Path(_base).exists() and _base != _ext.QWEN_MODEL_ID:
+                    print(
+                        f"[preload] Registry has promoted model v{_ver} at {_base} — "
+                        f"overriding QWEN_MODEL_ID before first load.",
+                        flush=True,
+                    )
+                    _ext.QWEN_MODEL_ID = _base
+                elif _base and not _Path(_base).exists():
+                    print(
+                        f"[preload] Registry points to v{_ver} at {_base} but path "
+                        f"does not exist on disk — using default QWEN_MODEL_ID.",
+                        flush=True,
+                    )
+            except Exception as _reg_exc:
+                print(f"[preload] Registry check skipped (non-fatal): {_reg_exc}", flush=True)
+
         print("[preload] Loading Qwen2-VL...", flush=True)
         _load_qwen()
         print("[preload] All models loaded — pod is fully warm.", flush=True)

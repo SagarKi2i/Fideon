@@ -10,6 +10,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from fine_tuning.continuous_learning.ingest import SYSTEM_PROMPT as _EVAL_SYSTEM_PROMPT
+
 
 @dataclass
 class LocalEvalResult:
@@ -58,7 +60,10 @@ def _field_scores(
 def _generate_response(model: Any, processor: Any, user_content: str, max_new_tokens: int = 512) -> str:
     import torch
 
-    msgs = [{"role": "user", "content": user_content}]
+    msgs = [
+        {"role": "system", "content": _EVAL_SYSTEM_PROMPT},
+        {"role": "user",   "content": user_content},
+    ]
     text_input = processor.apply_chat_template(
         msgs, tokenize=False, add_generation_prompt=True
     )

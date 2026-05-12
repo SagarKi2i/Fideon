@@ -188,18 +188,17 @@ export async function getAcordTrainingSamples(): Promise<AcordTrainingSample[]> 
   if (allRuns.length === 0) return [];
 
   const runIds = allRuns.map((r: any) => r.id);
+  const runIdSet = new Set<string>(runIds);
 
-  // Step 2: batch the .in() to avoid URL length limits (safe batch ≤ 500 IDs)
-  const BATCH = 500;
-  const allFeedbacks: any[] = [];
-  for (let i = 0; i < runIds.length; i += BATCH) {
-    const { data: feedbacks } = await db
-      .from("acord_extraction_feedback")
-      .select("run_id, corrected_json")
-      .eq("actor_role", "user")
-      .in("run_id", runIds.slice(i, i + BATCH));
-    if (feedbacks) allFeedbacks.push(...(feedbacks as any[]));
-  }
+  // Step 2: fetch ALL user feedback without .in() — PostgREST .in() returns 0 rows
+  // inconsistently (same bug that hit getAcordTrainingCount, fixed there with two .eq() calls).
+  // RLS ensures only own rows are returned; filter by runIdSet in memory.
+  const { data: rawFeedbacks } = await db
+    .from("acord_extraction_feedback")
+    .select("run_id, corrected_json")
+    .eq("actor_role", "user");
+
+  const allFeedbacks = (rawFeedbacks ?? []).filter((f: any) => runIdSet.has(f.run_id));
 
   if (allFeedbacks.length === 0) return [];
 
@@ -268,18 +267,21 @@ export async function getAcordSamplesForDisplay(): Promise<AcordSampleDisplay[]>
   if (runs.length === 0) return [];
 
   const runIds = (runs as any[]).map((r: any) => r.id);
+  const runIdSet = new Set<string>(runIds);
 
+  // Avoid .in() — PostgREST .in() inconsistently returns 0 rows; fetch all own feedback
+  // and filter in memory instead.
   const { data: feedbacks, error: fbError } = await db
     .from("acord_extraction_feedback")
     .select("run_id, corrected_json")
-    .eq("actor_role", "user")
-    .in("run_id", runIds);
+    .eq("actor_role", "user");
 
   if (fbError) console.warn("[acordSupabaseApi] feedbacks query error:", fbError);
-  console.log("[acordSupabaseApi] feedbacks returned:", feedbacks?.length ?? 0);
+  const filteredFeedbacks = (feedbacks ?? []).filter((f: any) => runIdSet.has(f.run_id));
+  console.log("[acordSupabaseApi] feedbacks returned:", filteredFeedbacks.length);
 
   const fbMap = new Map<string, any>();
-  for (const fb of (feedbacks ?? []) as any[]) {
+  for (const fb of filteredFeedbacks) {
     fbMap.set(fb.run_id, fb.corrected_json);
   }
 
