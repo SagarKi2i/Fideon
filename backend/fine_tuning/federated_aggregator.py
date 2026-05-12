@@ -4,21 +4,21 @@ Federated Learning aggregation pipeline — FedAvg over LoRA adapters.
 Full flow (triggered after a federated_round reaches 'aggregating' status):
 
   1.  Fetch all federated_updates for the round from Supabase
-  2.  Download each device's LoRA adapter from SeaweedFS
+  2.  Download each device's LoRA adapter from Azure Blob
         gradients/{model_id}/round-{N}/{device_id}/
   3.  FedAvg: element-wise average of every LoRA weight tensor
   4.  Save averaged adapter to local temp dir
-  5.  Upload averaged adapter -> SeaweedFS: adapters/federated/v{N}/
+  5.  Upload averaged adapter -> Azure Blob: adapters/federated/v{N}/
   6.  Merge adapter into base model (local FINE_TUNE_BASE_MODEL path)
-  7.  Upload merged full model -> SeaweedFS: finetuned/v{N}/
-  8.  Update version pointer: SeaweedFS finetuned/latest.txt = N
+  7.  Upload merged full model -> Azure Blob: finetuned/v{N}/
+  8.  Update version pointer: Azure Blob finetuned/latest.txt = N
   9.  Quantize the local merged model (no re-download, no re-merge)
         -> GGUF Q4_K_M + Q5_K_M (if llama.cpp tools present)
-        -> SeaweedFS: gguf/federated/v{N}/
+        -> Azure Blob: gguf/federated/v{N}/
         -> Supabase adapter_registry (Electron picks this up)
   10. Mark federated_round as completed in Supabase
 
-SeaweedFS key layout after completion (bucket = my-bucket):
+Azure Blob key layout after completion (container = fideon-models):
   adapters/federated/v{N}/adapter_model.safetensors   <- averaged LoRA weights
   adapters/federated/v{N}/adapter_config.json
   finetuned/v{N}/model-*.safetensors                  <- full merged HF model
@@ -31,14 +31,15 @@ SeaweedFS key layout after completion (bucket = my-bucket):
 Environment variables:
   FINE_TUNE_BASE_MODEL         local HF model path or HF repo id
   FINE_TUNE_LOCAL_FILES_ONLY   "true" if base model is local-only
-  SEAWEEDFS_*                  standard SeaweedFS config
+  AZURE_BLOB_ACCOUNT_URL       Azure Blob Storage account URL
+  AZURE_BLOB_SAS_TOKEN         SAS token (without leading '?')
+  AZURE_BLOB_CONTAINER         container name (default: fideon-models)
   FT_QUANT_LEVELS              comma-separated levels (default q4_k_m,q5_k_m)
   FT_QUANT_SKIP                "1" to skip quantization step
 """
 from __future__ import annotations
 
 import gc
-import hashlib
 import json
 import os
 import tempfile
@@ -145,95 +146,31 @@ def _record_aggregation(
 
 
 # ---------------------------------------------------------------------------
-# SeaweedFS helpers
+# Azure Blob helpers
 # ---------------------------------------------------------------------------
 
-def _s3_client():
-    import boto3
-    from botocore.config import Config
-    endpoint = os.getenv("SEAWEEDFS_ENDPOINT", "").strip()
-    access_key = os.getenv("SEAWEEDFS_ACCESS_KEY", "").strip()
-    secret_key = os.getenv("SEAWEEDFS_SECRET_KEY", "").strip()
-    if not all([endpoint, access_key, secret_key]):
-        raise RuntimeError(
-            "SeaweedFS not configured — "
-            "set SEAWEEDFS_ENDPOINT, SEAWEEDFS_ACCESS_KEY, SEAWEEDFS_SECRET_KEY"
-        )
-    return boto3.client(
-        "s3",
-        endpoint_url=endpoint,
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        config=Config(signature_version="s3v4"),
-    )
-
-
-def _bucket() -> str:
-    b = os.getenv("SEAWEEDFS_BUCKET", "").strip()
-    if not b:
-        raise RuntimeError("SEAWEEDFS_BUCKET not configured")
-    return b
-
-
 def _read_latest_version() -> int:
-    """Read finetuned/latest.txt from SeaweedFS. Returns int version number (0 if absent)."""
-    try:
-        obj = _s3_client().get_object(Bucket=_bucket(), Key=_LATEST_POINTER_KEY)
-        raw = obj["Body"].read().decode("utf-8").strip()
-        return int(raw) if raw.isdigit() else 0
-    except Exception:
-        return 0
+    """Read finetuned/latest.txt from Azure Blob. Returns int version number (0 if absent)."""
+    from fine_tuning.azure_blob_uploader import get_latest_version
+    return get_latest_version()
 
 
 def _write_latest_version(version_int: int) -> None:
-    _s3_client().put_object(
-        Bucket=_bucket(),
-        Key=_LATEST_POINTER_KEY,
-        Body=str(version_int).encode("utf-8"),
-        ContentType="text/plain",
-    )
+    from fine_tuning.azure_blob_uploader import write_latest_version
+    write_latest_version(version_int)
 
 
 def _upload_directory(local_dir: Path, prefix: str, *, log_fn=None) -> list[dict]:
-    """
-    Upload every file in local_dir to SeaweedFS under prefix/.
-    Returns list of {key, name, sha256, size_bytes} per uploaded file.
-    """
-    s3 = _s3_client()
-    bucket = _bucket()
-    uploaded: list[dict] = []
-
-    for fp in sorted(local_dir.rglob("*")):
-        if not fp.is_file():
-            continue
-        rel = fp.relative_to(local_dir).as_posix()
-        key = f"{prefix}/{rel}"
-        size = fp.stat().st_size
-        sha256 = hashlib.sha256(fp.read_bytes()).hexdigest()
-        if log_fn:
-            log_fn(f"[seaweed] {rel} ({size:,} bytes) -> s3://{bucket}/{key}\n")
-        s3.upload_file(str(fp), bucket, key)
-        uploaded.append({"key": key, "name": rel, "sha256": sha256, "size_bytes": size})
-
-    if log_fn:
-        total = sum(f["size_bytes"] for f in uploaded)
-        log_fn(
-            f"[seaweed] uploaded {len(uploaded)} file(s), "
-            f"{total:,} bytes total -> {prefix}/\n"
-        )
-    return uploaded
+    """Upload every file in local_dir to Azure Blob under prefix/."""
+    from fine_tuning.azure_blob_uploader import upload_directory
+    return upload_directory(local_dir, prefix, log_fn=log_fn)
 
 
 def _download_device_adapter(storage_path: str, dest_dir: Path, *, log_fn=None) -> bool:
-    """
-    Download all objects under storage_path prefix from SeaweedFS into dest_dir.
-    Returns True if at least one file was downloaded.
-    """
-    from fine_tuning.seaweed_uploader import download_from_seaweedfs
+    """Download all blobs under storage_path prefix from Azure Blob into dest_dir."""
+    from fine_tuning.azure_blob_uploader import download_adapter
     prefix = storage_path.rstrip("/")
-    downloaded = download_from_seaweedfs(prefix, dest_dir, log_fn=log_fn)
-    if not downloaded:
-        downloaded = download_from_seaweedfs(prefix + "/", dest_dir, log_fn=log_fn)
+    downloaded = download_adapter(prefix, dest_dir, log_fn=log_fn)
     return len(downloaded) > 0
 
 
@@ -335,7 +272,7 @@ def _merge_adapter_to_base(
     Load base model on CPU, attach averaged LoRA adapter, merge_and_unload(),
     and save as full HF safetensors model.
 
-    The merged model in merged_dir is then uploaded to SeaweedFS AND passed
+    The merged model in merged_dir is then uploaded to Azure Blob AND passed
     directly to quantization — no re-download, no re-merge.
     """
     import torch
@@ -393,12 +330,12 @@ def run_aggregation(
     log_fn=None,
 ) -> AggregationResult:
     """
-    Execute the full FedAvg -> SeaweedFS storage -> quantization pipeline.
+    Execute the full FedAvg -> Azure Blob storage -> quantization pipeline.
 
     Designed to run in a background thread (called via asyncio.to_thread).
     All exceptions are caught; round status is updated to 'failed' on error.
 
-    Returns AggregationResult with paths for every artifact stored in SeaweedFS.
+    Returns AggregationResult with paths for every artifact stored in Azure Blob.
     """
     from fine_tuning.quantize_pipeline import quantize_from_local_merged
 
@@ -449,7 +386,7 @@ def run_aggregation(
             _log(f"[fedavg] {len(updates)} device submission(s) found\n")
 
             # ----------------------------------------------------------------
-            # Step 2 — download each device's LoRA adapter from SeaweedFS
+            # Step 2 — download each device's LoRA adapter from Azure Blob
             # ----------------------------------------------------------------
             state_dicts: list[dict] = []
             first_adapter_dir: Path | None = None
@@ -508,18 +445,18 @@ def run_aggregation(
             gc.collect()
 
             # ----------------------------------------------------------------
-            # Step 5 — determine new version number from SeaweedFS pointer
+            # Step 5 — determine new version number from Azure Blob pointer
             # ----------------------------------------------------------------
             current_v = _read_latest_version()
             new_v = current_v + 1
             new_version = f"v{new_v}"
             _log(
-                f"[fedavg] SeaweedFS current version=v{current_v}, "
+                f"[fedavg] Azure Blob current version=v{current_v}, "
                 f"new version={new_version}\n"
             )
 
             # ----------------------------------------------------------------
-            # Step 6 — upload averaged LoRA adapter to SeaweedFS
+            # Step 6 — upload averaged LoRA adapter to Azure Blob
             # ----------------------------------------------------------------
             adapter_prefix = f"adapters/federated/{new_version}"
             _log(f"[fedavg] uploading averaged adapter -> {adapter_prefix}/\n")
@@ -538,7 +475,7 @@ def run_aggregation(
             )
 
             # ----------------------------------------------------------------
-            # Step 8 — upload merged full model to SeaweedFS
+            # Step 8 — upload merged full model to Azure Blob
             # ----------------------------------------------------------------
             finetuned_prefix = f"finetuned/{new_version}"
             _log(f"[fedavg] uploading merged model -> {finetuned_prefix}/\n")
@@ -594,9 +531,9 @@ def run_aggregation(
 
             _log(
                 f"[fedavg] *** aggregation pipeline finished ***\n"
-                f"[fedavg]   averaged adapter  : s3://my-bucket/{adapter_prefix}/\n"
-                f"[fedavg]   merged HF model   : s3://my-bucket/{finetuned_prefix}/\n"
-                f"[fedavg]   GGUF artifacts    : s3://my-bucket/{gguf_prefix}/\n"
+                f"[fedavg]   averaged adapter  : azure://{adapter_prefix}/\n"
+                f"[fedavg]   merged HF model   : azure://{finetuned_prefix}/\n"
+                f"[fedavg]   GGUF artifacts    : azure://{gguf_prefix}/\n"
                 f"[fedavg]   adapter_registry  : domain=federated version={new_version}\n"
             )
 

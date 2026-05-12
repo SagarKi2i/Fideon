@@ -3,11 +3,11 @@ Post-training quantization pipeline.
 
 Full flow (triggered automatically by job_runner after a successful fine-tune):
 
-  1. Download LoRA adapter weights from SeaweedFS (the prefix uploaded just before)
+  1. Download LoRA adapter weights from Azure Blob (the prefix uploaded just before)
   2. Load base model on CPU and merge LoRA adapter via PEFT merge_and_unload()
   3. Convert merged HF model to GGUF F16 (requires llama.cpp convert script)
   4. Quantize F16 GGUF to each requested level (requires llama-quantize binary)
-  5. Upload GGUF artifacts back to SeaweedFS under gguf/{domain}/{version}/
+  5. Upload GGUF artifacts to Azure Blob under gguf/{domain}/{version}/
   6. Upsert rows in the adapter_registry Supabase table
 
 Environment variables:
@@ -255,7 +255,7 @@ def quantize_from_local_merged(
     Steps:
       1. Convert merged_dir -> GGUF F16 (if llama.cpp convert script found)
       2. Quantize F16 to each requested level (if llama-quantize found)
-      3. Upload GGUF files to SeaweedFS: gguf/{domain}/{version_name}/
+      3. Upload GGUF files to Azure Blob: gguf/{domain}/{version_name}/
       4. Upsert rows in adapter_registry (Supabase)
 
     Falls back to uploading merged HF weights when llama.cpp tools are absent.
@@ -264,7 +264,7 @@ def quantize_from_local_merged(
         _log_fn(log_fn, "[quantize] FT_QUANT_SKIP=1 — pipeline skipped\n")
         return QuantizeResult(success=True, artifacts=[], error=None)
 
-    from fine_tuning.seaweed_uploader import upload_adapter_weights, upload_gguf_artifacts
+    from fine_tuning.azure_blob_uploader import upload_adapter_weights, upload_gguf_artifacts
 
     if quant_levels is None:
         env_lvl = os.getenv("FT_QUANT_LEVELS", "").strip()
@@ -296,8 +296,8 @@ def quantize_from_local_merged(
                 _log_fn(log_fn, f"[quantize] quantizing to levels: {quant_levels}\n")
                 _gguf_quantize(gguf_f16, gguf_dir, quant_levels, log_fn=log_fn)
 
-                # Step 3 — upload GGUF artifacts to SeaweedFS
-                _log_fn(log_fn, "[quantize] uploading GGUF artifacts to SeaweedFS\n")
+                # Step 3 — upload GGUF artifacts to Azure Blob
+                _log_fn(log_fn, "[quantize] uploading GGUF artifacts to Azure Blob\n")
                 artifacts = upload_gguf_artifacts(gguf_dir, domain, version_name, log_fn=log_fn)
                 if not artifacts:
                     raise RuntimeError("No GGUF files produced to upload")
@@ -305,7 +305,7 @@ def quantize_from_local_merged(
                 # No llama.cpp — upload merged HF weights instead
                 _log_fn(
                     log_fn,
-                    "[quantize] llama.cpp tools not found — uploading merged HF weights to SeaweedFS\n",
+                    "[quantize] llama.cpp tools not found — uploading merged HF weights to Azure Blob\n",
                 )
                 result = upload_adapter_weights(
                     merged_dir,
@@ -345,7 +345,7 @@ def quantize_from_local_merged(
 
 def run_quantization_pipeline(
     base_model: str,
-    adapter_seaweed_prefix: str,
+    adapter_prefix: str,
     domain: str,
     version_name: str,
     *,
@@ -356,13 +356,13 @@ def run_quantization_pipeline(
     """
     Full post-training quantization pipeline.
 
-    Downloads LoRA weights from SeaweedFS, merges them into the base model,
+    Downloads LoRA weights from Azure Blob, merges them into the base model,
     converts to GGUF, quantizes to each requested level, uploads GGUF files
-    back to SeaweedFS, and registers them in the adapter_registry table.
+    back to Azure Blob, and registers them in the adapter_registry table.
 
     Args:
         base_model: HuggingFace repo ID or local path for the base model.
-        adapter_seaweed_prefix: S3 prefix where LoRA adapter was uploaded
+        adapter_prefix: Azure Blob prefix where LoRA adapter was uploaded
             (e.g. "adapters/acord/v3").
         domain: Registry domain label (e.g. "acord", "broker").
         version_name: Version label used in S3 keys and registry
@@ -376,8 +376,8 @@ def run_quantization_pipeline(
         _log_fn(log_fn, "[quantize] FT_QUANT_SKIP=1 — pipeline skipped\n")
         return QuantizeResult(success=True, artifacts=[], error=None)
 
-    from fine_tuning.seaweed_uploader import (
-        download_from_seaweedfs,
+    from fine_tuning.azure_blob_uploader import (
+        download_adapter,
         upload_adapter_weights,
         upload_gguf_artifacts,
     )
@@ -404,14 +404,14 @@ def run_quantization_pipeline(
         gguf_dir.mkdir()
 
         try:
-            # Step 1 — download adapter from SeaweedFS
-            _log_fn(log_fn, f"[quantize] downloading adapter: {adapter_seaweed_prefix}\n")
-            downloaded = download_from_seaweedfs(
-                adapter_seaweed_prefix, adapter_local, log_fn=log_fn
+            # Step 1 — download adapter from Azure Blob
+            _log_fn(log_fn, f"[quantize] downloading adapter: {adapter_prefix}\n")
+            downloaded = download_adapter(
+                adapter_prefix, adapter_local, log_fn=log_fn
             )
             if not downloaded:
                 raise RuntimeError(
-                    f"No files found at SeaweedFS prefix: {adapter_seaweed_prefix}"
+                    f"No files found at Azure Blob prefix: {adapter_prefix}"
                 )
 
             # Step 2 — merge LoRA into base model
@@ -447,7 +447,7 @@ def run_quantization_pipeline(
                 return QuantizeResult(success=True, artifacts=[], error=None)
 
             # Step 5 — upload GGUF artifacts
-            _log_fn(log_fn, "[quantize] uploading GGUF artifacts to SeaweedFS\n")
+            _log_fn(log_fn, "[quantize] uploading GGUF artifacts to Azure Blob\n")
             artifacts = upload_gguf_artifacts(gguf_dir, domain, version_name, log_fn=log_fn)
             if not artifacts:
                 raise RuntimeError("No GGUF files were produced to upload")

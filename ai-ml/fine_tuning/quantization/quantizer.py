@@ -10,7 +10,7 @@ Install once on the pod:
 
 If the binaries are not found, quantization is skipped non-fatally and an
 empty dict is returned — the pipeline continues and only the HF model is
-uploaded to SeaweedFS.
+uploaded to Azure Blob.
 """
 from __future__ import annotations
 

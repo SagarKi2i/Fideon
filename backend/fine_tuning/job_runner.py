@@ -26,7 +26,7 @@ from app.core.config import SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL
 from fine_tuning.quality_gate import evaluate_acord_gate, gate_should_fail_job
 from fine_tuning.train import load_config
 from fine_tuning.dataset_store import store_dataset
-from fine_tuning.seaweed_uploader import upload_adapter_weights
+from fine_tuning.azure_blob_uploader import upload_adapter_weights
 from fine_tuning.quantize_pipeline import run_quantization_pipeline
 
 # Default to legacy ACORD training tables for backward compatibility.
@@ -846,17 +846,17 @@ def main() -> None:
                 logf.flush()
 
             # ---------------------------------------------------------------
-            # Upload fine-tuned adapter weights to SeaweedFS, then run the
+            # Upload fine-tuned adapter weights to Azure Blob, then run the
             # quantization pipeline (merge → GGUF convert → quantize → re-upload).
             # Both steps are non-fatal: failures are logged but do not roll back
             # the completed training job.
             # ---------------------------------------------------------------
-            _seaweed_prefix: str = ""
+            _adapter_prefix: str = ""
             try:
                 _upload_domain = "pod" if pod_mode else "acord"
                 _upload_version = version_name or f"run_{args.run_id[:8]}"
                 logf.write(
-                    f"[seaweed] uploading adapter weights: domain={_upload_domain} "
+                    f"[azure] uploading adapter weights: domain={_upload_domain} "
                     f"version={_upload_version}\n"
                 )
                 logf.flush()
@@ -866,28 +866,28 @@ def main() -> None:
                     _upload_version,
                     log_fn=logf.write,
                 )
-                _seaweed_prefix = _upload_result.prefix
+                _adapter_prefix = _upload_result.prefix
                 logf.write(
-                    f"[seaweed] upload complete: {len(_upload_result.files)} files, "
-                    f"{_upload_result.total_bytes:,} bytes, prefix={_seaweed_prefix}\n"
+                    f"[azure] upload complete: {len(_upload_result.files)} files, "
+                    f"{_upload_result.total_bytes:,} bytes, prefix={_adapter_prefix}\n"
                 )
                 logf.flush()
-            except Exception as _sw_exc:
-                logf.write(f"[seaweed] WARNING: adapter upload failed: {_sw_exc}\n")
+            except Exception as _az_exc:
+                logf.write(f"[azure] WARNING: adapter upload failed: {_az_exc}\n")
                 logf.flush()
 
-            if _seaweed_prefix:
+            if _adapter_prefix:
                 try:
                     _base_model_for_quant = str(resolved_cfg.get("base_model") or "")
                     _local_files_only = bool(resolved_cfg.get("local_files_only", False))
                     logf.write(
                         f"[quantize] starting quantization pipeline: "
-                        f"base_model={_base_model_for_quant} prefix={_seaweed_prefix}\n"
+                        f"base_model={_base_model_for_quant} prefix={_adapter_prefix}\n"
                     )
                     logf.flush()
                     _quant_result = run_quantization_pipeline(
                         _base_model_for_quant,
-                        _seaweed_prefix,
+                        _adapter_prefix,
                         _upload_domain,
                         _upload_version,
                         local_files_only=_local_files_only,
