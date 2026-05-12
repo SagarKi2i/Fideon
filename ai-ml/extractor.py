@@ -675,7 +675,7 @@ def _run_ollama_extraction(
     # richer text coverage without changing the trained prompt structure.
     extra_lines: List[str] = []
     if docling_result.get("kv_pairs"):
-        for k, v in list(docling_result["kv_pairs"].items())[:60]:
+        for k, v in docling_result["kv_pairs"].items():
             if k and v:
                 extra_lines.append(f"{k}: {v}")
     if extra_lines:
@@ -683,10 +683,6 @@ def _run_ollama_extraction(
 
     if not ocr_text:
         ocr_text = "(no OCR text available)"
-
-    # Trim to fit within the model's context window (8 192 tokens ≈ ~6 000 chars safe)
-    if len(ocr_text) > 6000:
-        ocr_text = ocr_text[:6000]
 
     prompt = f"ACORD Form {form_type}\n\nOCR TEXT:\n{ocr_text}"
 
@@ -722,8 +718,7 @@ def _run_qwen_extraction(
     if not images:
         raise ValueError("_run_qwen_extraction received empty images list — PDF may have no renderable pages")
 
-    # Send up to 4 pages so multi-page ACORD forms (125, 140, etc.) are fully covered
-    page_images = images[:4]
+    page_images = images
     if not surya_ocr_text or not surya_ocr_text.strip():
         surya_ocr_text = "(no OCR text available)"
 
@@ -731,18 +726,18 @@ def _run_qwen_extraction(
     context_parts: List[str] = []
     if surya_ocr_text.strip() and surya_ocr_text != "(no OCR text available)":
         context_parts.append(
-            f"=== Surya OCR text (line-by-line) ===\n{surya_ocr_text[:2500]}"
+            f"=== Surya OCR text (line-by-line) ===\n{surya_ocr_text}"
         )
     if docling_result.get("markdown", "").strip():
         context_parts.append(
-            f"=== Docling structured markdown (tables + layout) ===\n{docling_result['markdown'][:2500]}"
+            f"=== Docling structured markdown (tables + layout) ===\n{docling_result['markdown']}"
         )
     if docling_result.get("kv_pairs"):
-        kv_str = "\n".join(f"{k}: {v}" for k, v in list(docling_result["kv_pairs"].items())[:60])
+        kv_str = "\n".join(f"{k}: {v}" for k, v in docling_result["kv_pairs"].items())
         context_parts.append(f"=== Docling KV pairs ===\n{kv_str}")
     if docling_result.get("tables"):
-        tables_str = "\n\n".join(docling_result["tables"][:5])
-        context_parts.append(f"=== Docling extracted tables ===\n{tables_str[:1500]}")
+        tables_str = "\n\n".join(docling_result["tables"])
+        context_parts.append(f"=== Docling extracted tables ===\n{tables_str}")
 
     prompt = _PROMPT_TEMPLATE
     if context_parts:
