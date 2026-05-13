@@ -46,7 +46,10 @@ def _field_scores(
     if not exp_keys:
         return {"precision": 1.0, "recall": 1.0, "f1": 1.0}
 
-    true_positives = len(pred_keys & exp_keys)
+    true_positives = sum(
+        1 for k in (pred_keys & exp_keys)
+        if str(predicted.get(k, "")).strip().lower() == str(expected.get(k, "")).strip().lower()
+    )
     precision = true_positives / len(pred_keys) if pred_keys else 0.0
     recall    = true_positives / len(exp_keys)
     f1 = (

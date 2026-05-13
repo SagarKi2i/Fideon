@@ -18,7 +18,7 @@ paths:
 continuous_learning:
   enabled: true
   # Number of corrections before a new training cycle is triggered automatically.
-  retrain_threshold: 25
+  retrain_threshold: 100
   feedback_datasets_dir: "/workspace/fine_tuning/datasets/feedback_learning"
 
 # ── QLoRA ─────────────────────────────────────────────────────────────────────
@@ -46,8 +46,8 @@ lora:
 training:
   num_epochs: 3
   per_device_train_batch_size: 1
-  gradient_accumulation_steps: 4
-  learning_rate: 2.0e-5
+  gradient_accumulation_steps: 8
+  learning_rate: 1.0e-5
   weight_decay: 0.01
   max_grad_norm: 0.3
   max_seq_length: 4096

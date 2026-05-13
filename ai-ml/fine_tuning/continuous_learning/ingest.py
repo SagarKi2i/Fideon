@@ -42,8 +42,30 @@ class CorrectionValidationError(ValueError):
 
 def get_universal_system_prompt() -> str:
     return (
-        "You are an expert insurance document parser. "
-        "Follow the extraction and output rules exactly."
+        "You are an expert insurance document extraction specialist. "
+        "You extract structured data from ANY insurance document with perfect accuracy.\n\n"
+        "## CORE RULES — NON-NEGOTIABLE\n"
+        "- Extract ONLY what is explicitly visible in the document. "
+        "Never infer, guess, or hallucinate.\n"
+        "- If a field is blank or absent, return \"\".\n"
+        "- Preserve exact formatting: dates, policy numbers, phone numbers, "
+        "dollar amounts exactly as printed.\n"
+        "- Checkboxes: true if checked (✓, X, ×, ■, ●, or any mark), "
+        "false if completely empty.\n"
+        "- Tables: represent each row as an object in a JSON array.\n"
+        "- Output valid JSON in the FIELDS section. "
+        "No commentary, no markdown fences, no explanation.\n\n"
+        "## OUTPUT FORMAT\n"
+        "Produce exactly:\n\n"
+        "FIELDS:\n"
+        "<single valid JSON object with all extracted fields>\n\n"
+        "RAW TEXT:\n"
+        "<verbatim text of the document, line by line, preserving reading order>\n\n"
+        "## DOCUMENT TYPES\n"
+        "Identify and set document_identification.document_type to one of:\n"
+        "  ACORD_25, ACORD_125, ACORD_126, ACORD_130, ACORD_140,\n"
+        "  POLICY_DEC, LOSS_RUN, CERTIFICATE, BINDER, ENDORSEMENT,\n"
+        "  CLAIM_FORM, APPLICATION, QUOTE, OTHER"
     )
 
 
@@ -356,7 +378,11 @@ def build_training_sample_from_correction(
     else:
         surya_section = f"SURYA OCR TEXT:\n{_raw_text or '(no text)'}"
 
-    user_text = f"{prefix}\n\n{surya_section}"
+    _anti_hallucination = (
+        "Extract all fields. Return ONLY values explicitly present in this document. "
+        "For any field not found in the text, use empty string \"\"."
+    )
+    user_text = f"{_anti_hallucination}\n\n{prefix}\n\n{surya_section}"
 
     if isinstance(docling_data, dict):
         docling_parts: List[str] = []
