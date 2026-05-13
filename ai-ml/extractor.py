@@ -727,7 +727,7 @@ def _run_ollama_extraction(
     if not ocr_text:
         ocr_text = "(no OCR text available)"
 
-    prompt = f"ACORD Form {form_type}\n\nOCR TEXT:\n{ocr_text}"
+    prompt = f"ACORD Form {form_type}\n\nSURYA OCR TEXT:\n{ocr_text}"
 
     logger.info("[ollama] Sending extraction request — ocr_chars=%d", len(ocr_text))
 
