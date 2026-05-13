@@ -16,7 +16,7 @@ Required env vars (set on the pod):
   AZURE_BLOB_CONTAINER      — container name (default: fideon-models)
   SUPABASE_URL              — e.g. https://xxx.supabase.co
   SUPABASE_SERVICE_ROLE_KEY — service role key
-  FT_DOMAIN                 — domain tag written to adapter_registry (default: "acord")
+  FT_DOMAIN                 — domain tag written to adapter_registry (default: "insurance")
   FT_REGISTRY_CANARY_PCT    — % of devices that get the update (default: 100)
 """
 from __future__ import annotations
@@ -49,7 +49,7 @@ def _register_gguf_in_supabase(
     """
     supabase_url = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
     supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-    domain       = os.getenv("FT_DOMAIN", "acord").strip()
+    domain       = os.getenv("FT_DOMAIN", "insurance").strip()
     canary_pct   = int(os.getenv("FT_REGISTRY_CANARY_PCT", "100"))
     # adapter_version: "1.{N}.0" matches SLM v1.N naming, e.g. version=13 → "1.13.0"
     adapter_version = os.getenv("FT_ADAPTER_VERSION", f"1.{version}.0").strip()

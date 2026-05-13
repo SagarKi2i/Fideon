@@ -25,6 +25,21 @@ from app.routes.device import _resolve_device_from_bearer, _load_active_device_r
 log = structlog.get_logger("adapter_registry")
 router = APIRouter()
 
+
+def _domain_candidates(domain: str) -> list[str]:
+    """
+    Insurance desktop delivery used to publish under `acord`. Prefer the requested
+    domain first, but transparently fall back to the legacy alias so existing
+    artifacts remain downloadable.
+    """
+    normalized = (domain or "").strip().lower()
+    if normalized == "insurance":
+        return ["insurance", "acord"]
+    if normalized == "acord":
+        return ["acord", "insurance"]
+    return [normalized] if normalized else []
+
+
 def _build_download_url(blob_key: str, sig: bool = False) -> str:
     """Return an Azure Blob SAS URL for blob_key (valid for SAS token lifetime)."""
     object_key = f"{blob_key}.sig" if sig else blob_key
@@ -73,16 +88,21 @@ async def get_latest(
       domain — e.g. "broker"
     """
     device_id = await _verify_device(authorization)
-
-    q = "&".join([
-        "select=adapter_version,quant_level,sha256,size_bytes,min_electron_ver,canary_pct,rollback_safe",
-        f"domain=eq.{quote(domain, safe='')}",
-        "is_available=eq.true",
-        "blocked=eq.false",
-        "order=adapter_version.desc",
-        "limit=10",
-    ])
-    rows = await postgrest_get("adapter_registry", q)
+    rows = []
+    resolved_domain = domain
+    for candidate_domain in _domain_candidates(domain):
+        q = "&".join([
+            "select=adapter_version,quant_level,sha256,size_bytes,min_electron_ver,canary_pct,rollback_safe",
+            f"domain=eq.{quote(candidate_domain, safe='')}",
+            "is_available=eq.true",
+            "blocked=eq.false",
+            "order=adapter_version.desc",
+            "limit=10",
+        ])
+        rows = await postgrest_get("adapter_registry", q)
+        if rows:
+            resolved_domain = candidate_domain
+            break
 
     if not rows:
         return {"available": False}
@@ -94,6 +114,7 @@ async def get_latest(
         log.info(
             "adapter_registry.canary_excluded",
             domain=domain,
+            resolved_domain=resolved_domain,
             version=latest_version,
             device_id=device_id,
             canary_pct=canary_pct,
@@ -113,6 +134,7 @@ async def get_latest(
     log.info(
         "adapter_registry.update_available",
         domain=domain,
+        resolved_domain=resolved_domain,
         version=latest_version,
         device_id=device_id,
     )
@@ -145,17 +167,22 @@ async def get_download_url(
       sig     — if true, returns URL for the .sig file instead of the GGUF
     """
     await _verify_device(authorization)
-
-    q = "&".join([
-        "select=blob_key,sha256,size_bytes",
-        f"domain=eq.{quote(domain, safe='')}",
-        f"adapter_version=eq.{quote(version, safe='')}",
-        f"quant_level=eq.{quote(quant, safe='')}",
-        "is_available=eq.true",
-        "blocked=eq.false",
-        "limit=1",
-    ])
-    rows = await postgrest_get("adapter_registry", q)
+    rows = []
+    resolved_domain = domain
+    for candidate_domain in _domain_candidates(domain):
+        q = "&".join([
+            "select=blob_key,sha256,size_bytes",
+            f"domain=eq.{quote(candidate_domain, safe='')}",
+            f"adapter_version=eq.{quote(version, safe='')}",
+            f"quant_level=eq.{quote(quant, safe='')}",
+            "is_available=eq.true",
+            "blocked=eq.false",
+            "limit=1",
+        ])
+        rows = await postgrest_get("adapter_registry", q)
+        if rows:
+            resolved_domain = candidate_domain
+            break
 
     if not rows:
         raise HTTPException(
@@ -173,6 +200,7 @@ async def get_download_url(
     log.info(
         "adapter_registry.download_url_issued",
         domain=domain,
+        resolved_domain=resolved_domain,
         version=version,
         quant=quant,
         sig=sig,
