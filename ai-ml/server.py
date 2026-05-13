@@ -67,6 +67,11 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 _uploads: Dict[str, Dict[str, Any]] = {}
 _ocr_jobs: Dict[str, Dict[str, Any]] = {}
 
+# Serialises all reads/writes to TRAINING_SAMPLES_FILE to prevent a race
+# between the append in POST /training-samples and the full overwrite in
+# POST /finetune/start.
+_training_samples_lock = threading.Lock()
+
 # Thread pool for background OCR (GPU work runs in a thread, not async)
 _executor = ThreadPoolExecutor(max_workers=OCR_WORKERS)
 
@@ -739,6 +744,13 @@ async def store_training_sample(body: Dict[str, Any] = Body(...)) -> Dict[str, A
     raw_text        = body.get("raw_text", "")
     run_id          = body.get("run_id") or ""
 
+    # For digital PDFs the client may omit raw_text — pull full_text from the
+    # extraction job result so the training sample always has usable text.
+    if not raw_text and run_id:
+        with _extract_jobs_lock:
+            _er = _extract_jobs.get(run_id, {}).get("result", {})
+        raw_text = _er.get("full_text") or ""
+
     # ── Input validation ──────────────────────────────────────────────────────
     if not raw_text or len(raw_text.strip()) < 50:
         raise HTTPException(
@@ -820,8 +832,9 @@ async def store_training_sample(body: Dict[str, Any] = Body(...)) -> Dict[str, A
         "status":           "pending",
     }
 
-    with open(TRAINING_SAMPLES_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(sample) + "\n")
+    with _training_samples_lock:
+        with open(TRAINING_SAMPLES_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(sample) + "\n")
 
     print(
         f"[training-samples] Saved sample {sample['sample_id']}"
@@ -986,18 +999,19 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
 
     # ── Mark successfully ingested samples as "used" — skipped ones stay pending ──
     used_ids = ingested_ids
-    all_samples = _load_training_samples()
     used_at = datetime.now(timezone.utc).isoformat()
-    updated_samples = []
-    for s in all_samples:
-        if s.get("sample_id") in used_ids:
-            s["status"] = "used"
-            s["used_at"] = used_at
-        updated_samples.append(s)
-    TRAINING_SAMPLES_FILE.write_text(
-        "\n".join(json.dumps(s) for s in updated_samples) + "\n",
-        encoding="utf-8",
-    )
+    with _training_samples_lock:
+        all_samples = _load_training_samples()
+        updated_samples = []
+        for s in all_samples:
+            if s.get("sample_id") in used_ids:
+                s["status"] = "used"
+                s["used_at"] = used_at
+            updated_samples.append(s)
+        TRAINING_SAMPLES_FILE.write_text(
+            "\n".join(json.dumps(s) for s in updated_samples) + "\n",
+            encoding="utf-8",
+        )
 
     # Collect upload_ids + original_fields + corrected_fields + form_type per PDF
     _seen_uploads: dict = {}

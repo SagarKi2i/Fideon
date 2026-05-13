@@ -797,8 +797,14 @@ def _run_qwen_extraction(
     ]
     content.append({"type": "text", "text": prompt})
 
+    # Use the same system prompt the model was trained with (FIELDS:/RAW TEXT: format).
+    # _OLLAMA_SYSTEM_PROMPT says "Output ONLY valid JSON" which contradicts the
+    # FIELDS:/RAW TEXT:/MARKDOWN: format expected here — training/inference mismatch.
+    from fine_tuning.continuous_learning.ingest import get_universal_system_prompt as _get_sys_prompt
+    _qwen_sys_prompt = _get_sys_prompt()
+
     messages = [
-        {"role": "system", "content": _OLLAMA_SYSTEM_PROMPT},
+        {"role": "system", "content": _qwen_sys_prompt},
         {"role": "user", "content": content},
     ]
 
@@ -821,7 +827,7 @@ def _run_qwen_extraction(
         # System prompt is required for Qwen2-VL instruction-following mode;
         # without it the model generates narrative summaries instead of structured output.
         text_input = (
-            f"<|im_start|>system\n{_OLLAMA_SYSTEM_PROMPT}<|im_end|>\n"
+            f"<|im_start|>system\n{_qwen_sys_prompt}<|im_end|>\n"
             f"<|im_start|>user\n{vision_tokens}{prompt}<|im_end|>\n<|im_start|>assistant\n"
         )
         logger.info("[qwen] Manual text_input length: %d chars", len(text_input))
@@ -885,6 +891,7 @@ def run_full_extraction(
     import fitz as _fitz
     _doc = _fitz.open(pdf_path)
     _embedded = "".join(p.get_text("text") for p in _doc).strip()
+    _digital_page_count = len(_doc)
     _doc.close()
     pdf_type = "digital" if len(_embedded) > 100 else "scanned"
 
@@ -897,6 +904,8 @@ def run_full_extraction(
             "extracted_json": fields,
             "full_text": raw_text,
             "markdown": "",
+            "page_count": _digital_page_count,
+            "surya_page_texts": [],
             "source": "runpod_native",
         }
 
