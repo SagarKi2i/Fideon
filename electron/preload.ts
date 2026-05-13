@@ -67,6 +67,12 @@ contextBridge.exposeInMainWorld("electron", {
       ipcRenderer.invoke("webhooks:testEvent", accessToken, eventType, payload),
   },
 
+  service: {
+    getStatus: () => ipcRenderer.invoke("fideon:service-status"),
+    install: () => ipcRenderer.invoke("fideon:install-service"),
+    uninstall: () => ipcRenderer.invoke("fideon:uninstall-service"),
+  },
+
   model: {
     checkUpdate: (domain: string) =>
       ipcRenderer.invoke("model:checkUpdate", domain),

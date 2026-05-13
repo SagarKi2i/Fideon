@@ -3,7 +3,7 @@
     "target": "ES2022",
     "module": "commonjs",
     "lib": ["ES2022"],
-    "outDir": "dist",
+    "outDir": "../dist/service",
     "rootDir": ".",
     "strict": true,
     "esModuleInterop": true,
@@ -13,6 +13,6 @@
     "moduleResolution": "node",
     "types": ["node"]
   },
-  "include": ["main.ts", "preload.ts", "ollama-backend.ts", "*.ts", "installer/**/*.ts"],
-  "exclude": ["node_modules", "dist", "service"]
+  "include": ["./**/*.ts"],
+  "exclude": ["node_modules"]
 }

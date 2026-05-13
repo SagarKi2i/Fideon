@@ -12,6 +12,7 @@ import {
   deleteOllamaModel,
   checkNetworkStatus,
   getOllamaModelName,
+  getInstalledQuantizedModelName,
   type OllamaModel,
   type PullProgress,
 } from "@/lib/ollama";
@@ -192,8 +193,16 @@ export default function LocalModelManager({ activatedModels }: LocalModelManager
       <CardContent className="space-y-4">
         <div className="space-y-3">
           {activatedModels.map((model: any) => {
-            const ollamaModelName = getOllamaModelName(model.model_id);
-            const installed = isModelInstalled(model.model_id);
+            const isAcordInsuranceModel =
+              model.model_id === "acord_form_understanding" ||
+              String(model.model_name || "").toLowerCase().includes("acord");
+            const installedInsuranceQuantizedModel = isAcordInsuranceModel
+              ? getInstalledQuantizedModelName(localModels, "insurance")
+              : null;
+            const ollamaModelName = installedInsuranceQuantizedModel ?? getOllamaModelName(model.model_id);
+            const installed = isAcordInsuranceModel
+              ? Boolean(installedInsuranceQuantizedModel)
+              : isModelInstalled(model.model_id);
             const isDownloading = downloading[model.model_id];
             const localModel = localModels.find((m: any) => 
               m.name.startsWith(ollamaModelName.split(':')[0])
@@ -218,6 +227,11 @@ export default function LocalModelManager({ activatedModels }: LocalModelManager
                     {ollamaModelName}
                     {localModel && ` • ${formatBytes(localModel.size)}`}
                   </p>
+                  {isAcordInsuranceModel && (
+                    <p className="text-xs text-muted-foreground">
+                      Managed via the insurance quantized desktop model from <span className="font-medium">My Models</span>.
+                    </p>
+                  )}
                   {isDownloading && (
                     <div className="space-y-1 mt-2">
                       <Progress
@@ -237,7 +251,7 @@ export default function LocalModelManager({ activatedModels }: LocalModelManager
                 </div>
 
                 <div className="flex gap-2">
-                  {!installed && !isDownloading && (
+                  {!installed && !isDownloading && !isAcordInsuranceModel && (
                     <Button
                       size="sm"
                       onClick={() => handleDownloadModel(model.model_id, model.model_name)}
@@ -259,6 +273,11 @@ export default function LocalModelManager({ activatedModels }: LocalModelManager
                       <Trash2 className="h-4 w-4" />
                       Delete
                     </Button>
+                  )}
+                  {!installed && !isDownloading && isAcordInsuranceModel && (
+                    <Badge variant="outline" className="text-xs">
+                      Download from My Models
+                    </Badge>
                   )}
                 </div>
               </div>

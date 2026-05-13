@@ -26,7 +26,9 @@ import {
   checkNetworkStatus,
   generateWithOllama,
   getOllamaModelName,
+  getInstalledQuantizedModelName,
   listOllamaModels,
+  type OllamaModel,
 } from "@/lib/ollama";
 import { extractAcord, compareAcordPolicies } from "@/lib/acordWorkflowApi";
 import { apiUrl } from "@/lib/apiBaseUrl";
@@ -51,6 +53,8 @@ export default function Playground() {
   const [useLocalModel, setUseLocalModel] = useState(false);
   const [isOnline, setIsOnline] = useState(true);
   const [ollamaReady, setOllamaReady] = useState(false);
+  const [ollamaModels, setOllamaModels] = useState<OllamaModel[]>([]);
+  const selectedModelData = models.find((m: any) => m.model_id === selectedModel);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -70,6 +74,16 @@ export default function Playground() {
   }, []);
 
   useEffect(() => {
+    const isAcordModel =
+      selectedModel === "acord_form_understanding" ||
+      (selectedModelData?.domain === "insurance" &&
+        selectedModelData?.model_name?.toLowerCase().includes("acord"));
+    if (isElectronApp && isAcordModel) {
+      setUseLocalModel(true);
+    }
+  }, [isElectronApp, selectedModel, selectedModelData?.domain, selectedModelData?.model_name]);
+
+  useEffect(() => {
     if (models.length === 0) return;
     const modelFromUrl = new URLSearchParams(location.search).get("model");
     if (!modelFromUrl) return;
@@ -86,6 +100,12 @@ export default function Playground() {
     if (electron) {
       const status = await checkOllamaStatus();
       setOllamaReady(status.running);
+      if (status.running) {
+        const installedModels = await listOllamaModels();
+        setOllamaModels(installedModels);
+      } else {
+        setOllamaModels([]);
+      }
       
       // Auto-enable local models if offline
       const online = await checkNetworkStatus();
@@ -369,8 +389,16 @@ export default function Playground() {
     }
   };
 
-  const selectedModelData = models.find((m: any) => m.model_id === selectedModel);
   const modelName = selectedModelData?.model_name || "";
+  const isAcordModel =
+    selectedModel === "acord_form_understanding" ||
+    (selectedModelData?.domain === "insurance" &&
+      selectedModelData?.model_name?.toLowerCase().includes("acord"));
+  const installedInsuranceQuantizedModel = getInstalledQuantizedModelName(ollamaModels, "insurance");
+  const acordDesktopDisabledReason =
+    isElectronApp && isAcordModel && !installedInsuranceQuantizedModel
+      ? "Download the insurance quantized model from My Models before using ACORD Form Understanding on desktop."
+      : undefined;
 
   const renderModelUI = () => {
     if (!selectedModel) return null;
@@ -378,9 +406,19 @@ export default function Playground() {
     // Pods sometimes get different model_id values, but the pod UI should still be ACORD.
     if (
       selectedModel === "acord_form_understanding" ||
-      selectedModelData?.model_name?.toLowerCase().includes("acord")
+      (selectedModelData?.domain === "insurance" &&
+        selectedModelData?.model_name?.toLowerCase().includes("acord"))
     ) {
-      return <ACORDParserUI modelId={selectedModel} onRun={handleRun} isRunning={isRunning} result={result} />;
+      return (
+        <ACORDParserUI
+          modelId={selectedModel}
+          onRun={handleRun}
+          isRunning={isRunning}
+          result={result}
+          disabledReason={acordDesktopDisabledReason}
+          localModelName={installedInsuranceQuantizedModel}
+        />
+      );
     }
 
     switch (selectedModel) {
@@ -529,8 +567,14 @@ export default function Playground() {
                     id="local-toggle"
                     checked={useLocalModel}
                     onCheckedChange={setUseLocalModel}
+                    disabled={isAcordModel}
                   />
                 </div>
+                {isAcordModel && (
+                  <p className="text-xs text-muted-foreground">
+                    ACORD Form Understanding on desktop is reserved for the insurance quantized model.
+                  </p>
+                )}
                 {!isOnline && (
                   <p className="text-xs text-muted-foreground">
                     You're offline. Using local models automatically.

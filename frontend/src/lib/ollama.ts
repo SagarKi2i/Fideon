@@ -128,6 +128,24 @@ export function getOllamaModelName(modelId: string): string {
   return MODEL_MAPPINGS[modelId] || 'llama3.2:latest';
 }
 
+// Quantized Electron installs use the pattern `${domain}-${version}-${quant}`, e.g.
+// `insurance-1.7.0-q5_k_m`. Prefer the most recently installed matching model.
+export function getInstalledQuantizedModelName(
+  models: OllamaModel[],
+  domain: string,
+): string | null {
+  const prefix = `${domain.toLowerCase()}-`;
+  const matches = models.filter((m: any) => String(m.name || "").toLowerCase().startsWith(prefix));
+  if (matches.length === 0) return null;
+  return [...matches]
+    .sort((a: any, b: any) => {
+      const aTs = new Date(a.modified_at || 0).getTime();
+      const bTs = new Date(b.modified_at || 0).getTime();
+      return bTs - aTs;
+    })[0]
+    .name;
+}
+
 // Type declarations for window.electron
 declare global {
   interface Window {

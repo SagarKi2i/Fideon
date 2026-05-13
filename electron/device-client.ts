@@ -1,5 +1,9 @@
 import os from "node:os";
+import net from "node:net";
 import { machineIdSync } from "node-machine-id";
+import { CREDS_FILE, PROG_DATA_DIR, PIPE_PATH, readCredentials, writeCredentials } from "./service/service-client";
+
+export { CREDS_FILE, PROG_DATA_DIR, PIPE_PATH, readCredentials, writeCredentials };
 
 type StoredDeviceAuth = {
   device_id?: string;
@@ -37,6 +41,73 @@ async function getStore(): Promise<any> {
   return storePromise;
 }
 
+/**
+ * Returns true when the FideonOS Windows service is running and responding.
+ * Tries to open the named pipe and send a status request with a 1-second timeout.
+ * On non-Windows platforms always returns false.
+ */
+export async function isServiceRunning(): Promise<boolean> {
+  if (process.platform !== "win32") return false;
+  return new Promise((resolve) => {
+    const socket = net.createConnection(PIPE_PATH);
+    let resolved = false;
+    const timer = setTimeout(() => {
+      if (!resolved) { resolved = true; socket.destroy(); resolve(false); }
+    }, 1000);
+
+    socket.once("connect", () => {
+      socket.write(JSON.stringify({ type: "status" }) + "\n");
+    });
+
+    socket.on("data", () => {
+      if (!resolved) { resolved = true; clearTimeout(timer); socket.destroy(); resolve(true); }
+    });
+
+    socket.on("error", () => {
+      if (!resolved) { resolved = true; clearTimeout(timer); resolve(false); }
+    });
+  });
+}
+
+/**
+ * Sends a reauth notification to the running service so it reloads credentials
+ * from C:\ProgramData\FideonOS\device-auth.json without restarting.
+ * No-op if the service pipe is not available.
+ */
+export async function notifyServiceReauth(): Promise<void> {
+  if (process.platform !== "win32") return;
+  return new Promise((resolve) => {
+    const socket = net.createConnection(PIPE_PATH);
+    const timer = setTimeout(() => { socket.destroy(); resolve(); }, 2000);
+    socket.once("connect", () => {
+      socket.write(JSON.stringify({ type: "reauth" }) + "\n");
+    });
+    socket.on("data", () => { clearTimeout(timer); socket.destroy(); resolve(); });
+    socket.on("error", () => { clearTimeout(timer); resolve(); });
+  });
+}
+
+/**
+ * Writes device credentials to C:\ProgramData\FideonOS\device-auth.json so
+ * both the Windows service (SYSTEM) and the Electron UI share the same store.
+ * Falls back silently on permission errors (e.g. non-admin dev runs).
+ */
+export function persistCredentialsToProgramData(device_id: string, device_jwt: string): void {
+  try {
+    writeCredentials({ device_id, device_jwt, registered_at: new Date().toISOString() });
+  } catch {
+    // Non-fatal: service will fall back to waiting for valid creds
+  }
+}
+
+/**
+ * Reads device_id from ProgramData first, then falls back to electron-store.
+ */
+export async function getDeviceIdFromProgramData(): Promise<string | undefined> {
+  const creds = readCredentials();
+  return creds?.device_id ?? undefined;
+}
+
 function apiBaseUrl(): string {
   // In dev, backend runs at 8000 (frontend electron:dev starts it).
   const raw = process.env.ELECTRON_API_BASE_URL || "http://localhost:8000";
@@ -70,6 +141,8 @@ export async function clearStoredDeviceJwtAsync(): Promise<void> {
   store.delete?.("device_jwt");
   store.delete?.("device_id");
   store.delete?.("registered_at");
+  // Also clear the machine-scoped ProgramData store so the service stops heartbeating
+  try { const { deleteCredentials } = await import("./service/service-client"); deleteCredentials(); } catch { /* ignore */ }
 }
 
 export async function getStoredDeviceIdAsync(): Promise<string | undefined> {
@@ -107,6 +180,8 @@ export async function ensureDeviceAuthAsync(opts?: { log?: (msg: string) => void
   store.set?.("device_id", reg.device_id);
   store.set?.("device_jwt", reg.device_token);
   store.set?.("registered_at", new Date().toISOString());
+  // Mirror credentials to ProgramData so the Windows service can pick them up
+  persistCredentialsToProgramData(reg.device_id, reg.device_token);
   return { device_id: reg.device_id, device_jwt: reg.device_token };
 }
 
