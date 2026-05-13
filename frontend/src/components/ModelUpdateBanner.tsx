@@ -27,7 +27,7 @@ interface UpdateInfo {
   artifacts: Artifact[];
 }
 
-type Phase = "idle" | "checking" | "available" | "downloading" | "done" | "error";
+type Phase = "idle" | "checking" | "available" | "unavailable" | "downloading" | "done" | "error";
 
 interface DownloadProgress {
   phase: "downloading" | "verifying" | "installing";
@@ -59,17 +59,30 @@ export default function ModelUpdateBanner({ domain }: { domain: string }) {
   const [error, setError] = useState<string | null>(null);
   const [modelName, setModelName] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
   const listenerAttached = useRef(false);
 
   // Check for update on mount
   useEffect(() => {
     const modelApi = window.electron?.model;
+    const deviceApi = window.electron?.device;
     if (!modelApi) return;
 
     setPhase("checking");
-    modelApi
-      .checkUpdate(domain)
-      .then((result) => {
+    setError(null);
+
+    void (async () => {
+      try {
+        if (deviceApi?.getAuth) {
+          const auth = await deviceApi.getAuth();
+          if (!auth?.success || !auth.device_jwt) {
+            setError("Connect this desktop in Device Setup first to download the insurance quantized model.");
+            setPhase("unavailable");
+            return;
+          }
+        }
+
+        const result = await modelApi.checkUpdate(domain);
         if (result.success && result.available && result.version && result.artifacts) {
           setUpdate({
             version: result.version,
@@ -78,12 +91,29 @@ export default function ModelUpdateBanner({ domain }: { domain: string }) {
             artifacts: result.artifacts,
           });
           setPhase("available");
-        } else {
-          setPhase("idle");
+          return;
         }
-      })
-      .catch(() => setPhase("idle"));
-  }, [domain]);
+
+        if (!result.success) {
+          const raw = String(result.error ?? "Unable to check for a downloadable model.").replace(/^Error:\s*/i, "");
+          if (/device not registered|device jwt required|unauthorized|register/i.test(raw.toLowerCase())) {
+            setError("Connect this desktop in Device Setup first to download the insurance quantized model.");
+            setPhase("unavailable");
+            return;
+          }
+          setError(raw);
+          setPhase("error");
+          return;
+        }
+
+        setError("No downloadable insurance desktop model is available for this device yet.");
+        setPhase("unavailable");
+      } catch (err: any) {
+        setError(String(err?.message ?? err ?? "Unable to check for a downloadable model."));
+        setPhase("error");
+      }
+    })();
+  }, [domain, refreshKey]);
 
   const handleDownload = async () => {
     const modelApi = window.electron?.model;
@@ -124,8 +154,7 @@ export default function ModelUpdateBanner({ domain }: { domain: string }) {
     }
   };
 
-  // Nothing to show
-  if (phase === "idle" || phase === "checking" || dismissed) return null;
+  if (phase === "idle" || dismissed) return null;
 
   const artifact = update ? pickArtifact(update.artifacts) : null;
 
@@ -206,15 +235,40 @@ export default function ModelUpdateBanner({ domain }: { domain: string }) {
               </p>
             )}
 
+            {phase === "checking" && (
+              <>
+                <p className="font-medium text-sm text-foreground">
+                  Checking for downloadable insurance desktop model…
+                </p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Verifying device connection and looking for the latest quantized artifact.
+                </p>
+              </>
+            )}
+
+            {phase === "unavailable" && (
+              <>
+                <p className="font-medium text-sm text-foreground">
+                  Insurance desktop model not ready
+                </p>
+                <p className="text-xs text-muted-foreground mt-0.5 break-words">{error}</p>
+              </>
+            )}
+
             {phase === "error" && (
               <>
-                <p className="font-medium text-sm text-destructive">Download failed</p>
+                <p className="font-medium text-sm text-destructive">Model update check failed</p>
                 <p className="text-xs text-muted-foreground mt-0.5 break-all">{error}</p>
                 <Button
                   size="sm"
                   variant="outline"
                   className="mt-2"
-                  onClick={() => { setPhase("available"); setError(null); }}
+                  onClick={() => {
+                    setDismissed(false);
+                    setError(null);
+                    setUpdate(null);
+                    setRefreshKey((prev) => prev + 1);
+                  }}
                 >
                   Retry
                 </Button>

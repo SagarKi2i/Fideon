@@ -1151,6 +1151,28 @@ async def confirm_device_pairing(request: Request):
 
     await _sync_user_models_to_device(str(pairing["user_id"]), str(linked_device["id"]))
 
+    # Set tenant_id so QR-paired devices are visible in the admin device list
+    profile_rows = await postgrest_get(
+        "app_users",
+        f"select=tenant_id&user_id=eq.{quote(str(pairing['user_id']), safe='')}&limit=1",
+    )
+    user_tenant_id = profile_rows[0].get("tenant_id") if profile_rows else None
+    if user_tenant_id:
+        await postgrest_patch(
+            "devices",
+            f"id=eq.{quote(str(linked_device['id']), safe='')}",
+            {"tenant_id": user_tenant_id, "registered_by": pairing["user_id"]},
+        )
+        orphan_rows = await postgrest_get(
+            "devices",
+            f"select=id&registered_by=eq.{quote(str(pairing['user_id']), safe='')}&status=eq.never_checked_in&id=neq.{quote(str(linked_device['id']), safe='')}",
+        )
+        for orphan in orphan_rows:
+            try:
+                await postgrest_delete("devices", f"id=eq.{quote(str(orphan['id']), safe='')}")
+            except Exception:
+                pass
+
     await postgrest_patch(
         "device_pairings",
         f"id=eq.{quote(pairing_id, safe='')}",

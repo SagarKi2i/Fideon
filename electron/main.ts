@@ -239,22 +239,22 @@ if (isProd) {
 // electron-builder's custom-installer.nsh launches the exe with --install-service
 // or --uninstall-service so the service is registered/removed with admin privileges
 // during install/uninstall without needing a separate helper executable.
-if (process.argv.includes("--install-service")) {
-  (async () => {
-    const result = await installService({
-      resourcesPath: process.resourcesPath,
+// We quit early here so the main app window never opens during these headless runs.
+const _serviceCliFlag = process.argv.includes("--install-service")
+  ? "install"
+  : process.argv.includes("--uninstall-service")
+    ? "uninstall"
+    : null;
+
+if (_serviceCliFlag) {
+  app.whenReady().then(async () => {
+    const fn = _serviceCliFlag === "install" ? installService : uninstallService;
+    const result = await fn({
+      resourcesPath: isProd ? process.resourcesPath : undefined,
       appPath: app.getAppPath(),
     });
-    process.exit(result.success ? 0 : 1);
-  })();
-} else if (process.argv.includes("--uninstall-service")) {
-  (async () => {
-    const result = await uninstallService({
-      resourcesPath: process.resourcesPath,
-      appPath: app.getAppPath(),
-    });
-    process.exit(result.success ? 0 : 1);
-  })();
+    app.exit(result.success ? 0 : 1);
+  });
 }
 
 // Ensure a single running instance; focus existing window on second launch.
@@ -462,7 +462,7 @@ async function createWindow() {
   createTray();
 }
 
-app.whenReady().then(async () => {
+if (!_serviceCliFlag) app.whenReady().then(async () => {
   registerRendererApiRewrite(session.defaultSession);
 
   if (isProd && nextRsc) {
@@ -600,12 +600,7 @@ ipcMain.handle("device:ensureAuth", async () => {
     const auth = await ensureDeviceAuthAsync({ log });
     log(`[ipc] device:ensureAuth success device_id=${String(auth.device_id || "")}`);
 
-    // Use startHeartbeatLoop directly with the already-validated JWT from ensureDeviceAuthAsync.
-    // Calling ensureDeviceAuthAndStartHeartbeat here would invoke ensureDeviceAuthAsync a
-    // second time, potentially re-registering and producing a different JWT than what we
-    // return to the renderer — causing the heartbeat loop and renderer to be out of sync.
     // Tell the service to reload credentials from ProgramData (if it's running).
-    // This is non-blocking — fire and forget.
     void notifyServiceReauth().catch(() => {});
 
     // Only start our own heartbeat loop if the service isn't handling it.
@@ -786,7 +781,7 @@ ipcMain.handle("fideon:service-status", async () => {
 ipcMain.handle("fideon:install-service", async () => {
   try {
     const result = await installService({
-      resourcesPath: process.resourcesPath,
+      resourcesPath: isProd ? process.resourcesPath : undefined,
       appPath: app.getAppPath(),
     });
     return result;
@@ -798,7 +793,7 @@ ipcMain.handle("fideon:install-service", async () => {
 ipcMain.handle("fideon:uninstall-service", async () => {
   try {
     const result = await uninstallService({
-      resourcesPath: process.resourcesPath,
+      resourcesPath: isProd ? process.resourcesPath : undefined,
       appPath: app.getAppPath(),
     });
     return result;

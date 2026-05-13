@@ -33,6 +33,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { IdleSessionWatcher } from "@/components/IdleSessionWatcher";
 import { DeviceStatusIndicator } from "@/components/DeviceStatusIndicator";
 import { getStoredDeviceJwt, clearStoredDeviceJwt } from "@/lib/deviceApi";
+import { linkDeviceById } from "@/lib/deviceLinkApi";
 
 interface LayoutProps {
   children: ReactNode;
@@ -106,6 +107,22 @@ export function Layout({ children }: LayoutProps) {
 
     void loadHeaderProfile();
     return () => controller.abort();
+  }, [user]);
+
+  useEffect(() => {
+    if (!user || typeof window === "undefined" || !(window as any).electron?.device?.getAuth) return;
+    void (async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session?.access_token) return;
+        const auth = await (window as any).electron.device.getAuth();
+        if (auth?.success && auth.device_id) {
+          await linkDeviceById(auth.device_id);
+        }
+      } catch {
+        // silent — non-fatal, DeviceSetup is the authoritative place for this
+      }
+    })();
   }, [user]);
 
   useEffect(() => {

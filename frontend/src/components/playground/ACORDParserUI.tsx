@@ -27,6 +27,8 @@ interface ACORDParserUIProps {
   onRun: (data: any) => void;
   isRunning: boolean;
   result: string;
+  disabledReason?: string;
+  localModelName?: string | null;
 }
 
 function stripJsonCodeFence(value: string): string {
@@ -332,7 +334,14 @@ function computeConfidenceLabel(extracted: any): string | null {
   return `${level} ${score}%`;
 }
 
-export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunning, result }: ACORDParserUIProps) {
+export default function ACORDParserUI({
+  modelId: _modelId,
+  onRun: _onRun,
+  isRunning,
+  result,
+  disabledReason,
+  localModelName,
+}: ACORDParserUIProps) {
   const navigate = useNavigate();
   const [file, setFile] = useState<File | null>(null);
   const [formType, setFormType] = useState<string>("25");
@@ -627,6 +636,24 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
 
           {/* ── Process PDF (auto-detects digital vs scanned) ──────────── */}
           <div className="border-t border-border/50 pt-4 space-y-3">
+            {localModelName ? (
+              <div className="flex items-center gap-2 p-2.5 rounded-md border bg-muted/20">
+                <CheckCircle2 className="h-4 w-4 text-green-500 shrink-0" />
+                <div className="text-xs">
+                  <span className="font-semibold text-foreground">Desktop model ready</span>
+                  <p className="text-muted-foreground leading-tight">
+                    Insurance quantized model detected: <code>{localModelName}</code>
+                  </p>
+                </div>
+              </div>
+            ) : null}
+
+            {disabledReason ? (
+              <div className="flex items-center gap-2 p-2.5 rounded-md border border-amber-500/30 bg-amber-500/10">
+                <AlertCircle className="h-4 w-4 text-amber-500 shrink-0" />
+                <p className="text-xs text-amber-100">{disabledReason}</p>
+              </div>
+            ) : null}
 
             {/* PDF type badge — shown once type is detected */}
             {detectedPdfType && (
@@ -683,7 +710,12 @@ export default function ACORDParserUI({ modelId: _modelId, onRun: _onRun, isRunn
             {/* Single action button */}
             <Button
               onClick={handleProcess}
-              disabled={!file || processingPhase === "processing" || processingPhase === "extracting_scanned"}
+              disabled={
+                !file ||
+                Boolean(disabledReason) ||
+                processingPhase === "processing" ||
+                processingPhase === "extracting_scanned"
+              }
               className="w-full bg-gradient-to-r from-violet-600 to-indigo-600 hover:opacity-90 text-white"
             >
               {processingPhase === "processing" ? (
