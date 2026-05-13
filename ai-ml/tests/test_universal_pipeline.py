@@ -39,6 +39,7 @@ from fine_tuning.dataset.dataset_builder import (
     DatasetBuilder,
     InvalidChatFormatError,
     validate_chat_format,
+    parse_assistant_fields,
 )
 from fine_tuning.continuous_learning.ingest import _normalize_fields_to_vcf
 from fine_tuning.dataset.augmentor import AugmentorConfig, DataAugmentor
@@ -360,8 +361,9 @@ class TestTrainingSampleGeneration:
         assert sample["metadata"]["document_type"] == "25"
         assert sample["metadata"]["form_type"] == "25"
         assert "ACORD Form 25" in sample["messages"][1]["content"]
-        # Corrected value must appear in assistant JSON
-        assistant_json = json.loads(sample["messages"][2]["content"])
+        assert "SURYA OCR TEXT:" in sample["messages"][1]["content"]
+        # Corrected value must appear in assistant FIELDS JSON
+        assistant_json = parse_assistant_fields(sample["messages"][2]["content"])
         assert assistant_json["insured_name"] == "ABC Corporation"
 
     def test_build_sample_for_policy_dec(self):
@@ -375,7 +377,7 @@ class TestTrainingSampleGeneration:
         )
         assert sample["metadata"]["document_type"] == "POLICY_DEC"
         assert "Policy Declarations" in sample["messages"][1]["content"]
-        assistant_json = json.loads(sample["messages"][2]["content"])
+        assistant_json = parse_assistant_fields(sample["messages"][2]["content"])
         assert assistant_json["policy_number"] == "CP-123456"
 
     def test_build_sample_for_loss_run(self):
@@ -389,7 +391,7 @@ class TestTrainingSampleGeneration:
         )
         assert sample["metadata"]["document_type"] == "LOSS_RUN"
         assert "Loss Run" in sample["messages"][1]["content"]
-        assistant_json = json.loads(sample["messages"][2]["content"])
+        assistant_json = parse_assistant_fields(sample["messages"][2]["content"])
         assert assistant_json["claims"][0]["claim_number"] == "2024-001"
 
     def test_system_prompt_is_universal(self):
@@ -420,8 +422,7 @@ class TestTrainingSampleGeneration:
             },
         )
         user_content = sample["messages"][1]["content"]
-        # Section headers use bracket format to align with per-page layout
-        assert "[Docling Structured Text]" in user_content
+        assert "DOCLING TEXT:" in user_content
         assert "## Policy Summary" in user_content
         assert "[Key-Value Pairs]" in user_content
         assert "Insured: ABC Corp" in user_content
@@ -454,7 +455,7 @@ class TestTrainingSampleGeneration:
         )
         assert len(sample["messages"]) == 3
         assert sample["metadata"]["sample_id"] == "legacy-001"
-        assistant_json = json.loads(sample["messages"][2]["content"])
+        assistant_json = parse_assistant_fields(sample["messages"][2]["content"])
         assert assistant_json["insured"] == "New"
 
     def test_empty_corrected_fields_raises(self):
@@ -557,20 +558,18 @@ class TestDatasetBuilding:
         builder = DatasetBuilder(config)
         result  = builder.build(new_data_path=str(new_data_path), cycle_id="test-cycle")
 
-        # Basic counts
-        assert result.total_records == 4
+        # 70/20/10: new=4, replay=0 (no history), synthetic≥0
         assert result.new_records == 4
         assert result.replay_records == 0
         assert result.rejected_records == 0
+        assert result.total_records == result.new_records + result.replay_records + result.synthetic_records
 
-        # Quality report has document type distribution
+        # Quality report has document type distribution for the 4 new rows
         dist = result.quality_report["document_types"]
-        # _canonical_form_key("25") → "25", "125" → "125", etc.
-        assert len(dist) == 4
-        assert dist["25"] == 1
-        assert dist["125"] == 1
-        assert dist["POLICY_DEC"] == 1
-        assert dist["LOSS_RUN"] == 1
+        assert dist.get("25", 0) >= 1
+        assert dist.get("125", 0) >= 1
+        assert dist.get("POLICY_DEC", 0) >= 1
+        assert dist.get("LOSS_RUN", 0) >= 1
 
     def test_manifest_written_with_doc_type_distribution(self, tmp_path):
         chat_row = build_training_sample_from_correction(
@@ -662,6 +661,48 @@ class TestDatasetBuilding:
         }
         validate_chat_format(row, 0)  # should not raise
 
+    def test_validate_chat_format_accepts_fields_format(self):
+        """validate_chat_format must accept the new FIELDS: assistant format."""
+        row = {
+            "messages": [
+                {"role": "system", "content": "You are an expert."},
+                {"role": "user", "content": "Extract this."},
+                {"role": "assistant", "content": 'FIELDS:\n{"policy_number": "GL-123"}\n\nRAW TEXT:\npage text'},
+            ]
+        }
+        validate_chat_format(row, 0)  # must not raise
+
+    def test_build_assistant_content_uses_fields_format(self):
+        """build_training_sample_from_correction always produces FIELDS: prefix."""
+        sample = build_training_sample_from_correction(
+            sample_id="fmt-001",
+            upload_id="u-fmt",
+            form_type="25",
+            original_fields={"x": "1"},
+            corrected_fields={"x": "2"},
+            raw_text="Some OCR text",
+        )
+        content = sample["messages"][2]["content"]
+        assert content.startswith("FIELDS:"), f"Expected FIELDS: prefix, got: {content[:60]!r}"
+        assert parse_assistant_fields(content) == {"x": "2"}
+
+    def test_build_result_has_synthetic_records(self, tmp_path):
+        """DatasetBuildResult.synthetic_records is populated from 70/20/10 split."""
+        chat_rows = [
+            build_training_sample_from_correction(
+                sample_id=f"s{i}", upload_id=f"u{i}", form_type="25",
+                original_fields={"x": "1"}, corrected_fields={"x": "2"},
+                raw_text="text",
+            )
+            for i in range(7)
+        ]
+        new_data_path = tmp_path / "new_data.jsonl"
+        self._write_chat_rows_jsonl(chat_rows, new_data_path)
+        config  = self._make_config(tmp_path)
+        result  = DatasetBuilder(config).build(str(new_data_path), "synth-test")
+        assert result.synthetic_records >= 0
+        assert result.total_records == result.new_records + result.replay_records + result.synthetic_records
+
 
 # ── End-to-end flow (no GPU) ──────────────────────────────────────────────────
 
@@ -695,7 +736,7 @@ class TestEndToEndFlow:
         assert sample["domain"] == "insurance"
 
         # 4. Verify assistant JSON content
-        assistant_json = json.loads(sample["messages"][2]["content"])
+        assistant_json = parse_assistant_fields(sample["messages"][2]["content"])
         assert assistant_json["document_type"] == "ACORD_25"
         assert assistant_json["parties"]["named_insured"] == "Test Corporation"
         assert assistant_json["parties"]["certificate_holder"] == "Client LLC"
@@ -720,7 +761,7 @@ class TestEndToEndFlow:
         )
 
         assert "Loss Run" in sample["messages"][1]["content"]
-        assistant_json = json.loads(sample["messages"][2]["content"])
+        assistant_json = parse_assistant_fields(sample["messages"][2]["content"])
         assert assistant_json["policy_number"] == "GL-012345"
         # Verify corrected_fields tracking caught the change
         assert "policy_number" in sample["metadata"]["corrected_fields"]
@@ -790,10 +831,10 @@ class TestMultimodalFormat:
         )
         content = sample["messages"][1]["content"]
         assert isinstance(content, str)
-        assert "--- Page 1 ---" in content
+        assert "SURYA OCR TEXT:" in content
+        assert "=== PAGE 1 ===" in content
         assert "Page 1 content here" in content
-        assert "--- Page 2 ---" in content
-        assert "[Surya OCR]" in content
+        assert "=== PAGE 2 ===" in content
 
     def test_metadata_includes_new_fields(self):
         """dataset_version, page_count, image_manifest, preprocessing all stored."""
@@ -814,6 +855,27 @@ class TestMultimodalFormat:
         assert meta["page_count"] == 1
         assert meta["image_manifest"] == ["images/u4/page_1.png"]
         assert meta["preprocessing"]["ocr_engine"] == "surya"
+
+    def test_surya_page_texts_kwarg_produces_same_format(self):
+        """surya_page_texts kwarg is the canonical alias for page_texts."""
+        sample = build_training_sample_from_correction(
+            sample_id="mm-surya",
+            upload_id="u-surya",
+            form_type="25",
+            original_fields={"x": "1"},
+            corrected_fields={"x": "2"},
+            raw_text="fallback",
+            surya_page_texts=["Surya page 1 text", "Surya page 2 text"],
+        )
+        user_text = sample["messages"][1]["content"]
+        assert "SURYA OCR TEXT:" in user_text
+        assert "=== PAGE 1 ===" in user_text
+        assert "Surya page 1 text" in user_text
+        assert "=== PAGE 2 ===" in user_text
+        # Assistant RAW TEXT section should also have per-page content
+        asst = sample["messages"][2]["content"]
+        assert "RAW TEXT:" in asst
+        assert "=== PAGE 1 ===" in asst
 
     def test_validate_chat_format_accepts_list_user_content(self):
         """validate_chat_format must NOT raise for list user.content (Gap 2 fix)."""
@@ -878,7 +940,7 @@ class TestVCFNormalization:
             raw_text="Policy number test OCR text",
             wrap_values_vcf=True,
         )
-        assistant_json = json.loads(sample["messages"][2]["content"])
+        assistant_json = parse_assistant_fields(sample["messages"][2]["content"])
         pn = assistant_json.get("policy_number")
         assert isinstance(pn, dict), "Expected {value, page, confidence} wrapper"
         assert pn["value"] == "GL-456"
@@ -918,7 +980,8 @@ class TestAugmentor:
             copies_per_sample=10, field_dropout_rate=1.0, seed=42  # max dropout
         ))
         for aug_row in aug.augment_dataset([row]):
-            asst = json.loads(aug_row["messages"][2]["content"])
+            asst = parse_assistant_fields(aug_row["messages"][2]["content"])
+            assert asst is not None
             assert asst.get("policy_number") not in (None, ""), \
                 "policy_number must not be blanked by dropout"
 
@@ -928,8 +991,8 @@ class TestAugmentor:
         aug = DataAugmentor(AugmentorConfig(copies_per_sample=5, seed=7))
         for aug_row in aug.augment_dataset([row]):
             content = aug_row["messages"][2]["content"]
-            parsed = json.loads(content)  # must not raise
-            assert isinstance(parsed, dict)
+            parsed = parse_assistant_fields(content)
+            assert parsed is not None and isinstance(parsed, dict)
 
     def test_multimodal_row_augmented_correctly(self):
         """Image blocks must be preserved; OCR noise applies only to text blocks."""

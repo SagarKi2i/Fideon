@@ -86,11 +86,17 @@ def _build_qwen_chat(msgs: List[Dict[str, Any]]) -> str:
         role = m.get("role", "user")
         content = m.get("content", "")
         if isinstance(content, list):
-            # Multimodal list-of-dicts → extract text parts only
-            content = " ".join(
-                c.get("text", "") for c in content
-                if isinstance(c, dict) and c.get("type") == "text"
-            )
+            seg: List[str] = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "image":
+                    # Insert Qwen2-VL vision placeholder; processor expands it to
+                    # the correct number of image-pad tokens based on image resolution.
+                    seg.append("<|vision_start|><|image_pad|><|vision_end|>")
+                elif block.get("type") == "text":
+                    seg.append(block.get("text", ""))
+            content = "".join(seg)
         parts.append(f"<|im_start|>{role}\n{content}<|im_end|>")
     return "\n".join(parts) + "\n"
 
@@ -130,6 +136,30 @@ def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
             except Exception:
                 continue
     return rows
+
+
+def _load_images_from_messages(msgs: List[Dict[str, Any]]) -> List:
+    """Load PIL Images referenced inside multimodal user message blocks."""
+    from PIL import Image as _PILImage
+    images = []
+    for m in msgs:
+        content = m.get("content", "")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "image":
+                continue
+            img_path = str(block.get("image", ""))
+            if not img_path:
+                continue
+            if Path(img_path).exists():
+                try:
+                    images.append(_PILImage.open(img_path).convert("RGB"))
+                except Exception as exc:
+                    print(f"[train] Could not load image {img_path}: {exc}", flush=True)
+            else:
+                print(f"[train] Image not found (skipped): {img_path}", flush=True)
+    return images
 
 
 # ── LLaMA-Factory backend ─────────────────────────────────────────────────────
@@ -277,7 +307,6 @@ def run_training(
         return _run_llamafactory_training(config, dataset_path, output_dir, job_id, base_model)
 
     print("[train] Backend: HuggingFace Trainer (PEFT QLoRA)", flush=True)
-    from datasets import Dataset
     from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
     import torch
     from torch.nn.utils.rnn import pad_sequence
@@ -365,119 +394,121 @@ def run_training(
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
 
-    # ── Phase 4/6: Load and format dataset ───────────────────────────────────
+    # ── Phase 4+5/6: Build multimodal dataset ────────────────────────────────
     print(f"[train] ── Phase 4/6 ── Loading dataset from {dataset_path} …", flush=True)
-    rows = _load_jsonl(Path(dataset_path))
+    rows    = _load_jsonl(Path(dataset_path))
     max_seq = int(train_cfg.get("max_seq_length", 2048))
 
-    texts = []
-    for row in rows:
-        t = _format_chat_row(row, tokenizer)
-        if t:
-            texts.append(t)
+    # Token IDs for the assistant-turn boundary (used for label masking)
+    _asst_boundary_ids: List[int] = tokenizer.encode(
+        "<|im_start|>assistant\n", add_special_tokens=False
+    )
 
-    # ── Phase 5/6: Tokenise ───────────────────────────────────────────────────
-    print(f"[train] ── Phase 5/6 ── Tokenising {len(texts)} examples (max_seq={max_seq}) …", flush=True)
-    if not texts:
+    class _MultimodalDataset(torch.utils.data.Dataset):
+        """
+        One example per JSONL row.  Handles both text-only rows and multimodal
+        rows where user.content is a list containing {"type":"image","image":path}
+        blocks.  Images are loaded from disk and passed to the processor so that
+        pixel_values + image_grid_thw are returned alongside input_ids.
+        """
+
+        def __init__(self, rows_: List[Dict[str, Any]]) -> None:
+            self._items: List[tuple] = []   # (text_str, pil_images_list)
+            n_skipped = 0
+            for row in rows_:
+                msgs = row.get("messages", [])
+                if not isinstance(msgs, list):
+                    n_skipped += 1
+                    continue
+                images = _load_images_from_messages(msgs)
+                try:
+                    text = processor.apply_chat_template(
+                        msgs, tokenize=False, add_generation_prompt=False
+                    )
+                    if not text:
+                        raise ValueError("apply_chat_template returned empty string")
+                except Exception as exc:
+                    print(f"[train] apply_chat_template failed ({exc}) — manual template", flush=True)
+                    text = _build_qwen_chat(msgs)
+                if text:
+                    self._items.append((text, images))
+                else:
+                    n_skipped += 1
+            n_mm = sum(1 for _, imgs in self._items if imgs)
+            print(
+                f"[train] ── Phase 5/6 ── Dataset built: {len(self._items)} examples "
+                f"({n_mm} multimodal with images, {len(self._items) - n_mm} text-only)"
+                + (f", {n_skipped} skipped" if n_skipped else ""),
+                flush=True,
+            )
+
+        def __len__(self) -> int:
+            return len(self._items)
+
+        def __getitem__(self, idx: int) -> Dict[str, Any]:
+            text, images = self._items[idx]
+            call_kw: Dict[str, Any] = dict(
+                text=[text],
+                padding=False,
+                truncation=True,
+                max_length=max_seq,
+                return_tensors="pt",
+            )
+            if images:
+                call_kw["images"] = images
+            try:
+                inputs = processor(**call_kw)
+            except Exception as exc:
+                print(f"[train] Processor failed ({exc}), retrying text-only", flush=True)
+                call_kw.pop("images", None)
+                inputs = processor(**call_kw)
+
+            input_ids     = inputs["input_ids"][0]
+            attn          = inputs.get("attention_mask")
+            attention_mask = attn[0] if attn is not None else torch.ones_like(input_ids)
+
+            # ── Label masking: only the assistant turn contributes to loss ────
+            ids_list = input_ids.tolist()
+            n_prefix = len(ids_list)   # default: train on all tokens
+            for i in range(len(ids_list) - len(_asst_boundary_ids), -1, -1):
+                if ids_list[i : i + len(_asst_boundary_ids)] == _asst_boundary_ids:
+                    n_prefix = i + len(_asst_boundary_ids)
+                    break
+
+            labels = torch.full_like(input_ids, -100)
+            if n_prefix < len(ids_list):
+                labels[n_prefix:] = input_ids[n_prefix:]
+            else:
+                labels = input_ids.clone()   # safety: boundary not found
+
+            result: Dict[str, Any] = {
+                "input_ids":      input_ids,
+                "attention_mask": attention_mask,
+                "labels":         labels,
+            }
+            if images and "pixel_values" in inputs:
+                result["pixel_values"]   = inputs["pixel_values"]   # (total_patches, C, pH, pW)
+            if images and "image_grid_thw" in inputs:
+                result["image_grid_thw"] = inputs["image_grid_thw"] # (n_images, 3)
+            return result
+
+    mm_dataset = _MultimodalDataset(rows)
+
+    if len(mm_dataset) == 0:
         raise ValueError(
-            f"[train] 0 examples after chat-template formatting. "
-            f"Loaded {len(rows)} rows from {dataset_path}. "
-            "Check that each row has a 'messages' list with valid role/content dicts."
+            f"[train] 0 valid examples built from {dataset_path}. "
+            "Check that each row has a 'messages' list with system/user/assistant turns."
         )
 
-    # Qwen2-VL chat template wraps the assistant turn with <|im_start|>assistant\n
-    # We mask all non-assistant tokens to -100 so the loss is only computed on
-    # the model's actual outputs, not on the system prompt or user content.
-    _ASSISTANT_PREFIX = "<|im_start|>assistant\n"
-
-    def _tokenise(batch: Dict[str, Any]) -> Dict[str, Any]:
-        input_ids_list, attention_mask_list, labels_list = [], [], []
-
-        for text in batch["text"]:
-            prefix_end = text.rfind(_ASSISTANT_PREFIX)
-            if prefix_end != -1:
-                prefix_text = text[: prefix_end + len(_ASSISTANT_PREFIX)]
-
-                # Tokenize prefix and full text with IDENTICAL settings so the
-                # split point is consistent. add_special_tokens=False because
-                # the Qwen2 chat template already embeds all special markers
-                # (<|im_start|>, <|im_end|>) as explicit text tokens.
-                prefix_ids = tokenizer(
-                    prefix_text,
-                    add_special_tokens=False,
-                    truncation=False,
-                    padding=False,
-                )["input_ids"]
-                full_ids = tokenizer(
-                    text,
-                    add_special_tokens=False,
-                    truncation=False,
-                    padding=False,
-                )["input_ids"]
-
-                completion_ids = full_ids[len(prefix_ids):]
-
-                # ── Truncate the PREFIX (never the completion) ──────────────
-                # If we truncated from the end (original behaviour) the
-                # assistant response would be cut off entirely, making every
-                # label -100 → loss=0, grad_norm=0, model learns nothing.
-                if len(prefix_ids) + len(completion_ids) > max_seq:
-                    budget     = max(0, max_seq - len(completion_ids))
-                    prefix_ids = prefix_ids[-budget:]   # keep most-recent context
-
-                combined = prefix_ids + completion_ids
-                labels   = [-100] * len(prefix_ids) + list(completion_ids)
-            else:
-                # No assistant boundary — train on full sequence (rare fallback).
-                combined = tokenizer(
-                    text,
-                    add_special_tokens=False,
-                    truncation=True,
-                    max_length=max_seq,
-                    padding=False,
-                )["input_ids"]
-                labels = list(combined)
-
-            # Safety: if something went wrong and all labels are masked,
-            # fall back to training on the whole sequence rather than silently
-            # producing zero loss.
-            if all(l == -100 for l in labels):
-                labels = list(combined)
-
-            input_ids_list.append(combined)
-            attention_mask_list.append([1] * len(combined))
-            labels_list.append(labels)
-
-        return {
-            "input_ids":      input_ids_list,
-            "attention_mask": attention_mask_list,
-            "labels":         labels_list,
-        }
-
-    hf_dataset = Dataset.from_dict({"text": texts})
-    tokenised  = hf_dataset.map(_tokenise, batched=True, remove_columns=["text"])
-
-    # ── Diagnostic: verify labels are not all masked ──────────────────────────
-    active_counts = [sum(1 for l in ex["labels"] if l != -100) for ex in tokenised]
-    seq_lengths   = [len(ex["input_ids"]) for ex in tokenised]
-    _min_active = min(active_counts) if active_counts else 0
-    _max_active = max(active_counts) if active_counts else 0
-    _avg_active = sum(active_counts) // max(len(active_counts), 1)
-    print(
-        f"[train] Label check — {len(tokenised)} examples | "
-        f"active label tokens: min={_min_active} max={_max_active} avg={_avg_active} | "
-        f"seq len: min={min(seq_lengths)} max={max(seq_lengths)}",
-        flush=True,
-    )
-    if _min_active == 0:
-        # The safety fallback in _tokenise should have prevented this, but if it
-        # still happens the assistant boundary was not found in ANY example —
-        # something is fundamentally wrong with the JSONL format.
+    # Quick label sanity check on the first few examples
+    _check_n   = min(len(mm_dataset), 5)
+    _active    = [sum(1 for l in mm_dataset[i]["labels"].tolist() if l != -100) for i in range(_check_n)]
+    _zero_lbl  = sum(1 for c in _active if c == 0)
+    print(f"[train] Label check (first {_check_n}): active tokens = {_active}", flush=True)
+    if _zero_lbl == _check_n:
         raise ValueError(
-            f"[train] FATAL: {sum(1 for c in active_counts if c == 0)} example(s) still have "
-            f"0 active label tokens after the safety fallback. "
-            f"The '<|im_start|>assistant\\n' boundary was not found in the chat template output. "
-            f"Check that each JSONL row has a 'messages' list with an 'assistant' role entry. "
+            f"[train] All sampled examples have 0 active label tokens — "
+            "assistant boundary '<|im_start|>assistant\\n' not found in chat template output. "
             f"Dataset: {dataset_path}"
         )
 
@@ -507,20 +538,30 @@ def run_training(
     pad_id = tokenizer.pad_token_id
 
     def _collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Pad pre-tokenised examples, preserving the assistant-masked labels."""
+        """Pad variable-length examples and stack image pixel tensors."""
         input_ids = pad_sequence(
-            [torch.tensor(b["input_ids"], dtype=torch.long) for b in batch],
+            [b["input_ids"] for b in batch],
             batch_first=True, padding_value=pad_id,
         )
         attention_mask = pad_sequence(
-            [torch.tensor(b["attention_mask"], dtype=torch.long) for b in batch],
+            [b["attention_mask"] for b in batch],
             batch_first=True, padding_value=0,
         )
         labels = pad_sequence(
-            [torch.tensor(b["labels"], dtype=torch.long) for b in batch],
+            [b["labels"] for b in batch],
             batch_first=True, padding_value=-100,
         )
-        return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+        result = {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+
+        # pixel_values: (total_patches, C, pH, pW) — concat across all samples
+        pv_list = [b["pixel_values"] for b in batch if "pixel_values" in b]
+        if pv_list:
+            result["pixel_values"] = torch.cat(pv_list, dim=0)
+            thw_list = [b["image_grid_thw"] for b in batch if "image_grid_thw" in b]
+            if thw_list:
+                result["image_grid_thw"] = torch.cat(thw_list, dim=0)
+
+        return result
 
     from transformers import TrainerCallback
 
@@ -551,7 +592,7 @@ def run_training(
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=tokenised,
+        train_dataset=mm_dataset,
         data_collator=_collate_fn,
         callbacks=[_ProgressCB()],
     )

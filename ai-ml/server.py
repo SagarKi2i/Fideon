@@ -784,6 +784,7 @@ async def store_training_sample(body: Dict[str, Any] = Body(...)) -> Dict[str, A
     # not stored in the job — they are consumed during Qwen inference only).
     docling_data: Optional[Dict[str, Any]] = body.get("docling_data") or None
     image_paths_from_extraction: List[str] = body.get("image_paths") or []
+    surya_page_texts_from_extraction: List[str] = body.get("surya_page_texts") or []
     page_count_from_extraction: Optional[int] = body.get("page_count") or None
     if run_id:
         with _extract_jobs_lock:
@@ -795,6 +796,8 @@ async def store_training_sample(body: Dict[str, Any] = Body(...)) -> Dict[str, A
                     docling_data = {"markdown": md, "kv_pairs": {}, "tables": []}
             if not image_paths_from_extraction:
                 image_paths_from_extraction = extraction_result.get("image_paths") or []
+            if not surya_page_texts_from_extraction:
+                surya_page_texts_from_extraction = extraction_result.get("surya_page_texts") or []
             if page_count_from_extraction is None:
                 page_count_from_extraction = extraction_result.get("page_count") or None
 
@@ -810,6 +813,7 @@ async def store_training_sample(body: Dict[str, Any] = Body(...)) -> Dict[str, A
         "raw_text":         raw_text,
         "docling_data":     docling_data if docling_data else {},
         "image_paths":      image_paths_from_extraction,
+        "surya_page_texts": surya_page_texts_from_extraction,
         "page_count":       page_count_from_extraction,
         "run_id":           run_id,
         "created_at":       datetime.now(timezone.utc).isoformat(),
@@ -913,6 +917,7 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
                 corrected_json=sample.get("corrected_fields") or {},
                 docling_data=sample.get("docling_data") or None,
                 image_paths=sample.get("image_paths") or [],
+                surya_page_texts=sample.get("surya_page_texts") or [],
                 page_count=sample.get("page_count") or None,
                 preprocessing={"ocr_engine": "surya", "layout_engine": "docling", "dpi": 300}
                 if sample.get("image_paths") else {},

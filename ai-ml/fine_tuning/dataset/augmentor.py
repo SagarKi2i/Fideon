@@ -115,6 +115,56 @@ class DataAugmentor:
                 result[k] = v
         return result
 
+    @staticmethod
+    def _parse_fields_from_assistant(content: str) -> Optional[Dict[str, Any]]:
+        """Extract JSON from FIELDS: block or legacy plain JSON assistant content."""
+        if not isinstance(content, str):
+            return None
+        stripped = content.strip()
+        fi = stripped.find("FIELDS:")
+        if fi != -1:
+            after = stripped[fi + len("FIELDS:"):]
+            for end_m in ("RAW TEXT:", "MARKDOWN:"):
+                ei = after.find(end_m)
+                if ei != -1:
+                    after = after[:ei]
+                    break
+            s = after.find("{")
+            e = after.rfind("}")
+            if s != -1 and e > s:
+                try:
+                    return json.loads(after[s : e + 1])
+                except json.JSONDecodeError:
+                    pass
+        s = stripped.find("{")
+        e = stripped.rfind("}")
+        if s != -1 and e > s:
+            try:
+                return json.loads(stripped[s : e + 1])
+            except json.JSONDecodeError:
+                pass
+        return None
+
+    @staticmethod
+    def _reconstruct_assistant_content(original: str, new_fields: Dict[str, Any]) -> str:
+        """Replace the FIELDS JSON in *original* with *new_fields*, keeping RAW TEXT/MARKDOWN."""
+        stripped = original.strip()
+        fi = stripped.find("FIELDS:")
+        if fi != -1:
+            after = stripped[fi + len("FIELDS:"):]
+            rest_start = len(after)
+            for end_m in ("RAW TEXT:", "MARKDOWN:"):
+                ei = after.find(end_m)
+                if ei != -1 and ei < rest_start:
+                    rest_start = ei
+            fields_json = json.dumps(new_fields, ensure_ascii=False, indent=2)
+            prefix = stripped[:fi]
+            rest = after[rest_start:].strip()
+            if rest:
+                return f"{prefix}FIELDS:\n{fields_json}\n\n{rest}"
+            return f"{prefix}FIELDS:\n{fields_json}"
+        return json.dumps(new_fields, ensure_ascii=False, indent=2)
+
     def _augment_one(self, row: Dict[str, Any], rng: random.Random) -> Dict[str, Any]:
         """Return one augmented copy of a chat-format training row."""
         messages: List[Dict[str, Any]] = []
@@ -133,13 +183,10 @@ class DataAugmentor:
                         for block in content
                     ]
             elif role == "assistant" and isinstance(content, str):
-                try:
-                    fields = json.loads(content)
-                    if isinstance(fields, dict):
-                        fields  = self._drop_fields(fields, rng)
-                        content = json.dumps(fields, ensure_ascii=False, indent=2)
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                fields = DataAugmentor._parse_fields_from_assistant(content)
+                if isinstance(fields, dict):
+                    new_fields = self._drop_fields(fields, rng)
+                    content = DataAugmentor._reconstruct_assistant_content(content, new_fields)
 
             messages.append({"role": role, "content": content})
 

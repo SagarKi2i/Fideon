@@ -40,9 +40,49 @@ class DatasetBuildResult:
     total_records: int
     new_records: int
     replay_records: int
+    synthetic_records: int
     rejected_records: int
     cycle_id: str
     quality_report: Dict[str, Any] = dc_field(default_factory=dict)
+
+
+# ── Assistant content parser (handles FIELDS: format + legacy plain JSON) ────
+
+def parse_assistant_fields(content: str) -> Optional[Dict[str, Any]]:
+    """Extract the JSON fields dict from assistant content.
+
+    Handles both formats:
+    - New:    FIELDS:\\n{json}\\n\\nRAW TEXT:...\\n\\nMARKDOWN:...
+    - Legacy: plain JSON string
+    Returns None when no valid JSON object is found.
+    """
+    if not isinstance(content, str):
+        return None
+    stripped = content.strip()
+    fi = stripped.find("FIELDS:")
+    if fi != -1:
+        after = stripped[fi + len("FIELDS:"):]
+        for end_m in ("RAW TEXT:", "MARKDOWN:"):
+            ei = after.find(end_m)
+            if ei != -1:
+                after = after[:ei]
+                break
+        s = after.find("{")
+        e = after.rfind("}")
+        if s != -1 and e > s:
+            try:
+                return json.loads(after[s : e + 1])
+            except json.JSONDecodeError:
+                pass
+    # Legacy: bare JSON
+    s = stripped.find("{")
+    e = stripped.rfind("}")
+    if s != -1 and e > s:
+        try:
+            return json.loads(stripped[s : e + 1])
+        except json.JSONDecodeError:
+            pass
+    return None
 
 
 # ── Hard validation (rejects the row) ────────────────────────────────────────
@@ -71,24 +111,15 @@ def validate_chat_format(row: Dict[str, Any], row_index: int) -> None:
             raise InvalidChatFormatError(
                 f"Row {row_index}, message {i}: 'content' must be a non-empty string or list"
             )
-    # Validate assistant turn is parseable JSON — the model is trained to output JSON
-    # and training on non-JSON assistant turns teaches the model to produce garbage.
+    # Validate assistant turn contains a parseable JSON fields dict.
+    # Accepts both FIELDS: format and legacy plain JSON.
     for m in msgs:
         if m.get("role") == "assistant":
             content = m.get("content", "").strip()
-            start = content.find("{")
-            end   = content.rfind("}")
-            if start == -1 or end <= start:
+            if parse_assistant_fields(content) is None:
                 raise InvalidChatFormatError(
-                    f"Row {row_index}: assistant content is not a JSON object "
-                    f"(no {{...}} found). Got: {content[:100]!r}"
-                )
-            try:
-                json.loads(content[start : end + 1])
-            except json.JSONDecodeError as exc:
-                raise InvalidChatFormatError(
-                    f"Row {row_index}: assistant content is not valid JSON: {exc}. "
-                    f"Got: {content[:100]!r}"
+                    f"Row {row_index}: assistant content has no valid JSON fields "
+                    f"(expected FIELDS:{{...}} or plain JSON). Got: {content[:100]!r}"
                 )
 
 
@@ -203,12 +234,11 @@ class DatasetBuilder:
         )
         if not assistant_msg:
             return
-        try:
-            assistant_json = json.loads(assistant_msg["content"])
-        except (json.JSONDecodeError, TypeError):
+        assistant_json = parse_assistant_fields(assistant_msg.get("content", ""))
+        if assistant_json is None:
             print(
-                f"[dataset_builder] Row {row_index}: assistant content is not "
-                "valid JSON — skipping schema validation",
+                f"[dataset_builder] Row {row_index}: assistant content has no valid "
+                "JSON fields — skipping schema validation",
                 flush=True,
             )
             return
@@ -239,12 +269,9 @@ class DatasetBuilder:
                 None,
             )
             if assistant_msg:
-                try:
-                    field_counts.append(
-                        self._count_fields(json.loads(assistant_msg["content"]))
-                    )
-                except Exception:
-                    pass
+                fields = parse_assistant_fields(assistant_msg.get("content", ""))
+                if fields is not None:
+                    field_counts.append(self._count_fields(fields))
 
         return {
             "total_samples":            len(rows),
@@ -339,17 +366,34 @@ class DatasetBuilder:
         for i, row in enumerate(new_rows):
             self._validate_sample_extended(row, i)
 
-        # ── 3. Replay ALL historical rows (anti-forgetting) ───────────────────
+        # ── 3. 70/20/10 composition: 70% new, ~20% replay, ~10% synthetic ───────
+        n_new    = len(new_rows)
+        n_replay = round(n_new * 2 / 7)   # ≈ 20%
+        n_synth  = round(n_new * 1 / 7)   # ≈ 10%
+
         sampler     = ReplaySampler(feedback_dir)
-        replay_rows = sampler.sample_all()
+        replay_rows = sampler.sample(n_replay, seed=replay_seed)
         print(
-            f"[dataset_builder] Replay: {len(replay_rows)} historical sample(s)"
-            " from previous versions",
+            f"[dataset_builder] 70/20/10: {n_new} new + "
+            f"{len(replay_rows)}/{n_replay} replay target",
+            flush=True,
+        )
+
+        from fine_tuning.dataset.augmentor import DataAugmentor, AugmentorConfig as _AugCfg
+        _augmentor  = DataAugmentor(_AugCfg(copies_per_sample=1, seed=replay_seed))
+        _all_synth  = _augmentor.augment_dataset(new_rows, n_copies=1)
+        _rng        = random.Random(replay_seed)
+        synthetic_rows: List[Dict[str, Any]] = (
+            _rng.sample(_all_synth, min(n_synth, len(_all_synth)))
+            if _all_synth else []
+        )
+        print(
+            f"[dataset_builder] Synthetic rows: {len(synthetic_rows)}/{n_synth} target",
             flush=True,
         )
 
         # ── 4. Combine + stratified interleave ────────────────────────────────
-        combined = new_rows + replay_rows
+        combined = new_rows + replay_rows + synthetic_rows
         final    = self._stratified_interleave(combined, seed=replay_seed)
 
         if len(final) < min_records:
@@ -383,6 +427,7 @@ class DatasetBuilder:
             "cycle_id":                   cycle_id,
             "new_records":                len(new_rows),
             "replay_records":             len(replay_rows),
+            "synthetic_records":          len(synthetic_rows),
             "rejected_records":           rejected,
             "total_records":              len(final),
             "document_type_distribution": doc_type_counts,
@@ -433,6 +478,7 @@ class DatasetBuilder:
             total_records=len(final),
             new_records=len(new_rows),
             replay_records=len(replay_rows),
+            synthetic_records=len(synthetic_rows),
             rejected_records=rejected,
             cycle_id=cycle_id,
             quality_report=quality_report,

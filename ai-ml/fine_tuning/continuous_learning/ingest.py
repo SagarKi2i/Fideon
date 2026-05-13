@@ -41,14 +41,9 @@ class CorrectionValidationError(ValueError):
 # ── System prompt ──────────────────────────────────────────────────────────────
 
 def get_universal_system_prompt() -> str:
-    """Universal system prompt that works for all insurance document types."""
     return (
         "You are an expert insurance document parser. "
-        "Given raw OCR text from an insurance document, extract ALL fields and return "
-        "a single valid JSON object. Use \"\" for blank fields. Represent checkboxes as "
-        "true/false. Represent table rows as arrays of objects. Dates must be in "
-        "YYYY-MM-DD format. Currency amounts must include the $ prefix. "
-        "Output ONLY the JSON — no commentary, no markdown fences."
+        "Follow the extraction and output rules exactly."
     )
 
 
@@ -327,7 +322,10 @@ def build_training_sample_from_correction(
 
     # ── New kwargs ────────────────────────────────────────────────────────────
     image_paths: List[str]            = kwargs.get("image_paths") or []
-    page_texts: List[str]             = kwargs.get("page_texts") or []
+    # surya_page_texts is the canonical kwarg; page_texts kept for backward compat
+    _surya_pts: List[str]             = kwargs.get("surya_page_texts") or []
+    _legacy_pts: List[str]            = kwargs.get("page_texts") or []
+    effective_page_texts: List[str]   = _surya_pts or _legacy_pts
     page_count: Optional[int]         = kwargs.get("page_count") or None
     dataset_version: str              = str(kwargs.get("dataset_version") or "v1")
     preprocessing: Dict[str, Any]     = kwargs.get("preprocessing") or {}
@@ -346,46 +344,64 @@ def build_training_sample_from_correction(
     if wrap_values_vcf:
         merged = _normalize_fields_to_vcf(merged, _original)
 
-    # ── Build OCR text section ────────────────────────────────────────────────
+    # ── Build user text — SURYA OCR TEXT / DOCLING TEXT sections ────────────
     prefix = _user_text_prefix(doc_type)
 
-    if page_texts:
-        # Per-page format: --- Page N --- / [Surya OCR] / text
-        ocr_section_parts = []
-        for i, pt in enumerate(page_texts):
-            ocr_section_parts.append(
-                f"--- Page {i + 1} ---\n[Surya OCR]\n{pt.strip()}"
-            )
-        ocr_section = "\n\n".join(ocr_section_parts)
+    if effective_page_texts:
+        surya_parts = [
+            f"=== PAGE {i + 1} ===\n{pt.strip()}"
+            for i, pt in enumerate(effective_page_texts)
+        ]
+        surya_section = "SURYA OCR TEXT:\n" + "\n\n".join(surya_parts)
     else:
-        ocr_section = _raw_text or "(no text)"
+        surya_section = f"SURYA OCR TEXT:\n{_raw_text or '(no text)'}"
 
-    user_text = f"{prefix}\n\nOCR TEXT:\n{ocr_section}"
+    user_text = f"{prefix}\n\n{surya_section}"
 
-    # Append optional Docling output
     if isinstance(docling_data, dict):
+        docling_parts: List[str] = []
         if docling_data.get("markdown"):
-            user_text += f"\n\n[Docling Structured Text]\n{docling_data['markdown']}"
+            docling_parts.append(f"=== PAGE 1 ===\n{docling_data['markdown']}")
         if docling_data.get("kv_pairs"):
-            kv_str = "\n".join(
-                f"{k}: {v}" for k, v in docling_data["kv_pairs"].items()
-            )
-            user_text += f"\n\n[Key-Value Pairs]\n{kv_str}"
+            kv_str = "\n".join(f"{k}: {v}" for k, v in docling_data["kv_pairs"].items())
+            docling_parts.append(f"[Key-Value Pairs]\n{kv_str}")
         if docling_data.get("tables"):
             tables_str = "\n\n".join(docling_data["tables"])
-            user_text += f"\n\n[Tables]\n{tables_str}"
+            docling_parts.append(f"[Tables]\n{tables_str}")
+        if docling_parts:
+            user_text += "\n\nDOCLING TEXT:\n" + "\n\n".join(docling_parts)
 
     # ── Build user content (multimodal list or plain string) ─────────────────
     if image_paths:
-        # LLaMA-Factory / Qwen 2.5 VL multimodal format:
-        # user.content = [{"type": "image", "image": path}, ..., {"type": "text", "text": "..."}]
         user_content: Any = [
             {"type": "image", "image": p} for p in image_paths
         ] + [{"type": "text", "text": user_text}]
     else:
         user_content = user_text
 
-    assistant_content = json.dumps(merged, ensure_ascii=False, indent=2)
+    # ── Build assistant content — FIELDS / RAW TEXT / MARKDOWN ───────────────
+    fields_json = json.dumps(merged, ensure_ascii=False, indent=2)
+
+    if effective_page_texts:
+        raw_parts = [
+            f"=== PAGE {i + 1} ===\n{pt.strip()}"
+            for i, pt in enumerate(effective_page_texts)
+        ]
+        raw_section = "\n\n".join(raw_parts)
+    else:
+        raw_section = _raw_text
+
+    markdown_text = ""
+    if isinstance(docling_data, dict):
+        markdown_text = docling_data.get("markdown", "")
+
+    assistant_parts = [f"FIELDS:\n{fields_json}"]
+    if raw_section:
+        assistant_parts.append(f"RAW TEXT:\n{raw_section}")
+    if markdown_text:
+        assistant_parts.append(f"MARKDOWN:\n{markdown_text}")
+
+    assistant_content = "\n\n".join(assistant_parts)
 
     # ── Track which fields were actually corrected (dot-notation paths) ───────
     corrected_paths = get_corrected_paths(
@@ -412,7 +428,7 @@ def build_training_sample_from_correction(
 
     # ── Assemble metadata ─────────────────────────────────────────────────────
     _eff_page_count = page_count if page_count is not None else (
-        len(image_paths) or len(page_texts) or None
+        len(image_paths) or len(effective_page_texts) or None
     )
 
     metadata: Dict[str, Any] = {
