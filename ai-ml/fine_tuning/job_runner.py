@@ -1077,6 +1077,7 @@ def run_auto_refine_loop(
                     run_row=row,
                     corrected_json=sd["corrected_fields"],
                     docling_data=sd.get("docling_data") or None,
+                    wrap_values_vcf=True,
                 )
                 outcome = append_training_sample(
                     root=feedback_dir,

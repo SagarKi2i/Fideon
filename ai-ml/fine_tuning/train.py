@@ -511,9 +511,11 @@ def run_training(
         )
 
     # Quick label sanity check on the first few examples
-    _check_n   = min(len(mm_dataset), 5)
-    _active    = [sum(1 for l in mm_dataset[i]["labels"].tolist() if l != -100) for i in range(_check_n)]
-    _zero_lbl  = sum(1 for c in _active if c == 0)
+    _check_n    = min(len(mm_dataset), 5)
+    _active     = [sum(1 for l in mm_dataset[i]["labels"].tolist() if l != -100) for i in range(_check_n)]
+    _zero_lbl   = sum(1 for c in _active if c == 0)
+    _min_active = min(_active) if _active else 0
+    _max_active = max(_active) if _active else 0
     print(f"[train] Label check (first {_check_n}): active tokens = {_active}", flush=True)
     if _zero_lbl == _check_n:
         raise ValueError(
@@ -611,7 +613,7 @@ def run_training(
     _t0_train = time.time()
     print(
         f"[train] ── Phase 6/6 ── Starting QLoRA training "
-        f"({training_args.num_train_epochs} epochs, {len(tokenised)} examples) …",
+        f"({training_args.num_train_epochs} epochs, {len(mm_dataset)} examples) …",
         flush=True,
     )
     train_output = trainer.train()
