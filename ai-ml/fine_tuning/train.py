@@ -138,8 +138,15 @@ def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
     return rows
 
 
-def _load_images_from_messages(msgs: List[Dict[str, Any]]) -> List:
-    """Load PIL Images referenced inside multimodal user message blocks."""
+def _load_images_from_messages(
+    msgs: List[Dict[str, Any]],
+    dataset_dir: Optional[Path] = None,
+) -> List:
+    """Load PIL Images referenced inside multimodal user message blocks.
+
+    Relative paths are resolved against dataset_dir so the process CWD
+    does not have to match the dataset root.
+    """
     from PIL import Image as _PILImage
     images = []
     for m in msgs:
@@ -152,13 +159,16 @@ def _load_images_from_messages(msgs: List[Dict[str, Any]]) -> List:
             img_path = str(block.get("image", ""))
             if not img_path:
                 continue
-            if Path(img_path).exists():
+            resolved = Path(img_path)
+            if not resolved.is_absolute() and dataset_dir:
+                resolved = dataset_dir / resolved
+            if resolved.exists():
                 try:
-                    images.append(_PILImage.open(img_path).convert("RGB"))
+                    images.append(_PILImage.open(resolved).convert("RGB"))
                 except Exception as exc:
-                    print(f"[train] Could not load image {img_path}: {exc}", flush=True)
+                    print(f"[train] Could not load image {resolved}: {exc}", flush=True)
             else:
-                print(f"[train] Image not found (skipped): {img_path}", flush=True)
+                print(f"[train] Image not found (skipped): {resolved}", flush=True)
     return images
 
 
@@ -420,7 +430,7 @@ def run_training(
                 if not isinstance(msgs, list):
                     n_skipped += 1
                     continue
-                images = _load_images_from_messages(msgs)
+                images = _load_images_from_messages(msgs, dataset_dir=Path(dataset_path).parent)
                 try:
                     text = processor.apply_chat_template(
                         msgs, tokenize=False, add_generation_prompt=False

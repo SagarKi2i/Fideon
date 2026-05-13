@@ -921,6 +921,7 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
                 page_count=sample.get("page_count") or None,
                 preprocessing={"ocr_engine": "surya", "layout_engine": "docling", "dpi": 300}
                 if sample.get("image_paths") else {},
+                wrap_values_vcf=True,
             )
             outcome = append_training_sample(
                 root=feedback_dir,

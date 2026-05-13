@@ -387,7 +387,17 @@ def build_training_sample_from_correction(
     if isinstance(docling_data, dict):
         docling_parts: List[str] = []
         if docling_data.get("markdown"):
-            docling_parts.append(f"=== PAGE 1 ===\n{docling_data['markdown']}")
+            md = docling_data["markdown"]
+            if isinstance(md, list):
+                for i, page_md in enumerate(md):
+                    if page_md and page_md.strip():
+                        docling_parts.append(f"=== PAGE {i + 1} ===\n{page_md.strip()}")
+            else:
+                _n_pages = len(effective_page_texts) or (page_count or 1)
+                if _n_pages == 1:
+                    docling_parts.append(f"=== PAGE 1 ===\n{md}")
+                else:
+                    docling_parts.append(md)
         if docling_data.get("kv_pairs"):
             kv_str = "\n".join(f"{k}: {v}" for k, v in docling_data["kv_pairs"].items())
             docling_parts.append(f"[Key-Value Pairs]\n{kv_str}")

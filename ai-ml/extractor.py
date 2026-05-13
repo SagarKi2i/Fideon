@@ -735,6 +735,10 @@ def _run_ollama_extraction(
         prompt=prompt,
         system=_OLLAMA_SYSTEM_PROMPT,
         images=None,          # fine-tuned model is text-only; images not in training data
+        # TODO: once a model is retrained with image data (after Bug 1 fix in train.py
+        # resolving relative image paths against dataset_dir), update this to pass
+        # images through Ollama as well. Until then, images=None is correct for the
+        # current text-only fine-tuned checkpoint.
         num_ctx=8192,
         max_tokens=4096,
         temperature=0.1,

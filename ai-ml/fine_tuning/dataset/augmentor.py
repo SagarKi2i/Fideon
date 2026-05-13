@@ -194,6 +194,7 @@ class DataAugmentor:
         aug_row["messages"] = messages
         meta = dict(row.get("metadata") or {})
         meta["augmented"] = True
+        meta["correction_source"] = "augmented"
         aug_row["metadata"] = meta
         return aug_row
 
