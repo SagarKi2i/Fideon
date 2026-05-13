@@ -424,7 +424,15 @@ def _run_extract_job(job_id: str, pdf_path: str, form_type: str) -> None:
         with _gpu_semaphore:
             _set("running", step="surya+docling+qwen")
             print(f"[extract:{job_id[:8]}] GPU acquired — running extraction", flush=True)
-            result = run_full_extraction(pdf_path, form_type)
+            # Extract upload_id from job record so page images can be saved
+            with _extract_jobs_lock:
+                _job_upload_id = _extract_jobs.get(job_id, {}).get("upload_id", "")
+            result = run_full_extraction(
+                pdf_path,
+                form_type,
+                upload_id=_job_upload_id,
+                images_dir="/workspace/fine_tuning/images",
+            )
         elapsed = round(_time.time() - t0, 1)
 
         if "error" in result:
@@ -713,39 +721,121 @@ async def store_training_sample(body: Dict[str, Any] = Body(...)) -> Dict[str, A
     Store one corrected extraction as a fine-tuning sample.
     Called after the user edits and approves the extracted fields.
     Each sample written as a JSONL line so it survives pod restarts.
+
+    Supports any insurance document type:
+    - ACORD forms:          form_type = "25", "125", "126", "130", "140"
+    - Policy declarations:  form_type = "POLICY_DEC"
+    - Loss run reports:     form_type = "LOSS_RUN"
+    - Certificates:         form_type = "CERTIFICATE"
+    - Binders/endorsements: form_type = "BINDER" / "ENDORSEMENT"
+
+    Optional body fields (backward-compatible — existing clients need no changes):
+        docling_data  (dict)  — {"markdown": str, "kv_pairs": dict, "tables": list}
+        document_type (str)   — explicit doc-type override; inferred if omitted
     """
-    upload_id = body.get("upload_id", "")
+    upload_id      = body.get("upload_id", "")
+    original_fields = body.get("original_fields") or {}
+    corrected_fields = body.get("corrected_fields") or {}
+    raw_text        = body.get("raw_text", "")
+    run_id          = body.get("run_id") or ""
+
+    # ── Input validation ──────────────────────────────────────────────────────
+    if not raw_text or len(raw_text.strip()) < 50:
+        raise HTTPException(
+            status_code=400,
+            detail="raw_text is required and must contain at least 50 characters of OCR data",
+        )
+    if not original_fields or not corrected_fields:
+        raise HTTPException(
+            status_code=400,
+            detail="Both original_fields and corrected_fields are required",
+        )
+
+    # ── Resolve pdf_path ──────────────────────────────────────────────────────
     pdf_path = _pdf_path_for_upload(upload_id) or ""
 
-    # Normalise form_type so ingest.py never sees "ACORD_25" / "acord25" variants
-    raw_ft = str(body.get("form_type") or "25")
-    ftl = raw_ft.lower()
+    # ── Normalise form_type ───────────────────────────────────────────────────
+    # Strip "acord_" / "acord" prefix for numeric ACORD types so ingest.py
+    # receives "25", "125", etc.  Non-ACORD types (POLICY_DEC, LOSS_RUN, …)
+    # are passed through unchanged.
+    raw_ft  = str(body.get("form_type") or "25")
+    ftl     = raw_ft.lower()
     if ftl.startswith("acord_"):
         raw_ft = raw_ft[6:]
-    elif ftl.startswith("acord"):
+    elif ftl.startswith("acord") and raw_ft[5:].isdigit():
         raw_ft = raw_ft[5:]
 
+    # ── Detect document_type ──────────────────────────────────────────────────
+    document_type: Optional[str] = body.get("document_type") or None
+    if not document_type:
+        _acord_numeric = {"25", "27", "80", "85", "90", "125", "126", "130", "140"}
+        if raw_ft in _acord_numeric:
+            document_type = f"ACORD_{raw_ft}"
+        else:
+            # Try nested schema field first (new universal extraction format)
+            document_type = (
+                original_fields.get("document_identification", {}).get("document_type")
+                or raw_ft
+            )
+
+    # ── Docling data + image_paths from extraction result ────────────────────
+    # Prefer explicitly supplied docling_data; fall back to what was stored
+    # in the extraction job result (markdown is available; kv_pairs/tables are
+    # not stored in the job — they are consumed during Qwen inference only).
+    docling_data: Optional[Dict[str, Any]] = body.get("docling_data") or None
+    image_paths_from_extraction: List[str] = body.get("image_paths") or []
+    surya_page_texts_from_extraction: List[str] = body.get("surya_page_texts") or []
+    page_count_from_extraction: Optional[int] = body.get("page_count") or None
+    if run_id:
+        with _extract_jobs_lock:
+            extraction_result = _extract_jobs.get(run_id, {}).get("result", {})
+        if extraction_result:
+            if not docling_data:
+                md = extraction_result.get("markdown", "")
+                if md:
+                    docling_data = {"markdown": md, "kv_pairs": {}, "tables": []}
+            if not image_paths_from_extraction:
+                image_paths_from_extraction = extraction_result.get("image_paths") or []
+            if not surya_page_texts_from_extraction:
+                surya_page_texts_from_extraction = extraction_result.get("surya_page_texts") or []
+            if page_count_from_extraction is None:
+                page_count_from_extraction = extraction_result.get("page_count") or None
+
+    # ── Build and persist sample ──────────────────────────────────────────────
     sample: Dict[str, Any] = {
-        "sample_id": str(uuid.uuid4()),
-        "upload_id": upload_id,
-        "pdf_path": pdf_path,
-        "form_type": raw_ft,
-        "original_fields": body.get("original_fields") or {},
-        "corrected_fields": body.get("corrected_fields") or {},
-        "raw_text": body.get("raw_text", ""),
-        "run_id": body.get("run_id") or "",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "status": "pending",
+        "sample_id":        str(uuid.uuid4()),
+        "upload_id":        upload_id,
+        "pdf_path":         pdf_path,
+        "form_type":        raw_ft,
+        "document_type":    document_type,
+        "original_fields":  original_fields,
+        "corrected_fields": corrected_fields,
+        "raw_text":         raw_text,
+        "docling_data":     docling_data if docling_data else {},
+        "image_paths":      image_paths_from_extraction,
+        "surya_page_texts": surya_page_texts_from_extraction,
+        "page_count":       page_count_from_extraction,
+        "run_id":           run_id,
+        "created_at":       datetime.now(timezone.utc).isoformat(),
+        "status":           "pending",
     }
 
     with open(TRAINING_SAMPLES_FILE, "a", encoding="utf-8") as f:
         f.write(json.dumps(sample) + "\n")
 
+    print(
+        f"[training-samples] Saved sample {sample['sample_id']}"
+        f" for {document_type} (upload={upload_id})",
+        flush=True,
+    )
     total = len(_load_training_samples())
     return {
-        "status": "stored",
-        "sample_id": sample["sample_id"],
+        "success":       True,
+        "status":        "stored",
+        "sample_id":     sample["sample_id"],
+        "document_type": document_type,
         "total_samples": total,
+        "message":       f"Training sample saved for {document_type}",
     }
 
 
@@ -825,6 +915,12 @@ async def start_finetune(body: Dict[str, Any] = Body(default={})) -> Dict[str, A
             chat_row = build_training_sample_from_correction(
                 run_row=sample,
                 corrected_json=sample.get("corrected_fields") or {},
+                docling_data=sample.get("docling_data") or None,
+                image_paths=sample.get("image_paths") or [],
+                surya_page_texts=sample.get("surya_page_texts") or [],
+                page_count=sample.get("page_count") or None,
+                preprocessing={"ocr_engine": "surya", "layout_engine": "docling", "dpi": 300}
+                if sample.get("image_paths") else {},
             )
             outcome = append_training_sample(
                 root=feedback_dir,
