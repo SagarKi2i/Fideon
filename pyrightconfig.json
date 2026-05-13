@@ -1,3 +1,5 @@
 {
-  "ignore": ["ai-ml"]
+  "extraPaths": ["ai-ml"],
+  "reportMissingModuleSource": "none",
+  "reportMissingImports": "none"
 }

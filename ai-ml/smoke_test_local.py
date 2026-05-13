@@ -91,8 +91,9 @@ _run("acord_strict_models: canonical_acord_form_key normalisation", t1)
 def t2():
     from fine_tuning.continuous_learning.ingest import (
         build_training_sample_from_correction,
-        SYSTEM_PROMPT,
+        get_universal_system_prompt,
     )
+    from fine_tuning.dataset.dataset_builder import parse_assistant_fields
 
     row = {
         "form_type":        "25",
@@ -108,18 +109,19 @@ def t2():
     )
 
     msgs = sample["messages"]
-    assert len(msgs) == 3,                              "must have 3 messages"
-    assert msgs[0]["role"] == "system",                 "first role=system"
-    assert msgs[1]["role"] == "user",                   "second role=user"
-    assert msgs[2]["role"] == "assistant",              "third role=assistant"
-    assert msgs[0]["content"] == SYSTEM_PROMPT,         "system prompt matches"
-    assert "ACORD Form 25" in msgs[1]["content"],       "form type in user content"
-    assert "Wrong Agency"  in msgs[1]["content"],       "OCR text in user content"
+    assert len(msgs) == 3,                                    "must have 3 messages"
+    assert msgs[0]["role"] == "system",                       "first role=system"
+    assert msgs[1]["role"] == "user",                         "second role=user"
+    assert msgs[2]["role"] == "assistant",                    "third role=assistant"
+    assert msgs[0]["content"] == get_universal_system_prompt(), "system prompt matches"
+    assert "ACORD Form 25" in msgs[1]["content"],             "form type in user content"
+    assert "Wrong Agency"  in msgs[1]["content"],             "OCR text in user content"
 
-    out = json.loads(msgs[2]["content"])
-    assert out["agency_name"]   == "Correct Agency",   "correction applied"
-    assert out["policy_number"] == "POL-001",          "correction applied"
-    assert sample["domain"]     == "insurance",        "domain tag"
+    out = parse_assistant_fields(msgs[2]["content"])
+    assert out is not None,                                   "assistant content must parse"
+    assert out["agency_name"]   == "Correct Agency",         "correction applied"
+    assert out["policy_number"] == "POL-001",                "correction applied"
+    assert sample["domain"]     == "insurance",              "domain tag"
 
 _run("ingest: build_training_sample_from_correction", t2)
 
@@ -404,7 +406,7 @@ def t9():
         labels = [-100] * len(prefix_ids) + list(completion_ids)
         return full_ids, labels
 
-    from fine_tuning.continuous_learning.ingest import build_training_sample_from_correction, SYSTEM_PROMPT
+    from fine_tuning.continuous_learning.ingest import build_training_sample_from_correction
 
     row = {
         "form_type": "25", "raw_text": "Agency: Test",
@@ -543,6 +545,8 @@ def t10():
         corrected_json=corrected_fields,
     )
 
+    from fine_tuning.dataset.dataset_builder import parse_assistant_fields
+
     msgs = sample["messages"]
     assert len(msgs) == 3,                                         "3-message structure"
     assert msgs[0]["role"] == "system"
@@ -555,8 +559,9 @@ def t10():
     assert "POLICY987654321"      in msgs[1]["content"],           "policy number in OCR text"
     assert "Ventrasys Ltd."       in msgs[1]["content"],           "named insured in OCR text"
 
-    # Assistant turn: valid JSON with corrections applied over originals
-    out = json.loads(msgs[2]["content"])
+    # Assistant turn: extract fields via parse_assistant_fields (handles FIELDS:\n{json} format)
+    out = parse_assistant_fields(msgs[2]["content"])
+    assert out is not None,                                        "assistant content must parse"
 
     assert out["agency_address"]  == "56 Street, rakab ganj, Agra, UP 282002", "address corrected"
     assert out["deposit"]         == "$12000",                     "deposit corrected"

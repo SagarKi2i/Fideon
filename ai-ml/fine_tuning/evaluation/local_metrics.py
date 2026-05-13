@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from fine_tuning.continuous_learning.ingest import SYSTEM_PROMPT as _EVAL_SYSTEM_PROMPT
+from fine_tuning.continuous_learning.ingest import get_universal_system_prompt as _get_eval_system_prompt
 
 
 @dataclass
@@ -61,7 +61,7 @@ def _generate_response(model: Any, processor: Any, user_content: str, max_new_to
     import torch
 
     msgs = [
-        {"role": "system", "content": _EVAL_SYSTEM_PROMPT},
+        {"role": "system", "content": _get_eval_system_prompt()},
         {"role": "user",   "content": user_content},
     ]
     text_input = processor.apply_chat_template(
